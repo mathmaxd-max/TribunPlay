@@ -1,0 +1,17 @@
+{
+  "name": "tribunplay-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-11",
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GAME_ROOM",
+        "class_name": "GameRoom",
+        "script_name": "tribunplay-server"
+      }
+    ]
+  }
+}
