@@ -1,5 +1,5 @@
 {
-  "name": "tribunplay",
+  "name": "tribun",
   "version": "0.1.0",
   "private": true,
   "workspaces": [
@@ -7,7 +7,10 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=apps/web",
-    "build": "npm run build --workspaces --if-present"
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:server": "npm run dev --workspace=apps/server",
+    "build:web": "npm run build --workspace=apps/web",
+    "deploy:server": "npm run deploy --workspace=apps/server",
+    "lint": "echo 'Linting not configured for MVP'"
   }
 }
