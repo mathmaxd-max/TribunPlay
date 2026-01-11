@@ -1,0 +1,23 @@
+{
+  "name": "@tribunplay/server",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker + Durable Object server for Tribun multiplayer",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@tribunplay/engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240125.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^3.0.0"
+  }
+}
