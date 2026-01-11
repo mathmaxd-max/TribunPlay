@@ -1,0 +1,17 @@
+{
+  "initialTurn": 0,
+  "startingPlayerColor": 1,
+  "boardBytesB64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwQAAAAAAAAAAAAAABEIAAAAAAAAAAAAAgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+  "clocksMs": {
+    "black": 600000,
+    "white": 600000
+  },
+  "drawOfferBy": null,
+  "timeControl": {
+    "initialMs": 600000,
+    "bufferMs": 5000,
+    "incrementMs": 2000,
+    "maxGameMs": null
+  },
+  "notes": "Example only. Initial setup is game-configurable; replace boardBytesB64 with your actual starting position."
+}
