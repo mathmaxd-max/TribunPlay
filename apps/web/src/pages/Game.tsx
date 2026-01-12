@@ -457,10 +457,296 @@ export default function Game() {
     }
   };
 
+  // Helper function to get neighbor cid from center and direction
+  const getNeighborCidFromCenter = (centerCid: number, dir: number): number | null => {
+    try {
+      const { x, y } = engine.decodeCoord(centerCid);
+      const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
+      const [dx, dy] = neighborVectors[dir];
+      return engine.encodeCoord(x + dx, y + dy);
+    } catch {
+      return null;
+    }
+  };
+
+  // Helper function to round down invalid heights (matches engine logic)
+  const roundDownInvalidHeight = (h: number): engine.Height => {
+    if (h <= 0) return 0;
+    if (h === 5) return 4;
+    if (h === 7) return 6;
+    if (h >= 9) return 8;
+    if (h === 1 || h === 2 || h === 3 || h === 4 || h === 6 || h === 8) {
+      return h as engine.Height;
+    }
+    // For other invalid values, round down to nearest valid
+    if (h < 4) return h as engine.Height;
+    if (h < 6) return 4;
+    if (h < 8) return 6;
+    return 8;
+  };
+
+  // Helper function to normalize a unit (simplified version for preview)
+  const normalizeUnitForPreview = (unit: engine.Unit): engine.Unit | null => {
+    // Step 1: Round down invalid heights
+    let p = roundDownInvalidHeight(unit.p);
+    let s = roundDownInvalidHeight(unit.s);
+    
+    // Step 2: Enforce SP
+    if (s > 0 && (p > 4 || 2 * p < s)) {
+      p = 0;
+    }
+    
+    // Step 3: Liberation
+    if (p === 0 && s > 0) {
+      const newP = roundDownInvalidHeight(s);
+      return {
+        color: unit.color === 0 ? 1 : 0,
+        tribun: false,
+        p: newP,
+        s: 0,
+      };
+    }
+    
+    // Final check: empty unit
+    if (p === 0 && s === 0) return null;
+    
+    return { ...unit, p, s };
+  };
+
+  // Preview for Empty state (combine/sym-combine) - works even if illegal
+  const getEmptyStatePreview = (): engine.State | null => {
+    if (!gameState || uiState.type !== 'empty') return null;
+    
+    try {
+      const newBoard = new Uint8Array(gameState.board);
+      const centerCid = uiState.centerCid;
+      
+      // Get participating donors (donors with donation > 0)
+      const participatingDonors: Array<{ cid: number; donate: number; unit: engine.Unit }> = [];
+      const donors = engine.getEmptyStateDonors(centerCid, gameState);
+      
+      for (const [cid, donorInfo] of donors.entries()) {
+        const hDisp = emptyDonors.get(cid) ?? donorInfo.actualPrimary;
+        const donate = donorInfo.actualPrimary - hDisp;
+        if (donate > 0) {
+          const unit = engine.unitByteToUnit(gameState.board[cid]);
+          if (unit) {
+            participatingDonors.push({ cid, donate, unit });
+          }
+        }
+      }
+      
+      if (participatingDonors.length === 0) return null;
+      
+      // Determine combine type
+      if (participatingDonors.length === 2) {
+        // 2-donor combine
+        const [donorA, donorB] = participatingDonors;
+        const newPrimary = donorA.donate + donorB.donate;
+        const hasTribun = donorA.unit.tribun || donorB.unit.tribun;
+        
+        const combinedUnit: engine.Unit = {
+          color: gameState.turn,
+          tribun: hasTribun,
+          p: roundDownInvalidHeight(newPrimary),
+          s: 0,
+        };
+        const normalized = normalizeUnitForPreview(combinedUnit);
+        if (normalized) {
+          newBoard[centerCid] = engine.unitToUnitByte(normalized);
+        }
+        
+        // Update donors
+        const newDonorA: engine.Unit = {
+          ...donorA.unit,
+          p: Math.max(0, donorA.unit.p - donorA.donate) as engine.Height,
+          tribun: donorA.unit.tribun && donorA.donate === donorA.unit.p ? false : donorA.unit.tribun,
+        };
+        const normA = normalizeUnitForPreview(newDonorA);
+        newBoard[donorA.cid] = normA ? engine.unitToUnitByte(normA) : 0;
+        
+        const newDonorB: engine.Unit = {
+          ...donorB.unit,
+          p: Math.max(0, donorB.unit.p - donorB.donate) as engine.Height,
+          tribun: donorB.unit.tribun && donorB.donate === donorB.unit.p ? false : donorB.unit.tribun,
+        };
+        const normB = normalizeUnitForPreview(newDonorB);
+        newBoard[donorB.cid] = normB ? engine.unitToUnitByte(normB) : 0;
+      } else if (participatingDonors.length === 3 || participatingDonors.length === 6) {
+        // Sym-combine
+        const donate = participatingDonors[0].donate; // All donate the same amount
+        const newPrimary = donate * participatingDonors.length;
+        
+        const combinedUnit: engine.Unit = {
+          color: gameState.turn,
+          tribun: false,
+          p: roundDownInvalidHeight(newPrimary),
+          s: 0,
+        };
+        const normalized = normalizeUnitForPreview(combinedUnit);
+        if (normalized) {
+          newBoard[centerCid] = engine.unitToUnitByte(normalized);
+        }
+        
+        // Update donors
+        for (const donor of participatingDonors) {
+          const newDonor: engine.Unit = {
+            ...donor.unit,
+            p: Math.max(0, donor.unit.p - donate) as engine.Height,
+          };
+          const normDonor = normalizeUnitForPreview(newDonor);
+          newBoard[donor.cid] = normDonor ? engine.unitToUnitByte(normDonor) : 0;
+        }
+      } else if (participatingDonors.length === 1) {
+        // Single donor (illegal, but show preview anyway)
+        const donor = participatingDonors[0];
+        const newPrimary = donor.donate;
+        const hasTribun = donor.unit.tribun;
+        
+        const combinedUnit: engine.Unit = {
+          color: gameState.turn,
+          tribun: hasTribun,
+          p: roundDownInvalidHeight(newPrimary),
+          s: 0,
+        };
+        const normalized = normalizeUnitForPreview(combinedUnit);
+        if (normalized) {
+          newBoard[centerCid] = engine.unitToUnitByte(normalized);
+        }
+        
+        // Update donor
+        const newDonor: engine.Unit = {
+          ...donor.unit,
+          p: Math.max(0, donor.unit.p - donor.donate) as engine.Height,
+          tribun: donor.unit.tribun && donor.donate === donor.unit.p ? false : donor.unit.tribun,
+        };
+        const normDonor = normalizeUnitForPreview(newDonor);
+        newBoard[donor.cid] = normDonor ? engine.unitToUnitByte(normDonor) : 0;
+      }
+      
+      return {
+        ...gameState,
+        board: newBoard,
+      };
+    } catch (error) {
+      return null;
+    }
+  };
+
+  // Preview for Own.Secondary state (split/backstabb) - directly from allocations
+  const getOwnSecondaryPreview = (): engine.State | null => {
+    if (!gameState || uiState.type !== 'own_secondary') return null;
+    
+    try {
+      const newBoard = new Uint8Array(gameState.board);
+      const originCid = uiState.originCid;
+      const originUnit = engine.unitByteToUnit(gameState.board[originCid]);
+      if (!originUnit) return null;
+      
+      const H0 = originUnit.p;
+      const totalAllocated = secondaryAllocations.reduce((a, b) => a + b, 0);
+      const remainder = H0 - totalAllocated;
+      
+      // Check for backstabb (full primary to exactly one neighbor)
+      if (totalAllocated === H0 && originUnit.s > 0) {
+        const nonzeroCount = secondaryAllocations.filter(a => a > 0).length;
+        if (nonzeroCount === 1) {
+          const dir = secondaryAllocations.findIndex(a => a > 0);
+          const { x: ox, y: oy } = engine.decodeCoord(originCid);
+          const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
+          const [dx, dy] = neighborVectors[dir];
+          try {
+            const targetCid = engine.encodeCoord(ox + dx, oy + dy);
+            // Place primary on target, destroy secondary
+            const newUnit: engine.Unit = {
+              color: originUnit.color,
+              tribun: originUnit.tribun,
+              p: originUnit.p,
+              s: 0,
+            };
+            newBoard[targetCid] = engine.unitToUnitByte(newUnit);
+            newBoard[originCid] = 0;
+          } catch {
+            // Invalid coordinate
+          }
+        }
+      } else {
+        // Split: place allocations on adjacent tiles
+        const { x: ox, y: oy } = engine.decodeCoord(originCid);
+        const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
+        
+        for (let dir = 0; dir < 6; dir++) {
+          if (secondaryAllocations[dir] > 0) {
+            const [dx, dy] = neighborVectors[dir];
+            try {
+              const targetCid = engine.encodeCoord(ox + dx, oy + dy);
+              const targetUnit = engine.unitByteToUnit(newBoard[targetCid]);
+              if (targetUnit === null) {
+                // Place unit with allocation height
+                const splitUnit: engine.Unit = {
+                  color: originUnit.color,
+                  tribun: false,
+                  p: roundDownInvalidHeight(secondaryAllocations[dir]),
+                  s: 0,
+                };
+                const normalized = normalizeUnitForPreview(splitUnit);
+                if (normalized) {
+                  newBoard[targetCid] = engine.unitToUnitByte(normalized);
+                }
+              }
+            } catch {
+              // Invalid coordinate, skip
+            }
+          }
+        }
+        
+        // Update origin with remainder
+        if (remainder > 0) {
+          const remainingUnit: engine.Unit = {
+            ...originUnit,
+            p: roundDownInvalidHeight(remainder),
+          };
+          const normalized = normalizeUnitForPreview(remainingUnit);
+          newBoard[originCid] = normalized ? engine.unitToUnitByte(normalized) : 0;
+        } else {
+          // Origin becomes empty or has secondary
+          if (originUnit.s > 0) {
+            const remainingUnit: engine.Unit = {
+              color: originUnit.color,
+              tribun: false,
+              p: 0,
+              s: originUnit.s,
+            };
+            const normalized = normalizeUnitForPreview(remainingUnit);
+            newBoard[originCid] = normalized ? engine.unitToUnitByte(normalized) : 0;
+          } else {
+            newBoard[originCid] = 0;
+          }
+        }
+      }
+      
+      return {
+        ...gameState,
+        board: newBoard,
+      };
+    } catch (error) {
+      return null;
+    }
+  };
+
   // Get preview state by applying pending action
   const getPreviewState = (): engine.State | null => {
     if (!gameState || !groupedMoves) return null;
     
+    // For Empty and Own.Secondary, use direct preview construction
+    if (uiState.type === 'empty') {
+      return getEmptyStatePreview();
+    }
+    if (uiState.type === 'own_secondary') {
+      return getOwnSecondaryPreview();
+    }
+    
+    // For other states, use existing getPendingAction logic
     const pendingAction = getPendingAction();
     if (pendingAction === null) return null;
     
@@ -469,7 +755,7 @@ export default function Game() {
       const previewState = engine.applyAction(gameState, pendingAction);
       return previewState;
     } catch (error) {
-      // If action can't be applied (shouldn't happen for valid pending actions), return null
+      // If action can't be applied, return null
       return null;
     }
   };
