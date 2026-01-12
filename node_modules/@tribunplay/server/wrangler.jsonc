@@ -20,6 +20,5 @@
       "database_name": "tribunplay-db",
       "database_id": "placeholder-id"
     }
-  ],
-  "migrations_dir": "./migrations"
+  ]
 }

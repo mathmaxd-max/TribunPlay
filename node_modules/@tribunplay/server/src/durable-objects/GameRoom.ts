@@ -11,6 +11,9 @@ export class GameRoom implements DurableObject {
 	private state: DurableObjectState;
 	private env: Env;
 	
+	// Game ID (stored after validation)
+	private gameId: string | null = null;
+	
 	// Game state
 	private gameState: engine.State | null = null;
 	private legalSet: Set<number> = new Set();
@@ -61,6 +64,10 @@ export class GameRoom implements DurableObject {
 		
 		// Get game ID from request header or DO name
 		const gameId = request.headers.get("X-Game-Id") || (this.state.id as any).name || this.state.id.toString();
+		
+		// Store gameId for use in loadGameState
+		this.gameId = gameId;
+		
 		const game = await this.env.DB.prepare(
 			"SELECT black_token, white_token, status FROM games WHERE id = ?"
 		).bind(gameId).first<{
@@ -118,8 +125,13 @@ export class GameRoom implements DurableObject {
 	}
 
 	private async loadGameState(): Promise<void> {
-		// Get game ID from DO name (set via idFromName)
-		const gameId = (this.state.id as any).name || this.state.id.toString();
+		// Use stored gameId (set during WebSocket connection validation)
+		if (!this.gameId) {
+			// Fallback: try to get from DO name
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+		
+		const gameId = this.gameId;
 		
 		// Load game from DB
 		const game = await this.env.DB.prepare(
@@ -247,7 +259,11 @@ export class GameRoom implements DurableObject {
 		const newState = engine.applyAction(this.gameState, actionWord);
 		
 		// Persist to DB
-		const gameId = (this.state.id as any).name || this.state.id.toString();
+		if (!this.gameId) {
+			// Fallback: try to get from DO name
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+		const gameId = this.gameId;
 		const actorColor = role === "spectator" ? null : (role === "black" ? 0 : 1);
 		
 		await this.env.DB.prepare(
