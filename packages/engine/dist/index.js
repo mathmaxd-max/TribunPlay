@@ -1339,4 +1339,6 @@ export function createInitialBoard() {
     }
     return board;
 }
+// Export UI backend functions
+export * from './ui-backend';
 //# sourceMappingURL=index.js.map

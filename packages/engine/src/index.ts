@@ -1520,3 +1520,6 @@ export function createInitialBoard(): Uint8Array {
   
   return board;
 }
+
+// Export UI backend functions
+export * from './ui-backend';
