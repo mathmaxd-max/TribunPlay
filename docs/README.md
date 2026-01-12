@@ -38,6 +38,7 @@ It is written to be:
 - [`ui/01-fsm-overview.md`](ui/01-fsm-overview.md)
 - [`ui/02-fsm-state-details.md`](ui/02-fsm-state-details.md)
 - [`ui/03-fsm-examples.md`](ui/03-fsm-examples.md)
+- [`ui/04-hexagon-coloring.md`](ui/04-hexagon-coloring.md)
 
 ### Examples
 - [`examples/01-action-examples.md`](examples/01-action-examples.md)

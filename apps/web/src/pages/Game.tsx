@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import * as engine from '@tribunplay/engine';
+import { getHexagonColor, getBaseColor, type HexagonState } from '../hexagonColors';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -23,6 +24,7 @@ export default function Game() {
   const [error, setError] = useState<string | null>(null);
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
+  const [hoveredCid, setHoveredCid] = useState<number | null>(null);
 
   useEffect(() => {
     if (!boardViewportRef.current) return;
@@ -274,19 +276,17 @@ export default function Game() {
       const hexX = centerX - outerHexWidth / 2 - minPixelX;
       const hexY = centerY - outerHexHeight / 2 - minPixelY;
 
-      // Determine tile color based on board coloring
-      // (0,0) is gray, (1,1) is black, (-1,-1) is white
-      // No two tiles of the same color touch (3-coloring of hex grid)
-      // Using pattern: colorIndex = ((2*x - y) % 3 + 3) % 3
-      const colorIndex = ((2 * x - y) % 3 + 3) % 3;
-      let tileColor: string;
-      if (colorIndex === 0) {
-        tileColor = '#9460FC'; // gray
-      } else if (colorIndex === 1) {
-        tileColor = '#55369E'; // black
-      } else {
-        tileColor = '#E7AFFF'; // white
+      // Determine hexagon state and color
+      const baseColor = getBaseColor(x, y);
+      let hexagonState: HexagonState = 'default';
+      
+      if (hoveredCid === cid && isActive && isLegal && unit) {
+        hexagonState = 'interactable';
+      } else if (isActive && isLegal && unit) {
+        hexagonState = 'selectable';
       }
+      
+      const tileColor = getHexagonColor(baseColor, hexagonState);
 
       const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
       
@@ -308,11 +308,13 @@ export default function Game() {
             if (isActive && isLegal && unit) {
               e.currentTarget.style.transform = 'scale(1.1)';
               e.currentTarget.style.zIndex = '10';
+              setHoveredCid(cid);
             }
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.transform = 'scale(1)';
             e.currentTarget.style.zIndex = '1';
+            setHoveredCid(null);
           }}
           onClick={() => {
             if (isActive && isLegal && unit) {
