@@ -536,30 +536,72 @@ export default function Game() {
     // Determine clickable and highlighted tiles using UI backend
     // Use actual gameState for UI logic, not preview state
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
-    let clickableTiles: number[] = [];
-    let highlightedTiles: number[] = [];
+    
+    // Get idle clickable tiles (for selectable state in all states)
+    const idleClickable = isActive && groupedMoves 
+      ? [...groupedMoves.idleClickable.enemy, 
+         ...groupedMoves.idleClickable.empty, 
+         ...groupedMoves.idleClickable.own]
+      : [];
+    
+    // Determine tile states based on current UI state
     let selectedTiles: number[] = [];
+    let interactableTiles: number[] = [];
+    let selectableTiles: number[] = [];
     
     if (isActive && groupedMoves) {
-      clickableTiles = engine.getClickableTiles(gameState, uiState, groupedMoves);
-      
-      // Determine selected tiles based on UI state
       switch (uiState.type) {
+        case 'idle':
+          selectableTiles = idleClickable;
+          break;
+          
         case 'enemy':
           selectedTiles = [uiState.targetCid];
+          selectableTiles = idleClickable.filter(cid => cid !== uiState.targetCid);
           break;
+          
         case 'empty':
           selectedTiles = [uiState.centerCid];
+          // Get donor tiles (tiles that can donate to center)
+          const donors = engine.getEmptyStateDonors(uiState.centerCid, gameState);
+          interactableTiles = Array.from(donors.keys());
+          selectableTiles = idleClickable.filter(cid => 
+            cid !== uiState.centerCid && !interactableTiles.includes(cid)
+          );
           break;
+          
         case 'own_primary':
           selectedTiles = [uiState.originCid];
           if (uiState.targetCid !== null) {
             selectedTiles.push(uiState.targetCid);
           }
-          highlightedTiles = engine.getOwnPrimaryHighlightedTiles(uiState.originCid, groupedMoves);
+          // Get highlighted targets (move/kill/enslave/tribun targets), excluding origin
+          const highlighted = engine.getOwnPrimaryHighlightedTiles(uiState.originCid, groupedMoves);
+          interactableTiles = highlighted.filter(cid => cid !== uiState.originCid);
+          selectableTiles = idleClickable.filter(cid => 
+            !selectedTiles.includes(cid) && !interactableTiles.includes(cid)
+          );
           break;
+          
         case 'own_secondary':
           selectedTiles = [uiState.originCid];
+          // Get adjacent empty tiles (for split/backstabb targets)
+          const { x: ox, y: oy } = engine.decodeCoord(uiState.originCid);
+          const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
+          for (const [dx, dy] of neighborVectors) {
+            try {
+              const neighborCid = engine.encodeCoord(ox + dx, oy + dy);
+              const unit = engine.unitByteToUnit(gameState.board[neighborCid]);
+              if (unit === null) {
+                interactableTiles.push(neighborCid);
+              }
+            } catch {
+              // Invalid coordinate, skip
+            }
+          }
+          selectableTiles = idleClickable.filter(cid => 
+            cid !== uiState.originCid && !interactableTiles.includes(cid)
+          );
           break;
       }
     }
@@ -581,23 +623,24 @@ export default function Game() {
       const baseColor = getBaseColor(x, y);
       let hexagonState: HexagonState = 'default';
       
-      if (isActive && groupedMoves) {
-        const isClickable = clickableTiles.includes(cid);
-        const isHighlighted = highlightedTiles.includes(cid);
-        const isSelected = selectedTiles.includes(cid);
-        
-        // Priority: selected > highlighted > clickable > default
-        if (isSelected) {
-          hexagonState = 'selected';
-        } else if (isHighlighted) {
-          hexagonState = 'interactable';
-        } else if (isClickable) {
-          hexagonState = 'selectable';
-        }
+      // Apply priority: selected > interactable > selectable > default
+      if (selectedTiles.includes(cid)) {
+        hexagonState = 'selected';
+      } else if (interactableTiles.includes(cid)) {
+        hexagonState = 'interactable';
+      } else if (selectableTiles.includes(cid)) {
+        hexagonState = 'selectable';
+      } else {
+        hexagonState = 'default';
       }
       
       const tileColor = getHexagonColor(baseColor, hexagonState);
-      const isClickable = isActive && groupedMoves && clickableTiles.includes(cid);
+      // Tile is clickable if it's selectable or interactable or selected (and we're in an active state)
+      const isClickable = isActive && groupedMoves && (
+        selectedTiles.includes(cid) || 
+        interactableTiles.includes(cid) || 
+        selectableTiles.includes(cid)
+      );
 
       const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
       
