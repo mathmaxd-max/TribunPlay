@@ -25,6 +25,13 @@ export default function Game() {
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
   const [hoveredCid, setHoveredCid] = useState<number | null>(null);
+  
+  // UI State Machine
+  const [uiState, setUiState] = useState<engine.UIState>({ type: 'idle' });
+  const [groupedMoves, setGroupedMoves] = useState<engine.GroupedLegalMoves | null>(null);
+  const [optionIndex, setOptionIndex] = useState(0);
+  const [emptyDonors, setEmptyDonors] = useState<Map<number, number>>(new Map()); // cid -> displayed primary
+  const [secondaryAllocations, setSecondaryAllocations] = useState<number[]>([0, 0, 0, 0, 0, 0]);
 
   useEffect(() => {
     if (!boardViewportRef.current) return;
@@ -45,6 +52,19 @@ export default function Game() {
     observer.observe(element);
 
     return () => observer.disconnect();
+  }, [gameState]);
+
+  // Build grouped legal moves when gameState changes
+  useEffect(() => {
+    if (gameState) {
+      const grouped = engine.buildGroupedLegalMoves(gameState);
+      setGroupedMoves(grouped);
+      // Reset UI state to idle when game state changes (new turn)
+      setUiState({ type: 'idle' });
+      setOptionIndex(0);
+      setEmptyDonors(new Map());
+      setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+    }
   }, [gameState]);
 
   useEffect(() => {
@@ -136,6 +156,7 @@ export default function Game() {
               setGameState(currentState);
               const legal = engine.generateLegalActions(currentState);
               setLegalActions(legal);
+              // Grouped moves will be built by useEffect
             } else if (message.t === 'error') {
               setError(message.message);
             }
@@ -149,6 +170,11 @@ export default function Game() {
               const newState = engine.applyAction(prevState, actionWord);
               const legal = engine.generateLegalActions(newState);
               setLegalActions(legal);
+              // Reset UI state after action is applied
+              setUiState({ type: 'idle' });
+              setOptionIndex(0);
+              setEmptyDonors(new Map());
+              setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
               return newState;
             });
           }
@@ -197,10 +223,233 @@ export default function Game() {
       return;
     }
 
+    if (!groupedMoves || !engine.isActionLegal(action, groupedMoves)) {
+      setError('Action is not legal');
+      return;
+    }
+
     const buffer = new ArrayBuffer(4);
     const view = new DataView(buffer);
     view.setUint32(0, action, true);
     wsRef.current.send(buffer);
+    
+    // UI state will be reset when action is applied via WebSocket
+  };
+
+  const handleTileClick = (cid: number, d: number = 1) => {
+    if (!gameState || !groupedMoves) return;
+    
+    const isActive = gameState.turn === (role === 'black' ? 0 : 1);
+    if (!isActive) return;
+
+    switch (uiState.type) {
+      case 'idle': {
+        // Determine which state to enter
+        const newState = engine.getTileClickState(cid, gameState, groupedMoves);
+        if (newState) {
+          setUiState(newState);
+          setOptionIndex(0);
+        }
+        break;
+      }
+      
+      case 'enemy': {
+        if (cid === uiState.targetCid) {
+          // Cycle options
+          const options = engine.getEnemyOptions(uiState.targetCid, groupedMoves);
+          if (options.length > 0) {
+            const newIndex = ((uiState.optionIndex + d) % options.length + options.length) % options.length;
+            setOptionIndex(newIndex);
+            setUiState({ ...uiState, optionIndex: newIndex });
+          }
+        } else {
+          // Clicked non-clickable tile - reset to idle
+          setUiState({ type: 'idle' });
+          setOptionIndex(0);
+          setEmptyDonors(new Map());
+          setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+        }
+        break;
+      }
+      
+      case 'empty': {
+        if (cid === uiState.centerCid) {
+          // Click center - reset donors
+          setEmptyDonors(new Map());
+          setOptionIndex(0);
+        } else {
+          // Click donor - cycle donation
+          const donors = engine.getEmptyStateDonors(uiState.centerCid, gameState);
+          const donorInfo = donors.get(cid);
+          if (donorInfo) {
+            const validValues = engine.getValidDonationValues(cid, gameState);
+            // Initialize with actual primary if not already set
+            const currentDisp = emptyDonors.has(cid) ? emptyDonors.get(cid)! : donorInfo.actualPrimary;
+            const currentIndex = validValues.indexOf(currentDisp);
+            const nextIndex = ((currentIndex + d) % validValues.length + validValues.length) % validValues.length;
+            const newDisp = validValues[nextIndex];
+            
+            const newDonors = new Map(emptyDonors);
+            newDonors.set(cid, newDisp);
+            setEmptyDonors(newDonors);
+            
+            // Check for valid action
+            const options = engine.getEmptyStateOptions(uiState.centerCid, newDonors, gameState, groupedMoves);
+            if (options.length > 0) {
+              setOptionIndex(0);
+            }
+          } else {
+            // Clicked non-clickable tile - reset to idle
+            setUiState({ type: 'idle' });
+            setOptionIndex(0);
+            setEmptyDonors(new Map());
+            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+          }
+        }
+        break;
+      }
+      
+      case 'own_primary': {
+        if (cid === uiState.originCid) {
+          // Click origin
+          if (uiState.targetCid !== null) {
+            // Clear target selection
+            setUiState({ ...uiState, targetCid: null, optionIndex: 0 });
+          } else {
+            // Toggle to Secondary if available
+            const secondaryOpts = groupedMoves.ownSecondaryOptions.get(uiState.originCid);
+            if (secondaryOpts && (secondaryOpts.splits.length > 0 || secondaryOpts.backstabbs.length > 0)) {
+              setUiState({ type: 'own_secondary', originCid: uiState.originCid, allocations: [0, 0, 0, 0, 0, 0] });
+              setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+            }
+          }
+        } else {
+          // Click target
+          const highlighted = engine.getOwnPrimaryHighlightedTiles(uiState.originCid, groupedMoves);
+          if (highlighted.includes(cid)) {
+            if (uiState.targetCid === cid) {
+              // Cycle options for same target
+              const options = engine.getOwnPrimaryOptions(uiState.originCid, cid, groupedMoves);
+              if (options.length > 1) {
+                const newIndex = ((uiState.optionIndex + d) % options.length + options.length) % options.length;
+                setOptionIndex(newIndex);
+                setUiState({ ...uiState, optionIndex: newIndex });
+              }
+            } else {
+              // Select new target
+              const options = engine.getOwnPrimaryOptions(uiState.originCid, cid, groupedMoves);
+              if (options.length > 0) {
+                setUiState({ ...uiState, targetCid: cid, optionIndex: 0 });
+                setOptionIndex(0);
+              }
+            }
+          } else {
+            // Clicked non-clickable tile - reset to idle
+            setUiState({ type: 'idle' });
+            setOptionIndex(0);
+            setEmptyDonors(new Map());
+            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+          }
+        }
+        break;
+      }
+      
+      case 'own_secondary': {
+        if (cid === uiState.originCid) {
+          // Click origin
+          const hasAllocations = secondaryAllocations.some(a => a > 0);
+          if (hasAllocations) {
+            // Clear allocations
+            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+          } else {
+            // Toggle back to Primary
+            const primaryOpts = groupedMoves.ownPrimaryOptions.get(uiState.originCid);
+            if (primaryOpts && (primaryOpts.moves.length > 0 || primaryOpts.kills.length > 0 || 
+                primaryOpts.enslaves.length > 0 || primaryOpts.tribunAttack.length > 0)) {
+              setUiState({ type: 'own_primary', originCid: uiState.originCid, targetCid: null, optionIndex: 0 });
+            }
+          }
+        } else {
+          // Click neighbor - cycle allocation
+          // Find direction from origin to neighbor
+          let dir = -1;
+          const { x: ox, y: oy } = engine.decodeCoord(uiState.originCid);
+          const { x: nx, y: ny } = engine.decodeCoord(cid);
+          const dx = nx - ox;
+          const dy = ny - oy;
+          
+          // Check against neighbor vectors: [1,1], [1,0], [0,1], [-1,-1], [-1,0], [0,-1]
+          if (dx === 1 && dy === 1) dir = 0;
+          else if (dx === 1 && dy === 0) dir = 1;
+          else if (dx === 0 && dy === 1) dir = 2;
+          else if (dx === -1 && dy === -1) dir = 3;
+          else if (dx === -1 && dy === 0) dir = 4;
+          else if (dx === 0 && dy === -1) dir = 5;
+          
+          if (dir >= 0) {
+            const allowed = engine.getAllowedAllocationValues(uiState.originCid, dir, secondaryAllocations, gameState);
+            const current = secondaryAllocations[dir];
+            const currentIndex = allowed.indexOf(current);
+            const nextIndex = ((currentIndex + d) % allowed.length + allowed.length) % allowed.length;
+            const newValue = allowed[nextIndex];
+            
+            const newAllocations = [...secondaryAllocations];
+            newAllocations[dir] = newValue;
+            setSecondaryAllocations(newAllocations);
+          } else {
+            // Clicked non-clickable tile - reset to idle
+            setUiState({ type: 'idle' });
+            setOptionIndex(0);
+            setEmptyDonors(new Map());
+            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+          }
+        }
+        break;
+      }
+    }
+  };
+
+  const submitCurrentAction = () => {
+    if (!gameState || !groupedMoves) return;
+    
+    let action: number | null = null;
+    
+    switch (uiState.type) {
+      case 'enemy': {
+        const options = engine.getEnemyOptions(uiState.targetCid, groupedMoves);
+        if (options.length > 0 && uiState.optionIndex < options.length) {
+          action = options[uiState.optionIndex];
+        }
+        break;
+      }
+      
+      case 'empty': {
+        const options = engine.getEmptyStateOptions(uiState.centerCid, emptyDonors, gameState, groupedMoves);
+        if (options.length > 0 && optionIndex < options.length) {
+          action = options[optionIndex];
+        }
+        break;
+      }
+      
+      case 'own_primary': {
+        if (uiState.targetCid !== null) {
+          const options = engine.getOwnPrimaryOptions(uiState.originCid, uiState.targetCid, groupedMoves);
+          if (options.length > 0 && uiState.optionIndex < options.length) {
+            action = options[uiState.optionIndex];
+          }
+        }
+        break;
+      }
+      
+      case 'own_secondary': {
+        action = engine.getOwnSecondaryPendingAction(uiState.originCid, secondaryAllocations, groupedMoves, gameState);
+        break;
+      }
+    }
+    
+    if (action !== null) {
+      sendAction(action);
+    }
   };
 
   const renderBoard = () => {
@@ -258,13 +507,38 @@ export default function Game() {
       maxPixelY = Math.max(maxPixelY, bottomY);
     });
 
+    // Determine clickable and highlighted tiles using UI backend
+    const isActive = gameState.turn === (role === 'black' ? 0 : 1);
+    let clickableTiles: number[] = [];
+    let highlightedTiles: number[] = [];
+    let selectedTiles: number[] = [];
+    
+    if (isActive && groupedMoves) {
+      clickableTiles = engine.getClickableTiles(gameState, uiState, groupedMoves);
+      
+      // Determine selected tiles based on UI state
+      switch (uiState.type) {
+        case 'enemy':
+          selectedTiles = [uiState.targetCid];
+          break;
+        case 'empty':
+          selectedTiles = [uiState.centerCid];
+          break;
+        case 'own_primary':
+          selectedTiles = [uiState.originCid];
+          if (uiState.targetCid !== null) {
+            selectedTiles.push(uiState.targetCid);
+          }
+          highlightedTiles = engine.getOwnPrimaryHighlightedTiles(uiState.originCid, groupedMoves);
+          break;
+        case 'own_secondary':
+          selectedTiles = [uiState.originCid];
+          break;
+      }
+    }
+
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
       const unit = engine.unitByteToUnit(gameState.board[cid]);
-      const isActive = gameState.turn === (role === 'black' ? 0 : 1);
-      const isLegal = Array.from(legalActions).some((action) => {
-        const decoded = engine.decodeAction(action);
-        return decoded.opcode === 0 && decoded.fields.fromCid === cid;
-      });
 
       // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
       // Position of (0,0) is at (0,0)
@@ -276,17 +550,27 @@ export default function Game() {
       const hexX = centerX - outerHexWidth / 2 - minPixelX;
       const hexY = centerY - outerHexHeight / 2 - minPixelY;
 
-      // Determine hexagon state and color
+      // Determine hexagon state and color using UI backend
       const baseColor = getBaseColor(x, y);
       let hexagonState: HexagonState = 'default';
       
-      if (hoveredCid === cid && isActive && isLegal && unit) {
-        hexagonState = 'interactable';
-      } else if (isActive && isLegal && unit) {
-        hexagonState = 'selectable';
+      if (isActive && groupedMoves) {
+        const isClickable = clickableTiles.includes(cid);
+        const isHighlighted = highlightedTiles.includes(cid);
+        const isSelected = selectedTiles.includes(cid);
+        
+        // Priority: selected > highlighted > clickable > default
+        if (isSelected) {
+          hexagonState = 'selected';
+        } else if (isHighlighted) {
+          hexagonState = 'interactable';
+        } else if (isClickable) {
+          hexagonState = 'selectable';
+        }
       }
       
       const tileColor = getHexagonColor(baseColor, hexagonState);
+      const isClickable = isActive && groupedMoves && clickableTiles.includes(cid);
 
       const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
       
@@ -301,11 +585,11 @@ export default function Game() {
             height: `${outerHexHeight}px`,
             clipPath: hexClipPath,
             background: '#222',
-            cursor: isActive && isLegal && unit ? 'pointer' : 'default',
+            cursor: isClickable ? 'pointer' : 'default',
             transition: 'all 0.2s ease',
           }}
           onMouseEnter={(e) => {
-            if (isActive && isLegal && unit) {
+            if (isClickable) {
               e.currentTarget.style.transform = 'scale(1.1)';
               e.currentTarget.style.zIndex = '10';
               setHoveredCid(cid);
@@ -316,15 +600,32 @@ export default function Game() {
             e.currentTarget.style.zIndex = '1';
             setHoveredCid(null);
           }}
-          onClick={() => {
-            if (isActive && isLegal && unit) {
-              // For MVP, just show the first legal move from this tile
-              const moveAction = Array.from(legalActions).find((action) => {
-                const decoded = engine.decodeAction(action);
-                return decoded.opcode === 0 && decoded.fields.fromCid === cid;
-              });
-              if (moveAction) {
-                sendAction(moveAction);
+          onClick={(e) => {
+            if (groupedMoves) {
+              if (isClickable) {
+                // Left click: d = +1
+                handleTileClick(cid, 1);
+              } else if (uiState.type !== 'idle') {
+                // Click unselectable tile when not in idle - reset to idle
+                setUiState({ type: 'idle' });
+                setOptionIndex(0);
+                setEmptyDonors(new Map());
+                setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+              }
+            }
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            if (groupedMoves) {
+              if (isClickable) {
+                // Right click: d = -1
+                handleTileClick(cid, -1);
+              } else if (uiState.type !== 'idle') {
+                // Right click unselectable tile when not in idle - reset to idle
+                setUiState({ type: 'idle' });
+                setOptionIndex(0);
+                setEmptyDonors(new Map());
+                setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
               }
             }
           }}
@@ -440,6 +741,73 @@ export default function Game() {
             <div style={{ marginBottom: '10px' }}>
               <strong>Legal Actions:</strong> {legalActions.length}
             </div>
+            <div style={{ marginBottom: '10px' }}>
+              <strong>UI State:</strong> {uiState.type}
+              {uiState.type === 'enemy' && ` (target: ${uiState.targetCid}, option: ${uiState.optionIndex})`}
+              {uiState.type === 'empty' && ` (center: ${uiState.centerCid}, donors: ${emptyDonors.size})`}
+              {uiState.type === 'own_primary' && ` (origin: ${uiState.originCid}, target: ${uiState.targetCid ?? 'none'}, option: ${uiState.optionIndex})`}
+              {uiState.type === 'own_secondary' && ` (origin: ${uiState.originCid}, allocations: [${secondaryAllocations.join(',')}])`}
+            </div>
+            {(() => {
+              if (!gameState || !groupedMoves) return null;
+              let canSubmit = false;
+              let pendingAction: number | null = null;
+              
+              switch (uiState.type) {
+                case 'enemy': {
+                  const options = engine.getEnemyOptions(uiState.targetCid, groupedMoves);
+                  if (options.length > 0 && uiState.optionIndex < options.length) {
+                    canSubmit = true;
+                    pendingAction = options[uiState.optionIndex];
+                  }
+                  break;
+                }
+                case 'empty': {
+                  const options = engine.getEmptyStateOptions(uiState.centerCid, emptyDonors, gameState, groupedMoves);
+                  if (options.length > 0 && optionIndex < options.length) {
+                    canSubmit = true;
+                    pendingAction = options[optionIndex];
+                  }
+                  break;
+                }
+                case 'own_primary': {
+                  if (uiState.targetCid !== null) {
+                    const options = engine.getOwnPrimaryOptions(uiState.originCid, uiState.targetCid, groupedMoves);
+                    if (options.length > 0 && uiState.optionIndex < options.length) {
+                      canSubmit = true;
+                      pendingAction = options[uiState.optionIndex];
+                    }
+                  }
+                  break;
+                }
+                case 'own_secondary': {
+                  pendingAction = engine.getOwnSecondaryPendingAction(uiState.originCid, secondaryAllocations, groupedMoves, gameState);
+                  canSubmit = pendingAction !== null;
+                  break;
+                }
+              }
+              
+              if (canSubmit && pendingAction !== null && role !== 'spectator') {
+                return (
+                  <button
+                    onClick={() => submitCurrentAction()}
+                    style={{
+                      padding: '8px 16px',
+                      background: '#4CAF50',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    Submit Action
+                  </button>
+                );
+              }
+              return null;
+            })()}
           </>
         )}
       </div>

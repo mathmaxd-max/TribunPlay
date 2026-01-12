@@ -1,7 +1,7 @@
 import colorsConfig from './colors.json';
 
 export type HexagonBaseColor = 'b' | 'g' | 'w';
-export type HexagonState = 'default' | 'selectable' | 'interactable';
+export type HexagonState = 'default' | 'selectable' | 'selected' | 'interactable';
 
 interface ColorConfig {
   states: {
