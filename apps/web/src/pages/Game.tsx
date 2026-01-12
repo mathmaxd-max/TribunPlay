@@ -409,8 +409,8 @@ export default function Game() {
     }
   };
 
-  const submitCurrentAction = () => {
-    if (!gameState || !groupedMoves) return;
+  const getPendingAction = (): number | null => {
+    if (!gameState || !groupedMoves) return null;
     
     let action: number | null = null;
     
@@ -447,13 +447,39 @@ export default function Game() {
       }
     }
     
+    return action;
+  };
+
+  const submitCurrentAction = () => {
+    const action = getPendingAction();
     if (action !== null) {
       sendAction(action);
     }
   };
 
+  // Get preview state by applying pending action
+  const getPreviewState = (): engine.State | null => {
+    if (!gameState || !groupedMoves) return null;
+    
+    const pendingAction = getPendingAction();
+    if (pendingAction === null) return null;
+    
+    try {
+      // Apply the action to get preview state
+      const previewState = engine.applyAction(gameState, pendingAction);
+      return previewState;
+    } catch (error) {
+      // If action can't be applied (shouldn't happen for valid pending actions), return null
+      return null;
+    }
+  };
+
   const renderBoard = () => {
     if (!gameState) return null;
+
+    // Get preview state if there's a pending action
+    const previewState = getPreviewState();
+    const displayState = previewState || gameState;
 
     // Edge length of a tile is 1 unit, distance to center of edge is sqrt(3)/2 = d
     // innerHexSize represents the edge length (distance from center to vertex)
@@ -508,6 +534,7 @@ export default function Game() {
     });
 
     // Determine clickable and highlighted tiles using UI backend
+    // Use actual gameState for UI logic, not preview state
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     let clickableTiles: number[] = [];
     let highlightedTiles: number[] = [];
@@ -538,7 +565,7 @@ export default function Game() {
     }
 
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
-      const unit = engine.unitByteToUnit(gameState.board[cid]);
+      const unit = engine.unitByteToUnit(displayState.board[cid]);
 
       // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
       // Position of (0,0) is at (0,0)
@@ -749,45 +776,10 @@ export default function Game() {
               {uiState.type === 'own_secondary' && ` (origin: ${uiState.originCid}, allocations: [${secondaryAllocations.join(',')}])`}
             </div>
             {(() => {
-              if (!gameState || !groupedMoves) return null;
-              let canSubmit = false;
-              let pendingAction: number | null = null;
+              const pendingAction = getPendingAction();
+              const canSubmit = pendingAction !== null && role !== 'spectator';
               
-              switch (uiState.type) {
-                case 'enemy': {
-                  const options = engine.getEnemyOptions(uiState.targetCid, groupedMoves);
-                  if (options.length > 0 && uiState.optionIndex < options.length) {
-                    canSubmit = true;
-                    pendingAction = options[uiState.optionIndex];
-                  }
-                  break;
-                }
-                case 'empty': {
-                  const options = engine.getEmptyStateOptions(uiState.centerCid, emptyDonors, gameState, groupedMoves);
-                  if (options.length > 0 && optionIndex < options.length) {
-                    canSubmit = true;
-                    pendingAction = options[optionIndex];
-                  }
-                  break;
-                }
-                case 'own_primary': {
-                  if (uiState.targetCid !== null) {
-                    const options = engine.getOwnPrimaryOptions(uiState.originCid, uiState.targetCid, groupedMoves);
-                    if (options.length > 0 && uiState.optionIndex < options.length) {
-                      canSubmit = true;
-                      pendingAction = options[uiState.optionIndex];
-                    }
-                  }
-                  break;
-                }
-                case 'own_secondary': {
-                  pendingAction = engine.getOwnSecondaryPendingAction(uiState.originCid, secondaryAllocations, groupedMoves, gameState);
-                  canSubmit = pendingAction !== null;
-                  break;
-                }
-              }
-              
-              if (canSubmit && pendingAction !== null && role !== 'spectator') {
+              if (canSubmit) {
                 return (
                   <button
                     onClick={() => submitCurrentAction()}
