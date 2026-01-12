@@ -21,6 +21,29 @@ export default function Game() {
   const [gameState, setGameState] = useState<engine.State | null>(null);
   const [legalActions, setLegalActions] = useState<Uint32Array>(new Uint32Array());
   const [error, setError] = useState<string | null>(null);
+  const boardViewportRef = useRef<HTMLDivElement | null>(null);
+  const [boardViewportWidth, setBoardViewportWidth] = useState(0);
+
+  useEffect(() => {
+    if (!boardViewportRef.current) return;
+
+    const element = boardViewportRef.current;
+    const updateWidth = () => {
+      setBoardViewportWidth(element.clientWidth);
+    };
+
+    updateWidth();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateWidth);
+      return () => window.removeEventListener('resize', updateWidth);
+    }
+
+    const observer = new ResizeObserver(() => updateWidth());
+    observer.observe(element);
+
+    return () => observer.disconnect();
+  }, [gameState]);
 
   useEffect(() => {
     if (!code) {
@@ -181,29 +204,57 @@ export default function Game() {
   const renderBoard = () => {
     if (!gameState) return null;
 
-    const hexSize = 45; // Size of hexagon (distance from center to vertex)
-    const hexWidth = Math.sqrt(3) * hexSize;
-    const hexHeight = 2 * hexSize;
+    // Edge length of a tile is 1 unit, distance to center of edge is sqrt(3)/2 = d
+    // innerHexSize represents the edge length (distance from center to vertex)
+    const innerHexSize = 45;
+    const borderWidth = 2;
+    const spacingMultiplier = 0.98; // Add spacing between hexagons to prevent overlaps
+    const outerHexSize = innerHexSize + borderWidth;
+    const centerSize = outerHexSize * spacingMultiplier;
+    const d = Math.sqrt(3) / 2 * centerSize; // d = sqrt(3)/2 * size (scaled distance)
+    // For vertices (±1, 0), (±1/2, ±d) scaled by hexSize:
+    // Width: from -innerHexSize to +innerHexSize = 2*innerHexSize
+    // Height: from -d to +d = 2d = sqrt(3)*innerHexSize
+    const outerHexWidth = 2 * outerHexSize;
+    const outerHexHeight = Math.sqrt(3) * outerHexSize;
+    const innerHexWidth = 2 * innerHexSize;
+    const innerHexHeight = Math.sqrt(3) * innerHexSize;
+    const innerOffsetX = (outerHexWidth - innerHexWidth) / 2;
+    const innerOffsetY = (outerHexHeight - innerHexHeight) / 2;
 
-    // Calculate board bounds
-    let minX = Infinity, maxX = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
+    // Collect valid tiles
     const validTiles: Array<{ cid: number; x: number; y: number }> = [];
 
     for (let cid = 0; cid < 121; cid++) {
       if (engine.isValidTile(cid)) {
         const { x, y } = engine.decodeCoord(cid);
         validTiles.push({ cid, x, y });
-        minX = Math.min(minX, x);
-        maxX = Math.max(maxX, x);
-        minY = Math.min(minY, y);
-        maxY = Math.max(maxY, y);
       }
     }
 
-    // Calculate offset to center the board
-    const offsetX = -minX;
-    const offsetY = -minY;
+    // Calculate actual pixel bounds using correct coordinate conversion
+    // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = -x - y
+    // Position of (0,0) is at (0,0)
+    let minPixelX = Infinity, maxPixelX = -Infinity;
+    let minPixelY = Infinity, maxPixelY = -Infinity;
+
+    validTiles.forEach(({ x, y }) => {
+      // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
+      // Apply spacing multiplier to add gaps between hexagons
+      const z = y - x;
+      const centerX = (3 * z / 2) * centerSize;
+      const centerY = (x + y) * d; // d = sqrt(3)/2 * size (already scaled)
+      // Calculate actual left/top position of hexagon (outer div with border)
+      const leftX = centerX - outerHexWidth / 2;
+      const topY = centerY - outerHexHeight / 2;
+      const rightX = centerX + outerHexWidth / 2;
+      const bottomY = centerY + outerHexHeight / 2;
+      // Track bounds based on actual positions
+      minPixelX = Math.min(minPixelX, leftX);
+      maxPixelX = Math.max(maxPixelX, rightX);
+      minPixelY = Math.min(minPixelY, topY);
+      maxPixelY = Math.max(maxPixelY, bottomY);
+    });
 
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
       const unit = engine.unitByteToUnit(gameState.board[cid]);
@@ -213,16 +264,18 @@ export default function Game() {
         return decoded.opcode === 0 && decoded.fields.fromCid === cid;
       });
 
-      // Hexagon positioning using axial coordinate system
-      // Convert axial (x, y) to pixel coordinates
-      const displayX = x + offsetX;
-      const displayY = y + offsetY;
-      const hexX = hexSize * (Math.sqrt(3) * displayX + Math.sqrt(3) / 2 * displayY);
-      const hexY = hexSize * (3 / 2 * displayY);
+      // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
+      // Position of (0,0) is at (0,0)
+      // Apply spacing multiplier to add gaps between hexagons
+      const z = y - x;
+      const centerX = (3 * z / 2) * centerSize;
+      const centerY = (x + y) * d; // d = sqrt(3)/2 * size (already scaled)
+      // Calculate actual left/top position relative to container
+      const hexX = centerX - outerHexWidth / 2 - minPixelX;
+      const hexY = centerY - outerHexHeight / 2 - minPixelY;
 
       // Determine tile color based on board coloring
       // Center (0,0) is gray, (1,1) is black, (-1,-1) is white
-      const z = -x - y;
       let tileColor = '#d0d0d0'; // gray default
       if (x === 0 && y === 0) {
         tileColor = '#a0a0a0'; // gray
@@ -232,6 +285,8 @@ export default function Game() {
         tileColor = isBlackTile ? '#e8e8e8' : '#f5f5f5';
       }
 
+      const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
+      
       return (
         <div
           key={cid}
@@ -239,18 +294,11 @@ export default function Game() {
             position: 'absolute',
             left: `${hexX}px`,
             top: `${hexY}px`,
-            width: `${hexWidth}px`,
-            height: `${hexHeight}px`,
-            clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)',
-            background: unit ? (unit.color === 0 ? '#2c2c2c' : '#ffffff') : tileColor,
-            border: '2px solid #888',
+            width: `${outerHexWidth}px`,
+            height: `${outerHexHeight}px`,
+            clipPath: hexClipPath,
+            background: '#666',
             cursor: isActive && isLegal && unit ? 'pointer' : 'default',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '10px',
-            boxSizing: 'border-box',
             transition: 'all 0.2s ease',
           }}
           onMouseEnter={(e) => {
@@ -276,6 +324,20 @@ export default function Game() {
             }
           }}
         >
+          <div style={{
+            position: 'absolute',
+            left: `${innerOffsetX}px`,
+            top: `${innerOffsetY}px`,
+            width: `${innerHexWidth}px`,
+            height: `${innerHexHeight}px`,
+            clipPath: hexClipPath,
+            background: unit ? (unit.color === 0 ? '#2c2c2c' : '#ffffff') : tileColor,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '10px',
+          }}>
           {unit && (
             <div style={{
               fontSize: '14px',
@@ -294,25 +356,45 @@ export default function Game() {
           }}>
             {cid}
           </div>
+          </div>
         </div>
       );
     });
 
-    // Calculate board container size based on actual hex positions
-    const rangeX = maxX - minX;
-    const rangeY = maxY - minY;
-    const boardWidth = hexSize * (Math.sqrt(3) * (rangeX + 1) + Math.sqrt(3) / 2 * (rangeY + 1)) + hexWidth;
-    const boardHeight = hexSize * (3 / 2 * (rangeY + 1)) + hexHeight;
+    // Calculate board container size based on actual pixel bounds
+    // Account for full hexagon dimensions and borders
+    // Add small safety margin to ensure all hexagons fit (accounts for rounding and spacing)
+    const safetyMargin = 2;
+    const boardWidth = maxPixelX - minPixelX + safetyMargin;
+    const boardHeight = maxPixelY - minPixelY + safetyMargin;
+
+    const availableWidth = boardViewportWidth || boardWidth;
+    const scale = Math.min(1, availableWidth / boardWidth);
+    const scaledBoardHeight = boardHeight * scale;
 
     return (
-      <div style={{
-        position: 'relative',
-        width: `${boardWidth}px`,
-        height: `${boardHeight}px`,
-        margin: '20px auto',
-        padding: '10px',
-      }}>
-        {tiles}
+      <div
+        ref={boardViewportRef}
+        style={{
+          position: 'relative',
+          width: '100%',
+          height: `${scaledBoardHeight}px`,
+          overflow: 'hidden',
+          display: 'flex',
+          justifyContent: 'center',
+        }}
+      >
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: '50%',
+          width: `${boardWidth}px`,
+          height: `${boardHeight}px`,
+          transform: `translateX(-50%) scale(${scale})`,
+          transformOrigin: 'top center',
+        }}>
+          {tiles}
+        </div>
       </div>
     );
   };

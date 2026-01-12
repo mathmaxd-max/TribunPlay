@@ -5,7 +5,7 @@ Tribun is played on a hex grid with **radius 5** (edge length 6), totaling **91 
 
 A tile at coordinate `(x, y)` is **on board** iff:
 
-- Let `z = x - y`
+- Let `z = y - x`
 - `max(|x|, |y|, |z|) <= 5`
 
 This MUST be the canonical board validity rule.
@@ -53,7 +53,7 @@ Implementations SHOULD provide helper functions:
 export const R = 5;
 
 export function onBoard(x: number, y: number): boolean {
-  const z = x - y;
+  const z = y - x;
   return Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) <= R;
 }
 

@@ -24,7 +24,7 @@ export interface State {
 const R = 5;
 
 export function onBoard(x: number, y: number): boolean {
-  const z = x - y;
+  const z = y - x;
   return Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) <= R;
 }
 

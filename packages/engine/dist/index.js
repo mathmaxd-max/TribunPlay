@@ -3,7 +3,7 @@ import defaultPositionData from './default-position.json';
 // Coordinate encoding/decoding
 const R = 5;
 export function onBoard(x, y) {
-    const z = x - y;
+    const z = y - x;
     return Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) <= R;
 }
 export function encodeCoord(x, y) {
