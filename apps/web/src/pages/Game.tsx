@@ -300,7 +300,7 @@ export default function Game() {
             width: `${outerHexWidth}px`,
             height: `${outerHexHeight}px`,
             clipPath: hexClipPath,
-            background: '#666',
+            background: '#222',
             cursor: isActive && isLegal && unit ? 'pointer' : 'default',
             transition: 'all 0.2s ease',
           }}
@@ -357,7 +357,7 @@ export default function Game() {
             position: 'absolute',
             bottom: '4px',
             fontSize: '9px',
-            color: unit ? (unit.color === 0 ? '#aaa' : '#666') : '#999',
+            color: '#222',
             fontWeight: '500',
           }}>
             {cid}
