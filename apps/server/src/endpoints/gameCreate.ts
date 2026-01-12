@@ -47,6 +47,7 @@ export class GameCreate extends OpenAPIRoute {
     const gameId = crypto.randomUUID();
     const code = this.generateFriendCode();
     const token = crypto.randomUUID();
+    const playerId = crypto.randomUUID();
     
     // Create initial board (MVP: 2 units, one per side)
     const initialBoard = new Uint8Array(121);
@@ -60,12 +61,12 @@ export class GameCreate extends OpenAPIRoute {
     
     const initialTurn = 0; // Black starts
     
-    // Insert game into D1
+    // Insert game into D1, assigning creator to black
     await env.DB.prepare(
       `INSERT INTO games (
         id, code, status, created_at, initial_turn, turn, initial_board, ply,
-        time_control_json, starting_player_color
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        time_control_json, starting_player_color, black_player_id, black_token
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       gameId,
       code,
@@ -76,7 +77,9 @@ export class GameCreate extends OpenAPIRoute {
       initialBoard,
       0,
       JSON.stringify(c.req.valid("json")?.timeControl || {}),
-      0
+      0,
+      playerId,
+      token
     ).run();
     
     // Get WebSocket URL (for MVP, use relative path)

@@ -22,6 +22,10 @@ export default function Home() {
       }
       
       const data = await response.json();
+      // Store token and gameId for the creator
+      localStorage.setItem(`game_token_${data.code}`, data.token);
+      localStorage.setItem(`game_id_${data.code}`, data.gameId);
+      localStorage.setItem(`game_seat_${data.code}`, 'black');
       navigate(`/game/${data.code}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -51,7 +55,12 @@ export default function Home() {
       }
       
       const data = await response.json();
-      navigate(`/game/${code.trim().toUpperCase()}`);
+      // Store token and gameId for the joiner
+      const gameCode = code.trim().toUpperCase();
+      localStorage.setItem(`game_token_${gameCode}`, data.token);
+      localStorage.setItem(`game_id_${gameCode}`, data.gameId);
+      localStorage.setItem(`game_seat_${gameCode}`, data.seat);
+      navigate(`/game/${gameCode}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {

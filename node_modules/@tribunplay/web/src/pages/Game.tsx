@@ -32,31 +32,48 @@ export default function Game() {
 
     const connect = async () => {
       try {
-        // First, join the game via HTTP API
-        const joinResponse = await fetch('/api/game/join', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code }),
-        });
+        // Check if we already have a token for this game (from create or previous join)
+        const storedToken = localStorage.getItem(`game_token_${code}`);
+        const storedGameId = localStorage.getItem(`game_id_${code}`);
+        const storedSeat = localStorage.getItem(`game_seat_${code}`) as Role | null;
 
-        if (!joinResponse.ok) {
-          throw new Error('Failed to join game');
+        let gameId: string;
+        let token: string;
+        let seat: Role;
+
+        if (storedToken && storedGameId && storedSeat) {
+          // Use stored credentials (creator or previous joiner)
+          gameId = storedGameId;
+          token = storedToken;
+          seat = storedSeat;
+          setRole(seat);
+        } else {
+          // First time joining this game - call join API
+          const joinResponse = await fetch('/api/game/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+          });
+
+          if (!joinResponse.ok) {
+            throw new Error('Failed to join game');
+          }
+
+          const joinData = await joinResponse.json();
+          gameId = joinData.gameId;
+          token = joinData.token;
+          seat = joinData.seat;
+          setRole(seat);
+
+          // Store for future use
+          localStorage.setItem(`game_token_${code}`, token);
+          localStorage.setItem(`game_id_${code}`, gameId);
+          localStorage.setItem(`game_seat_${code}`, seat);
         }
-
-        const joinData = await joinResponse.json();
-        setRole(joinData.seat);
 
         // Connect WebSocket
-        // Use the wsUrl from the server, or construct it
-        let wsUrl = joinData.wsUrl;
-        if (wsUrl.startsWith('http://')) {
-          wsUrl = wsUrl.replace('http://', 'ws://');
-        }
-        if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
-          // Fallback: construct from current location
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          wsUrl = `${protocol}//${window.location.host}/ws/game/${joinData.gameId}?token=${joinData.token}`;
-        }
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/game/${gameId}?token=${token}`;
         const ws = new WebSocket(wsUrl);
 
         ws.binaryType = 'arraybuffer';
