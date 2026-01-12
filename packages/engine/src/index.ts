@@ -507,8 +507,10 @@ function getReachableTiles(
           const unit = unitByteToUnit(board[cid]);
           
           if (forAttack) {
-            // Attack: can only attack first occupied tile
+            // Attack: can only attack first occupied tile, and only if it contains an enemy unit
             if (unit !== null) {
+              // Only add if enemy (color check happens at caller level, but we can optimize here)
+              // Note: color is not available in this function, so we add it and filter later
               reachable.push(cid);
               break;
             }
@@ -1085,14 +1087,14 @@ export function applyAction(state: State, action: number): State {
         throw new Error(`Illegal DAMAGE: invalid target`);
       }
       
-      // Apply effective damage (already normalized)
+      // Apply effective damage (already normalized - MUST NOT re-run normalization)
       const newP = Math.max(0, targetUnit.p - effectiveDamage) as Height;
       const damagedUnit: Unit = {
         ...targetUnit,
         p: newP,
       };
-      const normalized = normalizeUnit(damagedUnit);
-      newBoard[targetCid] = normalized ? unitToUnitByte(normalized) : 0;
+      // Do NOT normalize - effective damage already encodes the final normalized outcome
+      newBoard[targetCid] = unitToUnitByte(damagedUnit);
       break;
     }
     
