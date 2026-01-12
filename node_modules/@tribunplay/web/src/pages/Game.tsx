@@ -340,16 +340,17 @@ export default function Game() {
           }}>
           {unit && (
             <div style={{
-              fontSize: '14px',
+              fontSize: '32px',
               fontWeight: 'bold',
               color: unit.color === 0 ? '#fff' : '#000',
-              marginBottom: '2px',
             }}>
               {unit.p}
               {unit.tribun && 'T'}
             </div>
           )}
           <div style={{
+            position: 'absolute',
+            bottom: '4px',
             fontSize: '9px',
             color: unit ? (unit.color === 0 ? '#aaa' : '#666') : '#999',
             fontWeight: '500',
