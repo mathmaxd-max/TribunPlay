@@ -181,73 +181,137 @@ export default function Game() {
   const renderBoard = () => {
     if (!gameState) return null;
 
-    const tiles: JSX.Element[] = [];
-    for (let cid = 0; cid < 121; cid++) {
-      try {
-        const { x, y } = engine.decodeCoord(cid);
-        const unit = engine.unitByteToUnit(gameState.board[cid]);
-        const isActive = gameState.turn === (role === 'black' ? 0 : 1);
-        const isLegal = Array.from(legalActions).some((action) => {
-          const decoded = engine.decodeAction(action);
-          return decoded.opcode === 0 && decoded.fields.fromCid === cid;
-        });
+    const hexSize = 45; // Size of hexagon (distance from center to vertex)
+    const hexWidth = Math.sqrt(3) * hexSize;
+    const hexHeight = 2 * hexSize;
 
-        tiles.push(
-          <div
-            key={cid}
-            style={{
-              width: '40px',
-              height: '40px',
-              border: '1px solid #ccc',
-              display: 'inline-block',
-              margin: '2px',
-              background: unit ? (unit.color === 0 ? '#333' : '#fff') : '#f0f0f0',
-              cursor: isActive && isLegal && unit ? 'pointer' : 'default',
-              position: 'relative',
-            }}
-            onClick={() => {
-              if (isActive && isLegal && unit) {
-                // For MVP, just show the first legal move from this tile
-                const moveAction = Array.from(legalActions).find((action) => {
-                  const decoded = engine.decodeAction(action);
-                  return decoded.opcode === 0 && decoded.fields.fromCid === cid;
-                });
-                if (moveAction) {
-                  sendAction(moveAction);
-                }
-              }
-            }}
-          >
-            {unit && (
-              <div style={{
-                position: 'absolute',
-                top: '50%',
-                left: '50%',
-                transform: 'translate(-50%, -50%)',
-                fontSize: '12px',
-              }}>
-                {unit.p}
-                {unit.tribun && 'T'}
-              </div>
-            )}
-            <div style={{
-              position: 'absolute',
-              bottom: '2px',
-              right: '2px',
-              fontSize: '8px',
-              color: '#666',
-            }}>
-              {x},{y}
-            </div>
-          </div>
-        );
-      } catch {
-        // Invalid tile, skip
+    // Calculate board bounds
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    const validTiles: Array<{ cid: number; x: number; y: number }> = [];
+
+    for (let cid = 0; cid < 121; cid++) {
+      if (engine.isValidTile(cid)) {
+        const { x, y } = engine.decodeCoord(cid);
+        validTiles.push({ cid, x, y });
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
       }
     }
 
+    // Calculate offset to center the board
+    const offsetX = -minX;
+    const offsetY = -minY;
+
+    const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
+      const unit = engine.unitByteToUnit(gameState.board[cid]);
+      const isActive = gameState.turn === (role === 'black' ? 0 : 1);
+      const isLegal = Array.from(legalActions).some((action) => {
+        const decoded = engine.decodeAction(action);
+        return decoded.opcode === 0 && decoded.fields.fromCid === cid;
+      });
+
+      // Hexagon positioning using axial coordinate system
+      // Convert axial (x, y) to pixel coordinates
+      const displayX = x + offsetX;
+      const displayY = y + offsetY;
+      const hexX = hexSize * (Math.sqrt(3) * displayX + Math.sqrt(3) / 2 * displayY);
+      const hexY = hexSize * (3 / 2 * displayY);
+
+      // Determine tile color based on board coloring
+      // Center (0,0) is gray, (1,1) is black, (-1,-1) is white
+      const z = -x - y;
+      let tileColor = '#d0d0d0'; // gray default
+      if (x === 0 && y === 0) {
+        tileColor = '#a0a0a0'; // gray
+      } else {
+        // Check if tile is black or white colored
+        const isBlackTile = (x + y) % 2 === 0;
+        tileColor = isBlackTile ? '#e8e8e8' : '#f5f5f5';
+      }
+
+      return (
+        <div
+          key={cid}
+          style={{
+            position: 'absolute',
+            left: `${hexX}px`,
+            top: `${hexY}px`,
+            width: `${hexWidth}px`,
+            height: `${hexHeight}px`,
+            clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)',
+            background: unit ? (unit.color === 0 ? '#2c2c2c' : '#ffffff') : tileColor,
+            border: '2px solid #888',
+            cursor: isActive && isLegal && unit ? 'pointer' : 'default',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '10px',
+            boxSizing: 'border-box',
+            transition: 'all 0.2s ease',
+          }}
+          onMouseEnter={(e) => {
+            if (isActive && isLegal && unit) {
+              e.currentTarget.style.transform = 'scale(1.1)';
+              e.currentTarget.style.zIndex = '10';
+            }
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = 'scale(1)';
+            e.currentTarget.style.zIndex = '1';
+          }}
+          onClick={() => {
+            if (isActive && isLegal && unit) {
+              // For MVP, just show the first legal move from this tile
+              const moveAction = Array.from(legalActions).find((action) => {
+                const decoded = engine.decodeAction(action);
+                return decoded.opcode === 0 && decoded.fields.fromCid === cid;
+              });
+              if (moveAction) {
+                sendAction(moveAction);
+              }
+            }
+          }}
+        >
+          {unit && (
+            <div style={{
+              fontSize: '14px',
+              fontWeight: 'bold',
+              color: unit.color === 0 ? '#fff' : '#000',
+              marginBottom: '2px',
+            }}>
+              {unit.p}
+              {unit.tribun && 'T'}
+            </div>
+          )}
+          <div style={{
+            fontSize: '9px',
+            color: unit ? (unit.color === 0 ? '#aaa' : '#666') : '#999',
+            fontWeight: '500',
+          }}>
+            {cid}
+          </div>
+        </div>
+      );
+    });
+
+    // Calculate board container size based on actual hex positions
+    const rangeX = maxX - minX;
+    const rangeY = maxY - minY;
+    const boardWidth = hexSize * (Math.sqrt(3) * (rangeX + 1) + Math.sqrt(3) / 2 * (rangeY + 1)) + hexWidth;
+    const boardHeight = hexSize * (3 / 2 * (rangeY + 1)) + hexHeight;
+
     return (
-      <div style={{ display: 'flex', flexWrap: 'wrap', maxWidth: '600px' }}>
+      <div style={{
+        position: 'relative',
+        width: `${boardWidth}px`,
+        height: `${boardHeight}px`,
+        margin: '20px auto',
+        padding: '10px',
+      }}>
         {tiles}
       </div>
     );
