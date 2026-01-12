@@ -275,14 +275,17 @@ export default function Game() {
       const hexY = centerY - outerHexHeight / 2 - minPixelY;
 
       // Determine tile color based on board coloring
-      // Center (0,0) is gray, (1,1) is black, (-1,-1) is white
-      let tileColor = '#d0d0d0'; // gray default
-      if (x === 0 && y === 0) {
-        tileColor = '#a0a0a0'; // gray
+      // (0,0) is gray, (1,1) is black, (-1,-1) is white
+      // No two tiles of the same color touch (3-coloring of hex grid)
+      // Using pattern: colorIndex = ((2*x - y) % 3 + 3) % 3
+      const colorIndex = ((2 * x - y) % 3 + 3) % 3;
+      let tileColor: string;
+      if (colorIndex === 0) {
+        tileColor = '#9460FC'; // gray
+      } else if (colorIndex === 1) {
+        tileColor = '#55369E'; // black
       } else {
-        // Check if tile is black or white colored
-        const isBlackTile = (x + y) % 2 === 0;
-        tileColor = isBlackTile ? '#e8e8e8' : '#f5f5f5';
+        tileColor = '#E7AFFF'; // white
       }
 
       const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
@@ -331,7 +334,7 @@ export default function Game() {
             width: `${innerHexWidth}px`,
             height: `${innerHexHeight}px`,
             clipPath: hexClipPath,
-            background: unit ? (unit.color === 0 ? '#2c2c2c' : '#ffffff') : tileColor,
+            background: tileColor,
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
@@ -340,9 +343,11 @@ export default function Game() {
           }}>
           {unit && (
             <div style={{
-              fontSize: '32px',
+              fontSize: '42px',
               fontWeight: 'bold',
-              color: unit.color === 0 ? '#fff' : '#000',
+              color: unit.color === 0 ? '#000' : '#fff',
+              WebkitTextStroke: unit.color === 0 ? '1px #fff' : '1px #000',
+              textStroke: unit.color === 0 ? '1px #fff' : '1px #000',
             }}>
               {unit.p}
               {unit.tribun && 'T'}
