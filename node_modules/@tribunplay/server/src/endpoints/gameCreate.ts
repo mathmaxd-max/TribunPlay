@@ -49,15 +49,8 @@ export class GameCreate extends OpenAPIRoute {
     const token = crypto.randomUUID();
     const playerId = crypto.randomUUID();
     
-    // Create initial board (MVP: 2 units, one per side)
-    const initialBoard = new Uint8Array(121);
-    // Place black unit at (0,0) - center (cid 60)
-    const blackUnit: engine.Unit = { color: 0, tribun: true, p: 1, s: 0 };
-    initialBoard[60] = engine.unitToUnitByte(blackUnit);
-    
-    // Place white unit at (1,1) (cid 72)
-    const whiteUnit: engine.Unit = { color: 1, tribun: true, p: 1, s: 0 };
-    initialBoard[72] = engine.unitToUnitByte(whiteUnit);
+    // Create initial board from default position
+    const initialBoard = engine.createInitialBoard();
     
     const initialTurn = 0; // Black starts
     

@@ -45,4 +45,5 @@ export declare function packBoard(board: Uint8Array): string;
 export declare function unpackBoard(b64: string): Uint8Array;
 export declare function generateLegalActions(state: State): Uint32Array;
 export declare function applyAction(state: State, action: number): State;
+export declare function createInitialBoard(): Uint8Array;
 //# sourceMappingURL=index.d.ts.map

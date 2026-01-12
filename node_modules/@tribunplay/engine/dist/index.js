@@ -1,7 +1,9 @@
+// Core types
+import defaultPositionData from './default-position.json';
 // Coordinate encoding/decoding
 const R = 5;
 export function onBoard(x, y) {
-    const z = -x - y;
+    const z = x - y;
     return Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) <= R;
 }
 export function encodeCoord(x, y) {
@@ -1297,5 +1299,42 @@ export function applyAction(state, action) {
         status: newStatus,
         winner: newWinner,
     };
+}
+// Create initial board from default position
+export function createInitialBoard() {
+    const board = new Uint8Array(121);
+    // Use default position from JSON file
+    const defaultPosition = defaultPositionData;
+    // Place black units
+    for (const [unitType, coords] of Object.entries(defaultPosition.black)) {
+        const height = unitType === "t1" ? 1 : parseInt(unitType);
+        const isTribun = unitType === "t1";
+        for (const [x, y] of coords) {
+            const cid = encodeCoord(x, y);
+            const unit = {
+                color: 0, // black
+                tribun: isTribun,
+                p: height,
+                s: 0,
+            };
+            board[cid] = unitToUnitByte(unit);
+        }
+    }
+    // Place white units
+    for (const [unitType, coords] of Object.entries(defaultPosition.white)) {
+        const height = unitType === "t1" ? 1 : parseInt(unitType);
+        const isTribun = unitType === "t1";
+        for (const [x, y] of coords) {
+            const cid = encodeCoord(x, y);
+            const unit = {
+                color: 1, // white
+                tribun: isTribun,
+                p: height,
+                s: 0,
+            };
+            board[cid] = unitToUnitByte(unit);
+        }
+    }
+    return board;
 }
 //# sourceMappingURL=index.js.map

@@ -1,4 +1,6 @@
 // Core types
+import defaultPositionData from './default-position.json';
+
 export type Color = 0 | 1;
 export type Height = 0 | 1 | 2 | 3 | 4 | 6 | 8;
 
@@ -22,7 +24,7 @@ export interface State {
 const R = 5;
 
 export function onBoard(x: number, y: number): boolean {
-  const z = -x - y;
+  const z = x - y;
   return Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) <= R;
 }
 
@@ -1461,4 +1463,58 @@ export function applyAction(state: State, action: number): State {
     status: newStatus,
     winner: newWinner,
   };
+}
+
+// Default position setup
+interface DefaultPosition {
+  black: {
+    [unitType: string]: number[][];
+  };
+  white: {
+    [unitType: string]: number[][];
+  };
+}
+
+// Create initial board from default position
+export function createInitialBoard(): Uint8Array {
+  const board = new Uint8Array(121);
+  
+  // Use default position from JSON file
+  const defaultPosition: DefaultPosition = defaultPositionData;
+  
+  // Place black units
+  for (const [unitType, coords] of Object.entries(defaultPosition.black)) {
+    const height = unitType === "t1" ? 1 : parseInt(unitType);
+    const isTribun = unitType === "t1";
+    
+    for (const [x, y] of coords) {
+      const cid = encodeCoord(x, y);
+      const unit: Unit = {
+        color: 0, // black
+        tribun: isTribun,
+        p: height as Height,
+        s: 0,
+      };
+      board[cid] = unitToUnitByte(unit);
+    }
+  }
+  
+  // Place white units
+  for (const [unitType, coords] of Object.entries(defaultPosition.white)) {
+    const height = unitType === "t1" ? 1 : parseInt(unitType);
+    const isTribun = unitType === "t1";
+    
+    for (const [x, y] of coords) {
+      const cid = encodeCoord(x, y);
+      const unit: Unit = {
+        color: 1, // white
+        tribun: isTribun,
+        p: height as Height,
+        s: 0,
+      };
+      board[cid] = unitToUnitByte(unit);
+    }
+  }
+  
+  return board;
 }
