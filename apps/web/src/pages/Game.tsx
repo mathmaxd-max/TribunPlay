@@ -40,6 +40,9 @@ const NEIGHBOR_VECTORS = [
   [0, -1],
 ] as const;
 
+const VALID_HEIGHTS = new Set([0, 1, 2, 3, 4, 6, 8]);
+const VALID_SPLIT_HEIGHTS = new Set([0, 1, 2, 3, 4, 6]);
+
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
@@ -308,6 +311,24 @@ export default function Game() {
       return null;
     }
     return null;
+  };
+
+  const isValidHeight = (value: number): boolean => VALID_HEIGHTS.has(value);
+
+  const isValidSplitHeight = (value: number): boolean => VALID_SPLIT_HEIGHTS.has(value);
+
+  const isSlavePropertySatisfied = (primary: number, secondary: number): boolean => {
+    if (secondary <= 0 || primary <= 0) return true;
+    return primary <= 4 && 2 * primary >= secondary;
+  };
+
+  const isDonationResultValid = (unit: engine.Unit, donate: number): boolean => {
+    if (donate <= 0 || donate > unit.p) return false;
+    if (unit.tribun && donate !== unit.p) return false;
+    const remaining = unit.p - donate;
+    if (!isValidHeight(remaining)) return false;
+    if (!isSlavePropertySatisfied(remaining, unit.s)) return false;
+    return true;
   };
 
   const getDonorDisplayHeight = (
@@ -630,6 +651,20 @@ export default function Game() {
 
     if (uiState.symmetry) {
       if (uiState.symmetry.donate <= 0) return null;
+      const totalDonation = uiState.symmetry.donate * uiState.symmetry.donorCids.length;
+      if (!isValidHeight(totalDonation) || totalDonation <= 0) return null;
+      let baseUnit: engine.Unit | null = null;
+      for (const donorCid of uiState.symmetry.donorCids) {
+        const unit = engine.unitByteToUnit(gameState.board[donorCid]);
+        if (!unit || unit.color !== gameState.turn) return null;
+        if (unit.tribun) return null;
+        if (!isDonationResultValid(unit, uiState.symmetry.donate)) return null;
+        if (!baseUnit) {
+          baseUnit = unit;
+        } else if (unit.p !== baseUnit.p || unit.s !== baseUnit.s || unit.color !== baseUnit.color) {
+          return null;
+        }
+      }
       return emptyCache.constructSymCombineAction(uiState.symmetry.mode, uiState.symmetry.donate);
     }
 
@@ -637,6 +672,13 @@ export default function Game() {
 
     if (participating.length === 2) {
       const [a, b] = participating;
+      const unitA = engine.unitByteToUnit(gameState.board[a.cid]);
+      const unitB = engine.unitByteToUnit(gameState.board[b.cid]);
+      if (!unitA || !unitB) return null;
+      if (!isDonationResultValid(unitA, a.donate)) return null;
+      if (!isDonationResultValid(unitB, b.donate)) return null;
+      const totalDonation = a.donate + b.donate;
+      if (!isValidHeight(totalDonation) || totalDonation <= 0) return null;
       return emptyCache.constructCombineAction(a.cid, b.cid, a.donate, b.donate);
     }
 
@@ -678,7 +720,22 @@ export default function Game() {
       return backstabbAction;
     }
 
-    if (allocations.some(value => value > 7)) {
+    if (allocations.some(value => value > 0 && value >= originUnit.p)) {
+      return null;
+    }
+
+    if (allocations.some(value => !isValidSplitHeight(value))) {
+      return null;
+    }
+
+    const totalAllocated = allocations.reduce((a, b) => a + b, 0);
+    const remainder = originUnit.p - totalAllocated;
+    if (remainder < 0 || !isValidHeight(remainder)) {
+      return null;
+    }
+
+    const unitCount = allocations.filter((value) => value > 0).length + (remainder > 0 ? 1 : 0);
+    if (unitCount < 2) {
       return null;
     }
 
