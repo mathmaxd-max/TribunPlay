@@ -261,6 +261,78 @@ export function buildCache(
   const isLegal = (action: number): boolean =>
     legalSet.has(action) && (!validatorMatches || validator.isProbablyLegal(action));
 
+  const legalByOrigin = new Map<
+    Cid,
+    {
+      moves: Map<Cid, Map<0 | 1, number>>;
+      kills: Map<Cid, Map<0 | 1, number>>;
+      enslaves: Map<Cid, number>;
+      tribun: Map<Cid, number>;
+    }
+  >();
+
+  const getLegalEntry = (originCid: Cid) => {
+    let entry = legalByOrigin.get(originCid);
+    if (!entry) {
+      entry = {
+        moves: new Map(),
+        kills: new Map(),
+        enslaves: new Map(),
+        tribun: new Map(),
+      };
+      legalByOrigin.set(originCid, entry);
+    }
+    return entry;
+  };
+
+  for (const action of legalActions) {
+    const decoded = engine.decodeAction(action);
+    switch (decoded.opcode) {
+      case 0: { // MOVE
+        const fromCid = decoded.fields.fromCid as Cid;
+        const toCid = decoded.fields.toCid as Cid;
+        const part = decoded.fields.part as 0 | 1;
+        const entry = getLegalEntry(fromCid);
+        let targetMap = entry.moves.get(toCid);
+        if (!targetMap) {
+          targetMap = new Map();
+          entry.moves.set(toCid, targetMap);
+        }
+        targetMap.set(part, action);
+        break;
+      }
+      case 1: { // KILL
+        const attackerCid = decoded.fields.attackerCid as Cid;
+        const targetCid = decoded.fields.targetCid as Cid;
+        const part = decoded.fields.part as 0 | 1;
+        const entry = getLegalEntry(attackerCid);
+        let targetMap = entry.kills.get(targetCid);
+        if (!targetMap) {
+          targetMap = new Map();
+          entry.kills.set(targetCid, targetMap);
+        }
+        targetMap.set(part, action);
+        break;
+      }
+      case 4: { // ENSLAVE
+        const attackerCid = decoded.fields.attackerCid as Cid;
+        const targetCid = decoded.fields.targetCid as Cid;
+        const entry = getLegalEntry(attackerCid);
+        entry.enslaves.set(targetCid, action);
+        break;
+      }
+      case 9: { // ATTACK_TRIBUN
+        const attackerCid = decoded.fields.attackerCid as Cid;
+        const tribunCid = decoded.fields.tribunCid as Cid;
+        const entry = getLegalEntry(attackerCid);
+        entry.tribun.set(tribunCid, action);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   const cache: UiMoveCache = {
     enemy: new Map(),
     ownPrimary: new Map(),
@@ -314,90 +386,63 @@ export function buildCache(
 
     const targets = new Map<Cid, OwnPrimaryTargetOptions>();
     const highlighted = new Set<Cid>();
+    const legalEntry = legalByOrigin.get(cid);
+    if (legalEntry) {
+      const targetCids = new Set<Cid>([
+        ...legalEntry.moves.keys(),
+        ...legalEntry.kills.keys(),
+        ...legalEntry.enslaves.keys(),
+        ...legalEntry.tribun.keys(),
+      ]);
 
-    // Enumerate primary pattern moves/attacks
-    const primaryReachable = getReachableTiles(cid, unit.p, unit.color, unit.tribun, state.board, false);
-    const primaryAttackReachable = getAttackReachableTiles(cid, unit.p, unit.color, unit.tribun, state.board);
-
-    // Enumerate secondary pattern moves/attacks (if available)
-    let secondaryReachable: number[] = [];
-    let secondaryAttackReachable: number[] = [];
-    if (unit.s > 0) {
-      secondaryReachable = getReachableTiles(cid, unit.s, unit.color, false, state.board, false);
-      secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, unit.color, false, state.board);
-    }
-
-    // Process empty targets (MOVE)
-    const allMoveReachable = new Set<number>([...primaryReachable, ...secondaryReachable]);
-    for (const toCid of allMoveReachable) {
-      const targetUnit = engine.unitByteToUnit(state.board[toCid]);
-      if (targetUnit !== null) continue; // Must be empty for MOVE
-
-      const options: number[] = [];
-      
-      // Test secondary MOVE
-      if (unit.s > 0 && secondaryReachable.includes(toCid)) {
-        const action = engine.encodeMove(cid, toCid, 1);
-        if (isLegal(action)) {
-          options.push(action);
-        }
-      }
-      
-      // Test primary MOVE
-      const action = engine.encodeMove(cid, toCid, 0);
-      if (isLegal(action)) {
-        options.push(action);
-      }
-
-      if (options.length > 0) {
-        targets.set(toCid, { options, isTribunAttack: false });
-        highlighted.add(toCid);
-      }
-    }
-
-    // Process enemy targets (KILL/ENSLAVE/ATTACK_TRIBUN)
-    const allAttackReachable = new Set([...primaryAttackReachable, ...secondaryAttackReachable]);
-    for (const targetCid of allAttackReachable) {
-      const targetUnit = engine.unitByteToUnit(state.board[targetCid]);
-      if (!targetUnit || targetUnit.color === state.turn) continue; // Must be enemy
-
-      const options: number[] = [];
-      let isTribunAttack = false;
-
-      // Check for ATTACK_TRIBUN
-      if (targetUnit.tribun) {
-        const action = engine.encodeAttackTribun(cid, targetCid, state.turn);
-        if (isLegal(action)) {
-          options.push(action);
-          isTribunAttack = true;
-        }
-      } else {
-        // Test KILL actions
-        if (secondaryAttackReachable.includes(targetCid)) {
-          const action = engine.encodeKill(cid, targetCid, 1);
-          if (isLegal(action)) {
-            options.push(action);
+      for (const targetCid of targetCids) {
+        const targetUnit = engine.unitByteToUnit(state.board[targetCid]);
+        if (!targetUnit) {
+          const moves = legalEntry.moves.get(targetCid);
+          if (!moves) continue;
+          const options: number[] = [];
+          if (moves.has(1)) {
+            options.push(moves.get(1)!);
           }
-        }
-        if (primaryAttackReachable.includes(targetCid)) {
-          const action = engine.encodeKill(cid, targetCid, 0);
-          if (isLegal(action)) {
-            options.push(action);
+          if (moves.has(0)) {
+            options.push(moves.get(0)!);
           }
+          if (options.length > 0) {
+            targets.set(targetCid, { options, isTribunAttack: false });
+            highlighted.add(targetCid);
+          }
+          continue;
         }
 
-        // Test ENSLAVE (only primary pattern, target must not be tribun, no secondary, S >= T)
-        if (targetUnit.s === 0 && !targetUnit.tribun && primaryAttackReachable.includes(targetCid)) {
-          const action = engine.encodeEnslave(cid, targetCid);
-          if (isLegal(action)) {
-            options.push(action);
-          }
+        if (targetUnit.color === state.turn) {
+          continue;
         }
-      }
 
-      if (options.length > 0) {
-        targets.set(targetCid, { options, isTribunAttack });
-        highlighted.add(targetCid);
+        if (targetUnit.tribun) {
+          const action = legalEntry.tribun.get(targetCid);
+          if (action !== undefined && isLegal(action)) {
+            targets.set(targetCid, { options: [action], isTribunAttack: true });
+            highlighted.add(targetCid);
+          }
+          continue;
+        }
+
+        const options: number[] = [];
+        const kills = legalEntry.kills.get(targetCid);
+        if (kills?.has(1)) {
+          options.push(kills.get(1)!);
+        }
+        if (kills?.has(0)) {
+          options.push(kills.get(0)!);
+        }
+        const enslave = legalEntry.enslaves.get(targetCid);
+        if (enslave !== undefined) {
+          options.push(enslave);
+        }
+        if (options.length > 0) {
+          targets.set(targetCid, { options, isTribunAttack: false });
+          highlighted.add(targetCid);
+        }
       }
     }
 
