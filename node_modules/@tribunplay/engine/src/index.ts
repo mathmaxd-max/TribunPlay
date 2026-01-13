@@ -665,6 +665,18 @@ type AttackGroup = {
   options: AttackOption[];
 };
 
+type AttackContext = {
+  targetUnit: Unit;
+  groups: AttackGroup[];
+  prefix: boolean[][];
+  suffix: boolean[][];
+  possibleSums: boolean[];
+  maxSum: number;
+  canReachKill: boolean;
+  damageSet: Set<number>;
+  canLiberate: boolean;
+};
+
 function advanceSumDp(dp: boolean[], options: AttackOption[], maxSum: number): boolean[] {
   const next = new Array(maxSum + 1).fill(false);
   for (let sum = 0; sum <= maxSum; sum++) {
@@ -697,6 +709,137 @@ function canReachAtLeast(maxSum: number, optionHeight: number, dpWithout: boolea
     if (dpWithout[sum]) return true;
   }
   return false;
+}
+
+function isSlavePropertySatisfied(primary: number, secondary: number): boolean {
+  if (secondary <= 0) return true;
+  if (primary <= 0) return false;
+  return primary <= 4 && 2 * primary >= secondary;
+}
+
+function buildAttackContext(state: State, targetCid: number): AttackContext | null {
+  const targetUnit = unitByteToUnit(state.board[targetCid]);
+  if (!targetUnit || targetUnit.color === state.turn) return null;
+
+  const groups: AttackGroup[] = [];
+  for (let cid = 0; cid < 121; cid++) {
+    const unit = unitByteToUnit(state.board[cid]);
+    if (!unit || unit.color !== state.turn || unit.p === 0) continue;
+
+    const options: AttackOption[] = [];
+
+    const primaryAttackReachable = getAttackReachableTiles(cid, unit.p, unit.color, unit.tribun, state.board);
+    if (primaryAttackReachable.includes(targetCid)) {
+      const primaryMoveReachable = getReachableTiles(
+        cid,
+        unit.p,
+        unit.color,
+        unit.tribun,
+        state.board,
+        false
+      );
+      options.push({
+        cid,
+        part: 0,
+        height: unit.p,
+        canMove: primaryMoveReachable.includes(targetCid),
+      });
+    }
+
+    if (unit.s > 0) {
+      const secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, unit.color, false, state.board);
+      if (secondaryAttackReachable.includes(targetCid)) {
+        const secondaryMoveReachable = getReachableTiles(
+          cid,
+          unit.s,
+          unit.color,
+          false,
+          state.board,
+          false
+        );
+        options.push({
+          cid,
+          part: 1,
+          height: unit.s,
+          canMove: secondaryMoveReachable.includes(targetCid),
+        });
+      }
+    }
+
+    if (options.length > 0) {
+      groups.push({ cid, options });
+    }
+  }
+
+  if (groups.length === 0) return null;
+
+  const maxSum = targetUnit.p;
+  const prefix: boolean[][] = new Array(groups.length + 1);
+  prefix[0] = new Array(maxSum + 1).fill(false);
+  prefix[0][0] = true;
+  for (let i = 0; i < groups.length; i++) {
+    prefix[i + 1] = advanceSumDp(prefix[i], groups[i].options, maxSum);
+  }
+
+  const suffix: boolean[][] = new Array(groups.length + 1);
+  suffix[groups.length] = new Array(maxSum + 1).fill(false);
+  suffix[groups.length][0] = true;
+  for (let i = groups.length - 1; i >= 0; i--) {
+    suffix[i] = advanceSumDp(suffix[i + 1], groups[i].options, maxSum);
+  }
+
+  const possibleSums = prefix[groups.length];
+  const canReachKill = possibleSums[maxSum];
+
+  const damageSet = new Set<number>();
+  let canLiberate = false;
+
+  if (!targetUnit.tribun) {
+    for (let sum = 1; sum < maxSum; sum++) {
+      if (!possibleSums[sum]) continue;
+      const outcome = resolveDamageOutcome(targetUnit, sum);
+      if (outcome.type === 'liberate') {
+        canLiberate = true;
+      } else if (outcome.type === 'damage') {
+        if (outcome.effectiveDamage > 0 && outcome.effectiveDamage < maxSum) {
+          damageSet.add(outcome.effectiveDamage);
+        }
+      }
+    }
+  }
+
+  return {
+    targetUnit,
+    groups,
+    prefix,
+    suffix,
+    possibleSums,
+    maxSum,
+    canReachKill,
+    damageSet,
+    canLiberate,
+  };
+}
+
+function canKillWithOption(
+  context: AttackContext,
+  attackerCid: number,
+  part: 0 | 1
+): { canKill: boolean; option?: AttackOption; groupIndex?: number } {
+  for (let i = 0; i < context.groups.length; i++) {
+    const group = context.groups[i];
+    if (group.cid !== attackerCid) continue;
+    const option = group.options.find((opt) => opt.part === part);
+    if (!option || !option.canMove) {
+      return { canKill: false };
+    }
+    const without = combineSumDp(context.prefix[i], context.suffix[i + 1], context.maxSum);
+    if (!canReachAtLeast(context.maxSum, option.height, without)) {
+      return { canKill: false };
+    }
+    return { canKill: true, option, groupIndex: i };
+  }
+  return { canKill: false };
 }
 
 function resolveDamageOutcome(
@@ -756,130 +899,35 @@ export function generateLegalActions(state: State): Uint32Array {
   
   // Generate attack actions
   for (let targetCid = 0; targetCid < 121; targetCid++) {
-    const targetUnit = unitByteToUnit(state.board[targetCid]);
-    if (!targetUnit || targetUnit.color === state.turn) continue;
-    
-    const groups: AttackGroup[] = [];
-    
-    for (let cid = 0; cid < 121; cid++) {
-      const unit = unitByteToUnit(state.board[cid]);
-      if (!unit || unit.color !== state.turn || unit.p === 0) continue;
-      
-      const options: AttackOption[] = [];
-      
-      const primaryAttackReachable = getAttackReachableTiles(cid, unit.p, unit.color, unit.tribun, state.board);
-      if (primaryAttackReachable.includes(targetCid)) {
-        const primaryMoveReachable = getReachableTiles(
-          cid,
-          unit.p,
-          unit.color,
-          unit.tribun,
-          state.board,
-          false
-        );
-        options.push({
-          cid,
-          part: 0,
-          height: unit.p,
-          canMove: primaryMoveReachable.includes(targetCid),
-        });
-      }
-      
-      if (unit.s > 0) {
-        const secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, unit.color, false, state.board);
-        if (secondaryAttackReachable.includes(targetCid)) {
-          const secondaryMoveReachable = getReachableTiles(
-            cid,
-            unit.s,
-            unit.color,
-            false,
-            state.board,
-            false
-          );
-          options.push({
-            cid,
-            part: 1,
-            height: unit.s,
-            canMove: secondaryMoveReachable.includes(targetCid),
-          });
-        }
-      }
-      
-      if (options.length > 0) {
-        groups.push({ cid, options });
-      }
-    }
-    
-    if (groups.length === 0) continue;
-    
+    const context = buildAttackContext(state, targetCid);
+    if (!context) continue;
+
+    const targetUnit = context.targetUnit;
     const targetPrimary = targetUnit.p;
-    const maxSum = targetPrimary;
-    
+
     // Check for tribun attack (instant win)
     if (targetUnit.tribun) {
-      for (const group of groups) {
+      for (const group of context.groups) {
         actions.push(encodeAttackTribun(group.cid, targetCid, state.turn));
       }
       continue;
     }
-    
-    // Build possible sum sets with at most one part per unit
-    const prefix: boolean[][] = new Array(groups.length + 1);
-    prefix[0] = new Array(maxSum + 1).fill(false);
-    prefix[0][0] = true;
-    for (let i = 0; i < groups.length; i++) {
-      prefix[i + 1] = advanceSumDp(prefix[i], groups[i].options, maxSum);
-    }
-    
-    const suffix: boolean[][] = new Array(groups.length + 1);
-    suffix[groups.length] = new Array(maxSum + 1).fill(false);
-    suffix[groups.length][0] = true;
-    for (let i = groups.length - 1; i >= 0; i--) {
-      suffix[i] = advanceSumDp(suffix[i + 1], groups[i].options, maxSum);
-    }
-    
-    const possibleSums = prefix[groups.length];
-    const canReachKill = possibleSums[maxSum];
-    
-    const damageSet = new Set<number>();
-    let canLiberate = false;
-    
-    for (let sum = 1; sum < targetPrimary; sum++) {
-      if (!possibleSums[sum]) continue;
-      const outcome = resolveDamageOutcome(targetUnit, sum);
-      if (outcome.type === 'liberate') {
-        canLiberate = true;
-      } else if (outcome.type === 'damage') {
-        if (outcome.effectiveDamage > 0 && outcome.effectiveDamage < targetPrimary) {
-          damageSet.add(outcome.effectiveDamage);
-        }
-      }
-    }
-    
-    if (canReachKill) {
+
+    let canLiberate = context.canLiberate;
+
+    if (context.canReachKill) {
       if (targetUnit.s > 0) {
         canLiberate = true;
       } else {
-        for (let i = 0; i < groups.length; i++) {
-          const group = groups[i];
-          const without = combineSumDp(prefix[i], suffix[i + 1], maxSum);
-          
+        for (const group of context.groups) {
           for (const option of group.options) {
-            if (!option.canMove) continue;
-            if (!canReachAtLeast(maxSum, option.height, without)) continue;
-            
+            const killCheck = canKillWithOption(context, option.cid, option.part);
+            if (!killCheck.canKill) continue;
             actions.push(encodeKill(option.cid, targetCid, option.part));
-            
+
             if (option.part === 0) {
               const attackerUnit = unitByteToUnit(state.board[option.cid])!;
-              const testUnit: Unit = {
-                color: state.turn,
-                tribun: attackerUnit.tribun,
-                p: attackerUnit.p,
-                s: targetPrimary,
-              };
-              const normalized = normalizeUnit(testUnit);
-              if (normalized && normalized.p > 0) {
+              if (!attackerUnit.tribun && isSlavePropertySatisfied(option.height, targetPrimary)) {
                 actions.push(encodeEnslave(option.cid, targetCid));
               }
             }
@@ -887,11 +935,11 @@ export function generateLegalActions(state: State): Uint32Array {
         }
       }
     }
-    
+
     if (canLiberate) {
       actions.push(encodeLiberate(targetCid));
     }
-    for (const damage of damageSet) {
+    for (const damage of context.damageSet) {
       actions.push(encodeDamage(targetCid, damage));
     }
   }
@@ -1186,7 +1234,7 @@ export function applyAction(state: State, action: number): State {
     case 1: { // KILL
       const attackerCid = fields.attackerCid;
       const targetCid = fields.targetCid;
-      const part = fields.part;
+      const part = fields.part as 0 | 1;
       
       const attackerUnit = unitByteToUnit(newBoard[attackerCid]);
       const targetUnit = unitByteToUnit(newBoard[targetCid]);
@@ -1196,6 +1244,15 @@ export function applyAction(state: State, action: number): State {
       }
       if (!targetUnit || targetUnit.color === state.turn || targetUnit.tribun) {
         throw new Error(`Illegal KILL: invalid target`);
+      }
+
+      const killContext = buildAttackContext({ ...state, board: newBoard }, targetCid);
+      if (!killContext || !killContext.canReachKill) {
+        throw new Error(`Illegal KILL: insufficient attack strength`);
+      }
+      const killCheck = canKillWithOption(killContext, attackerCid, part);
+      if (!killCheck.canKill) {
+        throw new Error(`Illegal KILL: attacker cannot complete kill`);
       }
       
       const attackReachable = getAttackReachableTiles(
@@ -1263,6 +1320,16 @@ export function applyAction(state: State, action: number): State {
       if (!targetUnit || targetUnit.color === state.turn || targetUnit.s === 0) {
         throw new Error(`Illegal LIBERATE: invalid target`);
       }
+
+      const liberateContext = buildAttackContext({ ...state, board: newBoard }, targetCid);
+      if (!liberateContext) {
+        throw new Error(`Illegal LIBERATE: no attackers`);
+      }
+      const canLiberate =
+        liberateContext.canLiberate || (liberateContext.canReachKill && targetUnit.s > 0);
+      if (!canLiberate) {
+        throw new Error(`Illegal LIBERATE: insufficient attack strength`);
+      }
       
       // Liberation: flip color, p := s, s := 0, tribun := false
       const liberatedUnit: Unit = {
@@ -1286,6 +1353,11 @@ export function applyAction(state: State, action: number): State {
       }
       if (effectiveDamage <= 0 || effectiveDamage >= targetUnit.p) {
         throw new Error(`Illegal DAMAGE: invalid effective damage`);
+      }
+
+      const damageContext = buildAttackContext({ ...state, board: newBoard }, targetCid);
+      if (!damageContext || !damageContext.damageSet.has(effectiveDamage)) {
+        throw new Error(`Illegal DAMAGE: insufficient attack strength`);
       }
       
       // Apply effective damage (already normalized - MUST NOT re-run normalization)
@@ -1311,6 +1383,21 @@ export function applyAction(state: State, action: number): State {
       }
       if (!targetUnit || targetUnit.color === state.turn || targetUnit.tribun || targetUnit.s > 0) {
         throw new Error(`Illegal ENSLAVE: invalid target`);
+      }
+
+      const enslaveContext = buildAttackContext({ ...state, board: newBoard }, targetCid);
+      if (!enslaveContext || !enslaveContext.canReachKill) {
+        throw new Error(`Illegal ENSLAVE: insufficient attack strength`);
+      }
+      const enslaveCheck = canKillWithOption(enslaveContext, attackerCid, 0);
+      if (!enslaveCheck.canKill) {
+        throw new Error(`Illegal ENSLAVE: attacker cannot complete enslave`);
+      }
+      if (attackerUnit.tribun) {
+        throw new Error(`Illegal ENSLAVE: tribun cannot enslave`);
+      }
+      if (!isSlavePropertySatisfied(attackerUnit.p, targetUnit.p)) {
+        throw new Error(`Illegal ENSLAVE: would violate SP`);
       }
       
       const attackReachable = getAttackReachableTiles(
@@ -1345,11 +1432,7 @@ export function applyAction(state: State, action: number): State {
         p: attackerUnit.p,
         s: targetUnit.p,
       };
-      const normalized = normalizeUnit(enslavedUnit);
-      if (!normalized || normalized.p === 0) {
-        throw new Error(`Illegal ENSLAVE: would violate SP`);
-      }
-      newBoard[targetCid] = unitToUnitByte(normalized);
+      newBoard[targetCid] = unitToUnitByte(enslavedUnit);
       
       // Attacker loses primary, any slave is liberated
       if (attackerUnit.s > 0) {

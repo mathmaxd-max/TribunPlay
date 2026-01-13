@@ -257,7 +257,9 @@ export function buildCache(
 ): UiMoveCache {
   const legalActions = engine.generateLegalActions(state);
   const legalSet = new Set<number>(Array.from(legalActions));
-  const isLegal = (action: number): boolean => legalSet.has(action) && validator.isProbablyLegal(action);
+  const validatorMatches = validator.getPly() === state.ply;
+  const isLegal = (action: number): boolean =>
+    legalSet.has(action) && (!validatorMatches || validator.isProbablyLegal(action));
 
   const cache: UiMoveCache = {
     enemy: new Map(),

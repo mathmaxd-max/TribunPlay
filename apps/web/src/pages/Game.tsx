@@ -62,6 +62,93 @@ export default function Game() {
     if (!gameState || !validator) return null;
     return buildCache(gameState, validator);
   }, [gameState, validator]);
+
+  useEffect(() => {
+    if (!gameState || !cache) {
+      if (uiState.type !== 'idle') {
+        setUiState({ type: 'idle' });
+      }
+      return;
+    }
+
+    const isActive = gameState.turn === (role === 'black' ? 0 : 1);
+    if (!isActive && uiState.type !== 'idle') {
+      setUiState({ type: 'idle' });
+      return;
+    }
+
+    setUiState((prevState) => {
+      switch (prevState.type) {
+        case 'idle':
+          return prevState;
+        case 'enemy': {
+          const enemyCache = cache.enemy.get(prevState.targetCid);
+          if (!enemyCache) return { type: 'idle' };
+          if (enemyCache.options.length === 0) return { type: 'idle' };
+          const optionIndex = Math.min(prevState.optionIndex, enemyCache.options.length - 1);
+          if (optionIndex === prevState.optionIndex) return prevState;
+          return { ...prevState, optionIndex };
+        }
+        case 'empty': {
+          const emptyCache = cache.empty.get(prevState.centerCid);
+          if (!emptyCache) return { type: 'idle' };
+          const donors = new Map<number, number>();
+          for (const [cid, display] of prevState.donors.entries()) {
+            if (emptyCache.donorRules.has(cid)) {
+              donors.set(cid, display);
+            }
+          }
+          let symmetry = prevState.symmetry;
+          if (symmetry) {
+            const allowed = emptyCache.allowedSymmetricDonations(symmetry.mode);
+            const donorSet = new Set(symmetry.donorCids);
+            const donorsValid = symmetry.donorCids.every((cid) => emptyCache.donorRules.has(cid));
+            const donorCountValid =
+              (symmetry.mode === 'sym6' && symmetry.donorCids.length === 6) ||
+              (symmetry.mode !== 'sym6' && symmetry.donorCids.length === 3);
+            if (!donorsValid || !donorCountValid || !allowed.includes(symmetry.donate)) {
+              symmetry = undefined;
+            } else {
+              symmetry = {
+                ...symmetry,
+                donorCids: Array.from(donorSet),
+              };
+            }
+          }
+          if (donors.size === prevState.donors.size && symmetry === prevState.symmetry) {
+            return prevState;
+          }
+          return {
+            type: 'empty',
+            centerCid: prevState.centerCid,
+            donors,
+            optionIndex: 0,
+            symmetry,
+          };
+        }
+        case 'own_primary': {
+          const primaryCache = cache.ownPrimary.get(prevState.originCid);
+          if (!primaryCache) return { type: 'idle' };
+          if (prevState.targetCid === null) {
+            return prevState.optionIndex === 0 ? prevState : { ...prevState, optionIndex: 0 };
+          }
+          const targetOptions = primaryCache.targets.get(prevState.targetCid);
+          if (!targetOptions || targetOptions.options.length === 0) {
+            return { ...prevState, targetCid: null, optionIndex: 0 };
+          }
+          const optionIndex = Math.min(prevState.optionIndex, targetOptions.options.length - 1);
+          if (optionIndex === prevState.optionIndex) return prevState;
+          return { ...prevState, optionIndex };
+        }
+        case 'own_secondary': {
+          const secondaryCache = cache.ownSecondary.get(prevState.originCid);
+          if (!secondaryCache) return { type: 'idle' };
+          if (secondaryCache.split.emptyAdjDirs.length === 0) return { type: 'idle' };
+          return prevState;
+        }
+      }
+    });
+  }, [gameState, cache, role, uiState.type]);
   
   const baseTileStates = useMemo(() => {
     const baseStates: Array<'default' | 'selectable'> = new Array(121).fill('default');
@@ -222,6 +309,7 @@ export default function Game() {
               setValidator(newValidator);
             } else if (message.t === 'error') {
               setError(message.message);
+              setUiState({ type: 'idle' });
             }
           } else if (event.data instanceof ArrayBuffer && event.data.byteLength === 4) {
             // Binary action word
@@ -279,7 +367,7 @@ export default function Game() {
       return;
     }
 
-    if (!validator || !validator.isProbablyLegal(action)) {
+    if (!validator || (validator.getPly() === gameState?.ply && !validator.isProbablyLegal(action))) {
       setError('Action is not legal');
       return;
     }
@@ -1312,7 +1400,10 @@ export default function Game() {
             </div>
             {(() => {
               const pendingAction = getPendingAction();
-              const canSubmit = pendingAction !== null && validator && validator.isProbablyLegal(pendingAction) && role !== 'spectator';
+              const validatorAllows =
+                validator &&
+                (validator.getPly() !== gameState.ply || validator.isProbablyLegal(pendingAction ?? 0));
+              const canSubmit = pendingAction !== null && validatorAllows && role !== 'spectator';
               
               if (canSubmit) {
                 return (
