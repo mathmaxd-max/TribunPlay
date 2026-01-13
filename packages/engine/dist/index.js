@@ -319,6 +319,12 @@ function getHeight1AttackOffsets(color) {
         return [[-1, 0], [0, -1]];
     }
 }
+function getSecondaryPatternColor(color, height) {
+    if (height === 1) {
+        return color === 0 ? 1 : 0;
+    }
+    return color;
+}
 function getHeight2Offsets() {
     const base = [[1, 2], [-1, 1], [2, 1]];
     const result = [];
@@ -635,7 +641,8 @@ function buildAttackContext(state, targetCid) {
             });
         }
         if (unit.s > 0) {
-            const secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, unit.color, false, state.board);
+            const secondaryColor = getSecondaryPatternColor(unit.color, unit.s);
+            const secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, secondaryColor, false, state.board);
             if (secondaryAttackReachable.includes(targetCid)) {
                 options.push({
                     cid,
@@ -747,7 +754,8 @@ export function generateLegalActions(state) {
             }
             // Try secondary pattern if available
             if (unit.s > 0) {
-                const secondaryReachable = getReachableTiles(cid, unit.s, unit.color, false, state.board, false);
+                const secondaryColor = getSecondaryPatternColor(unit.color, unit.s);
+                const secondaryReachable = getReachableTiles(cid, unit.s, secondaryColor, false, state.board, false);
                 for (const toCid of secondaryReachable) {
                     const targetUnit = unitByteToUnit(state.board[toCid]);
                     if (targetUnit === null) {
@@ -1025,7 +1033,9 @@ export function applyAction(state, action) {
                 throw new Error(`Illegal MOVE: target tile not empty at toCid ${toCid}`);
             }
             // Validate move is legal
-            const reachable = getReachableTiles(fromCid, part === 0 ? fromUnit.p : fromUnit.s, fromUnit.color, part === 0 ? fromUnit.tribun : false, newBoard, false);
+            const moveHeight = part === 0 ? fromUnit.p : fromUnit.s;
+            const moveColor = part === 0 ? fromUnit.color : getSecondaryPatternColor(fromUnit.color, fromUnit.s);
+            const reachable = getReachableTiles(fromCid, moveHeight, moveColor, part === 0 ? fromUnit.tribun : false, newBoard, false);
             if (!reachable.includes(toCid)) {
                 throw new Error(`Illegal MOVE: destination not reachable`);
             }
@@ -1080,7 +1090,9 @@ export function applyAction(state, action) {
             if (!killCheck.canKill) {
                 throw new Error(`Illegal KILL: attacker cannot complete kill`);
             }
-            const attackReachable = getAttackReachableTiles(attackerCid, part === 0 ? attackerUnit.p : attackerUnit.s, attackerUnit.color, part === 0 ? attackerUnit.tribun : false, newBoard);
+            const attackHeight = part === 0 ? attackerUnit.p : attackerUnit.s;
+            const attackColor = part === 0 ? attackerUnit.color : getSecondaryPatternColor(attackerUnit.color, attackerUnit.s);
+            const attackReachable = getAttackReachableTiles(attackerCid, attackHeight, attackColor, part === 0 ? attackerUnit.tribun : false, newBoard);
             if (!attackReachable.includes(targetCid)) {
                 throw new Error(`Illegal KILL: attacker cannot attack target`);
             }
@@ -1479,7 +1491,8 @@ export function applyAction(state, action) {
                 canAttack = true;
             }
             else if (attackerUnit.s > 0) {
-                const secondaryReachable = getAttackReachableTiles(attackerCid, attackerUnit.s, attackerUnit.color, false, newBoard);
+                const secondaryColor = getSecondaryPatternColor(attackerUnit.color, attackerUnit.s);
+                const secondaryReachable = getAttackReachableTiles(attackerCid, attackerUnit.s, secondaryColor, false, newBoard);
                 if (secondaryReachable.includes(tribunCid)) {
                     canAttack = true;
                 }

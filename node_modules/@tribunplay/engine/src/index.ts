@@ -380,6 +380,13 @@ function getHeight1AttackOffsets(color: Color): number[][] {
   }
 }
 
+function getSecondaryPatternColor(color: Color, height: Height): Color {
+  if (height === 1) {
+    return color === 0 ? 1 : 0;
+  }
+  return color;
+}
+
 function getHeight2Offsets(): number[][] {
   const base = [[1, 2], [-1, 1], [2, 1]];
   const result: number[][] = [];
@@ -737,7 +744,8 @@ function buildAttackContext(state: State, targetCid: number): AttackContext | nu
     }
 
     if (unit.s > 0) {
-      const secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, unit.color, false, state.board);
+      const secondaryColor = getSecondaryPatternColor(unit.color, unit.s);
+      const secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, secondaryColor, false, state.board);
       if (secondaryAttackReachable.includes(targetCid)) {
         options.push({
           cid,
@@ -867,7 +875,8 @@ export function generateLegalActions(state: State): Uint32Array {
       
       // Try secondary pattern if available
       if (unit.s > 0) {
-        const secondaryReachable = getReachableTiles(cid, unit.s, unit.color, false, state.board, false);
+        const secondaryColor = getSecondaryPatternColor(unit.color, unit.s);
+        const secondaryReachable = getReachableTiles(cid, unit.s, secondaryColor, false, state.board, false);
         for (const toCid of secondaryReachable) {
           const targetUnit = unitByteToUnit(state.board[toCid]);
           if (targetUnit === null) {
@@ -1169,10 +1178,12 @@ export function applyAction(state: State, action: number): State {
       }
       
       // Validate move is legal
+      const moveHeight = part === 0 ? fromUnit.p : fromUnit.s;
+      const moveColor = part === 0 ? fromUnit.color : getSecondaryPatternColor(fromUnit.color, fromUnit.s);
       const reachable = getReachableTiles(
         fromCid,
-        part === 0 ? fromUnit.p : fromUnit.s,
-        fromUnit.color,
+        moveHeight,
+        moveColor,
         part === 0 ? fromUnit.tribun : false,
         newBoard,
         false
@@ -1236,10 +1247,12 @@ export function applyAction(state: State, action: number): State {
         throw new Error(`Illegal KILL: attacker cannot complete kill`);
       }
       
+      const attackHeight = part === 0 ? attackerUnit.p : attackerUnit.s;
+      const attackColor = part === 0 ? attackerUnit.color : getSecondaryPatternColor(attackerUnit.color, attackerUnit.s);
       const attackReachable = getAttackReachableTiles(
         attackerCid,
-        part === 0 ? attackerUnit.p : attackerUnit.s,
-        attackerUnit.color,
+        attackHeight,
+        attackColor,
         part === 0 ? attackerUnit.tribun : false,
         newBoard
       );
@@ -1698,10 +1711,11 @@ export function applyAction(state: State, action: number): State {
       if (primaryReachable.includes(tribunCid)) {
         canAttack = true;
       } else if (attackerUnit.s > 0) {
+        const secondaryColor = getSecondaryPatternColor(attackerUnit.color, attackerUnit.s);
         const secondaryReachable = getAttackReachableTiles(
           attackerCid,
           attackerUnit.s,
-          attackerUnit.color,
+          secondaryColor,
           false,
           newBoard
         );
