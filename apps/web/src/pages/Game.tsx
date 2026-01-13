@@ -9,6 +9,19 @@ import type { UiMoveCache } from '../ui/cache/UiMoveCache';
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
 type EmptyCache = UiMoveCache['empty'] extends Map<any, infer T> ? T : never;
+type ColorClock = { black: number; white: number };
+type TimeControl = {
+  initialMs: ColorClock;
+  bufferMs: ColorClock;
+  incrementMs: ColorClock;
+  maxGameMs?: number | null;
+};
+type RawTimeControl = {
+  initialMs?: number | ColorClock;
+  bufferMs?: number | ColorClock;
+  incrementMs?: number | ColorClock;
+  maxGameMs?: number | null;
+};
 
 type EmptySymmetryState = {
   mode: 'sym3+' | 'sym3-' | 'sym6';
@@ -30,7 +43,8 @@ interface GameSnapshot {
   ply: number;
   drawOfferBy: engine.Color | null;
   clocksMs?: { black: number; white: number };
-  timeControl?: { initialMs: number; bufferMs: number; incrementMs: number; maxGameMs?: number | null };
+  buffersMs?: { black: number; white: number };
+  timeControl?: RawTimeControl;
 }
 
 const NEIGHBOR_VECTORS = [
@@ -45,6 +59,40 @@ const NEIGHBOR_VECTORS = [
 const VALID_HEIGHTS = new Set([0, 1, 2, 3, 4, 6, 8]);
 const VALID_SPLIT_HEIGHTS = new Set([0, 1, 2, 3, 4, 6]);
 
+const DEFAULT_TIME_CONTROL: TimeControl = {
+  initialMs: { black: 300000, white: 300000 },
+  bufferMs: { black: 20000, white: 20000 },
+  incrementMs: { black: 0, white: 0 },
+  maxGameMs: null,
+};
+
+const readColorClock = (raw: number | ColorClock | undefined, fallback: ColorClock): ColorClock => {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return { black: raw, white: raw };
+  }
+  if (raw && typeof raw === 'object') {
+    return {
+      black: Number.isFinite(raw.black) ? raw.black : fallback.black,
+      white: Number.isFinite(raw.white) ? raw.white : fallback.white,
+    };
+  }
+  return fallback;
+};
+
+const normalizeTimeControl = (raw?: RawTimeControl | null): TimeControl => {
+  if (!raw || typeof raw !== 'object') {
+    return { ...DEFAULT_TIME_CONTROL };
+  }
+  const initialMs = readColorClock(raw.initialMs, DEFAULT_TIME_CONTROL.initialMs);
+  const bufferMs = readColorClock(raw.bufferMs, DEFAULT_TIME_CONTROL.bufferMs);
+  const incrementMs = readColorClock(raw.incrementMs, DEFAULT_TIME_CONTROL.incrementMs);
+  const maxGameMs =
+    raw.maxGameMs === null || Number.isFinite(raw.maxGameMs)
+      ? raw.maxGameMs
+      : DEFAULT_TIME_CONTROL.maxGameMs ?? null;
+  return { initialMs, bufferMs, incrementMs, maxGameMs };
+};
+
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
@@ -57,14 +105,9 @@ export default function Game() {
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
   
   // Clock state
-  const [clocksMs, setClocksMs] = useState<{ black: number; white: number }>({ black: 300000, white: 300000 });
-  const [bufferMsRemaining, setBufferMsRemaining] = useState<{ black: number; white: number }>({ black: 20000, white: 20000 });
-  const [timeControl, setTimeControl] = useState<{ initialMs: number; bufferMs: number; incrementMs: number; maxGameMs?: number | null }>({
-    initialMs: 300000, // 5 minutes
-    bufferMs: 20000,   // 20 seconds
-    incrementMs: 0,    // 0 increment
-    maxGameMs: null,
-  });
+  const [clocksMs, setClocksMs] = useState<ColorClock>({ black: 300000, white: 300000 });
+  const [bufferMsRemaining, setBufferMsRemaining] = useState<ColorClock>({ black: 20000, white: 20000 });
+  const [timeControl, setTimeControl] = useState<TimeControl>({ ...DEFAULT_TIME_CONTROL });
   const turnStartTimeRef = useRef<number | null>(null);
   const turnStartClockRef = useRef<number | null>(null);
   const turnStartBufferRef = useRef<number | null>(null);
@@ -220,18 +263,27 @@ export default function Game() {
       lastClockUpdateRef.current.black !== clocksMs.black ||
       lastClockUpdateRef.current.white !== clocksMs.white;
     
-    // If external update detected and we have a timer running, reset it
+    // If external update detected (from server), sync our timers
     if (externalUpdate && gameState && turnStartTimeRef.current !== null) {
       const activeColor = gameState.turn === 0 ? 'black' : 'white';
+      
+      // Reset turn timer to sync with server clock values
       turnStartTimeRef.current = Date.now();
       turnStartClockRef.current = clocksMs[activeColor];
-      turnStartBufferRef.current = bufferMsRemaining[activeColor];
+      
+      // If buffer was reset (full value), sync it
+      // Otherwise, keep current buffer state (it's being counted down locally)
+      if (bufferMsRemaining[activeColor] === timeControl.bufferMs[activeColor]) {
+        turnStartBufferRef.current = timeControl.bufferMs[activeColor];
+      } else {
+        turnStartBufferRef.current = bufferMsRemaining[activeColor];
+      }
     }
     
     clocksRef.current = clocksMs;
     bufferRef.current = bufferMsRemaining;
     lastClockUpdateRef.current = clocksMs;
-  }, [clocksMs, bufferMsRemaining, gameState]);
+  }, [clocksMs, bufferMsRemaining, gameState, timeControl.bufferMs.black, timeControl.bufferMs.white]);
 
   // Track total game time and check for max game time tie
   useEffect(() => {
@@ -453,56 +505,88 @@ export default function Game() {
               setGameState(state);
               setUiState({ type: 'idle' });
               
-              // Initialize clock state
+              // Initialize clock state from server snapshot (authoritative)
               if (snapshot.clocksMs) {
                 setClocksMs(snapshot.clocksMs);
+                clocksRef.current = snapshot.clocksMs;
+                
                 const activeColor = snapshot.turn === 0 ? 'black' : 'white';
                 turnStartTimeRef.current = Date.now();
                 turnStartClockRef.current = snapshot.clocksMs[activeColor];
               }
-              if (snapshot.timeControl) {
-                setTimeControl(snapshot.timeControl);
-                // Initialize buffer for both players
-                setBufferMsRemaining({
-                  black: snapshot.timeControl.bufferMs,
-                  white: snapshot.timeControl.bufferMs,
-                });
-                turnStartBufferRef.current = snapshot.timeControl.bufferMs;
+              
+              const normalizedTimeControl = normalizeTimeControl(snapshot.timeControl);
+              setTimeControl(normalizedTimeControl);
+              
+              // Initialize buffers from snapshot if provided, otherwise use full value
+              if (snapshot.buffersMs) {
+                // Use server-provided buffer values (for late joiners)
+                setBufferMsRemaining(snapshot.buffersMs);
+                bufferRef.current = snapshot.buffersMs;
+                const activeColor = snapshot.turn === 0 ? 'black' : 'white';
+                turnStartBufferRef.current = snapshot.buffersMs[activeColor];
               } else {
-                // Default time control if not provided
-                const defaultTimeControl = {
-                  initialMs: 300000, // 5 minutes
-                  bufferMs: 20000,   // 20 seconds
-                  incrementMs: 0,    // 0 increment
-                  maxGameMs: null,   // Disabled by default
-                };
-                setTimeControl(defaultTimeControl);
-                // Initialize buffer for both players
+                // Fallback: initialize to full value (backward compatibility)
                 setBufferMsRemaining({
-                  black: defaultTimeControl.bufferMs,
-                  white: defaultTimeControl.bufferMs,
+                  black: normalizedTimeControl.bufferMs.black,
+                  white: normalizedTimeControl.bufferMs.white,
                 });
-                turnStartBufferRef.current = defaultTimeControl.bufferMs;
+                bufferRef.current = {
+                  black: normalizedTimeControl.bufferMs.black,
+                  white: normalizedTimeControl.bufferMs.white,
+                };
+                turnStartBufferRef.current = normalizedTimeControl.bufferMs[snapshot.turn === 0 ? 'black' : 'white'];
               }
+              
+              // Update last clock update ref to prevent false external update detection
+              lastClockUpdateRef.current = snapshot.clocksMs || { black: 300000, white: 300000 };
               // Initialize game start time for total game time tracking
               if (gameStartTimeRef.current === null) {
                 gameStartTimeRef.current = Date.now();
                 setTotalGameTimeMs(0);
               }
             } else if (message.t === 'clock') {
-              // Clock update from server
+              // Clock update from server - this is authoritative
+              // Server sends this after each move with the correct clock and buffer values
               if (message.clocksMs) {
+                // Update clocks to match server values exactly
                 setClocksMs(message.clocksMs);
+                
+                // Update lastClockUpdateRef to prevent false external update detection
+                lastClockUpdateRef.current = message.clocksMs;
+                
+                // Sync buffers to server values exactly (not reset to full)
+                if (message.buffersMs) {
+                  setBufferMsRemaining(message.buffersMs);
+                  bufferRef.current = message.buffersMs;
+                } else {
+                  // Fallback: if server doesn't send buffers, reset to full (backward compatibility)
+                  setBufferMsRemaining({
+                    black: timeControl.bufferMs.black,
+                    white: timeControl.bufferMs.white,
+                  });
+                  bufferRef.current = {
+                    black: timeControl.bufferMs.black,
+                    white: timeControl.bufferMs.white,
+                  };
+                }
+                
                 if (message.turn !== undefined) {
                   const activeColor = message.turn === 'black' || message.turn === 0 ? 'black' : 'white';
+                  
+                  // Reset turn timer to sync with server clock values
                   turnStartTimeRef.current = Date.now();
                   turnStartClockRef.current = message.clocksMs[activeColor];
-                  // Reset buffer for the active player
-                  turnStartBufferRef.current = timeControl.bufferMs;
-                  setBufferMsRemaining((prev) => ({
-                    ...prev,
-                    [activeColor]: timeControl.bufferMs,
-                  }));
+                  
+                  // Sync buffer start value from server
+                  if (message.buffersMs) {
+                    turnStartBufferRef.current = message.buffersMs[activeColor];
+                  } else {
+                    turnStartBufferRef.current = timeControl.bufferMs[activeColor];
+                  }
+                  
+                  // Update refs to match server state
+                  clocksRef.current = message.clocksMs;
                 }
               }
             } else if (message.t === 'legal') {
@@ -524,30 +608,9 @@ export default function Game() {
                 if (!prevState) return prevState;
                 const newState = engine.applyAction(prevState, actionWord);
                 
-                // Update clock: apply increment and start new turn timer
-                if (prevState.turn !== newState.turn) {
-                  setClocksMs((prevClocks) => {
-                    const activeColor = prevState.turn === 0 ? 'black' : 'white';
-                    const newClocks = { ...prevClocks };
-                    // Increment is applied after turn completion
-                    newClocks[activeColor] = Math.max(0, prevClocks[activeColor] + timeControl.incrementMs);
-                    
-                    // Start timer for new turn
-                    const newActiveColor = newState.turn === 0 ? 'black' : 'white';
-                    turnStartTimeRef.current = Date.now();
-                    turnStartClockRef.current = newClocks[newActiveColor];
-                    turnStartBufferRef.current = timeControl.bufferMs;
-                    
-                    return newClocks;
-                  });
-                  
-                  // Reset buffer for the new active player
-                  const newActiveColor = newState.turn === 0 ? 'black' : 'white';
-                  setBufferMsRemaining((prev) => ({
-                    ...prev,
-                    [newActiveColor]: timeControl.bufferMs,
-                  }));
-                }
+                // Don't update clocks locally - wait for server clock update
+                // The server will send a clock update message with the correct values
+                // after applying buffer/increment logic
                 
                 return newState;
               });
@@ -1853,7 +1916,7 @@ export default function Game() {
             color: '#666',
             textAlign: 'center',
           }}>
-            Buffer: {formatTime(timeControl.bufferMs)} | Increment: {formatTime(timeControl.incrementMs)}
+            Buffer B/W: {formatTime(timeControl.bufferMs.black)} / {formatTime(timeControl.bufferMs.white)} | Increment B/W: {formatTime(timeControl.incrementMs.black)} / {formatTime(timeControl.incrementMs.white)}
           </div>
           <div style={{
             marginTop: '10px',

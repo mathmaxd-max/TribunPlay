@@ -13,10 +13,19 @@ export class GameCreate extends OpenAPIRoute {
           "application/json": {
             schema: z.object({
               timeControl: z.object({
-                initialMs: z.number().optional(),
-                bufferMs: z.number().optional(),
-                incrementMs: z.number().optional(),
-                maxGameMs: z.number().optional(),
+                initialMs: z.union([
+                  z.number(),
+                  z.object({ black: z.number(), white: z.number() }),
+                ]).optional(),
+                bufferMs: z.union([
+                  z.number(),
+                  z.object({ black: z.number(), white: z.number() }),
+                ]).optional(),
+                incrementMs: z.union([
+                  z.number(),
+                  z.object({ black: z.number(), white: z.number() }),
+                ]).optional(),
+                maxGameMs: z.number().nullable().optional(),
               }).optional(),
             }).optional(),
           },

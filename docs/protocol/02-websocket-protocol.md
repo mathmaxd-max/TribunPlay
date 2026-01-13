@@ -88,14 +88,25 @@ The server SHOULD send a snapshot to all participants when a game becomes active
     "startingPlayerColor":1,
     "boardBytesB64":"<base64 of 121-byte board>",
     "clocksMs":{"black":600000,"white":600000},
+    "buffersMs":{"black":20000,"white":20000},
+    "timeControl":{"initialMs":600000,"bufferMs":20000,"incrementMs":0,"maxGameMs":null},
     "drawOfferBy":null
   }
 }
 ```
 
 #### Clock update (optional but recommended)
+Server sends clock updates after each move with authoritative clock and buffer values.
+
 ```json
-{"t":"clock","gameId":"<uuid>","ply":17,"turn":"white","clocksMs":{"black":523000,"white":481000}}
+{
+  "t":"clock",
+  "gameId":"<uuid>",
+  "ply":17,
+  "turn":"white",
+  "clocksMs":{"black":523000,"white":481000},
+  "buffersMs":{"black":20000,"white":15000}
+}
 ```
 
 #### Sync response

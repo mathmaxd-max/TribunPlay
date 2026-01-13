@@ -1,6 +1,54 @@
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import * as engine from "@tribunplay/engine";
 
+type ColorClock = { black: number; white: number };
+type TimeControl = {
+	initialMs: ColorClock;
+	bufferMs: ColorClock;
+	incrementMs: ColorClock;
+	maxGameMs?: number | null;
+};
+
+const DEFAULT_TIME_CONTROL: TimeControl = {
+	initialMs: { black: 300000, white: 300000 },
+	bufferMs: { black: 20000, white: 20000 },
+	incrementMs: { black: 0, white: 0 },
+	maxGameMs: null,
+};
+
+const readColorClock = (raw: any, fallback: ColorClock): ColorClock => {
+	if (typeof raw === "number" && Number.isFinite(raw)) {
+		return { black: raw, white: raw };
+	}
+	if (raw && typeof raw === "object") {
+		return {
+			black: Number.isFinite(raw.black) ? raw.black : fallback.black,
+			white: Number.isFinite(raw.white) ? raw.white : fallback.white,
+		};
+	}
+	return fallback;
+};
+
+const normalizeTimeControl = (raw: any): TimeControl => {
+	const base = DEFAULT_TIME_CONTROL;
+	if (!raw || typeof raw !== "object") {
+		return { ...base };
+	}
+	const initialMs = readColorClock(raw.initialMs, base.initialMs);
+	const bufferMs = readColorClock(raw.bufferMs, base.bufferMs);
+	const incrementMs = readColorClock(raw.incrementMs, base.incrementMs);
+	const maxGameMs =
+		raw.maxGameMs === null || Number.isFinite(raw.maxGameMs)
+			? raw.maxGameMs
+			: base.maxGameMs ?? null;
+	return {
+		initialMs,
+		bufferMs,
+		incrementMs,
+		maxGameMs,
+	};
+};
+
 /**
  * GameRoom Durable Object
  * 
@@ -18,6 +66,15 @@ export class GameRoom implements DurableObject {
 	private gameState: engine.State | null = null;
 	private legalSet: Set<number> = new Set();
 	private actionLog: number[] = [];
+	
+	// Clock and buffer state (server-authoritative)
+	private clockBlackMs: number = 0;
+	private clockWhiteMs: number = 0;
+	private bufferBlackMs: number = 0;
+	private bufferWhiteMs: number = 0;
+	private turnStartTime: number | null = null;
+	private timeControl: TimeControl | null = null;
+	private gameStartTime: number | null = null;
 	
 	// Connected clients (players + spectators)
 	private connections: Map<string, { ws: WebSocket; role: "black" | "white" | "spectator"; token: string }> = new Map();
@@ -125,6 +182,10 @@ export class GameRoom implements DurableObject {
 	}
 
 	private async loadGameState(): Promise<void> {
+		if (this.gameState && this.timeControl) {
+			return;
+		}
+
 		// Use stored gameId (set during WebSocket connection validation)
 		if (!this.gameId) {
 			// Fallback: try to get from DO name
@@ -135,7 +196,8 @@ export class GameRoom implements DurableObject {
 		
 		// Load game from DB
 		const game = await this.env.DB.prepare(
-			`SELECT initial_board, initial_turn, turn, ply, draw_offer_by 
+			`SELECT initial_board, initial_turn, turn, ply, draw_offer_by, 
+			        time_control_json, clock_black_ms, clock_white_ms, created_at, started_at
 			 FROM games WHERE id = ?`
 		).bind(gameId).first<{
 			initial_board: Uint8Array;
@@ -143,18 +205,40 @@ export class GameRoom implements DurableObject {
 			turn: number;
 			ply: number;
 			draw_offer_by: number | null;
+			time_control_json: string | null;
+			clock_black_ms: number | null;
+			clock_white_ms: number | null;
+			created_at: string;
+			started_at: string | null;
 		}>();
 		
 		if (!game) {
 			throw new Error("Game not found in database");
 		}
 		
+		// Load and initialize time control
+		if (game.time_control_json) {
+			try {
+				this.timeControl = normalizeTimeControl(JSON.parse(game.time_control_json));
+			} catch (e) {
+				this.timeControl = { ...DEFAULT_TIME_CONTROL };
+			}
+		} else {
+			this.timeControl = { ...DEFAULT_TIME_CONTROL };
+		}
+		
 		// Load actions
 		const actionsResult = await this.env.DB.prepare(
-			"SELECT action_u32 FROM game_actions WHERE game_id = ? ORDER BY ply ASC"
-		).bind(gameId).all<{ action_u32: number }>();
+			"SELECT action_u32, created_at FROM game_actions WHERE game_id = ? ORDER BY ply ASC"
+		).bind(gameId).all<{ action_u32: number; created_at: string }>();
 		
 		const actions = actionsResult.results?.map(r => r.action_u32) || [];
+		const lastActionAt = actionsResult.results?.length
+			? actionsResult.results[actionsResult.results.length - 1].created_at
+			: null;
+		const firstActionAt = actionsResult.results?.length
+			? actionsResult.results[0].created_at
+			: null;
 		
 		// Rebuild state by replaying actions
 		this.gameState = {
@@ -167,6 +251,35 @@ export class GameRoom implements DurableObject {
 		for (const action of actions) {
 			this.gameState = engine.applyAction(this.gameState, action);
 		}
+
+		// Initialize clocks from DB or use initial time
+		this.clockBlackMs = game.clock_black_ms ?? this.timeControl.initialMs.black;
+		this.clockWhiteMs = game.clock_white_ms ?? this.timeControl.initialMs.white;
+		
+		// Initialize buffers to full value at turn start
+		this.bufferBlackMs = this.timeControl.bufferMs.black;
+		this.bufferWhiteMs = this.timeControl.bufferMs.white;
+		
+		// Set turn start time based on last action (fallback to now if missing)
+		if (lastActionAt) {
+			const parsed = Date.parse(lastActionAt);
+			this.turnStartTime = Number.isNaN(parsed) ? Date.now() : parsed;
+		} else if (this.turnStartTime === null) {
+			this.turnStartTime = Date.now();
+		}
+
+		// Set game start time for max game clock
+		if (game.started_at) {
+			const parsedStart = Date.parse(game.started_at);
+			this.gameStartTime = Number.isNaN(parsedStart) ? null : parsedStart;
+		} else if (firstActionAt) {
+			const parsedStart = Date.parse(firstActionAt);
+			this.gameStartTime = Number.isNaN(parsedStart) ? null : parsedStart;
+		} else {
+			this.gameStartTime = null;
+		}
+
+		await this.scheduleNextAlarm();
 		
 		// Update legal set and send Bloom filter
 		if (this.gameState) {
@@ -185,12 +298,20 @@ export class GameRoom implements DurableObject {
 			return;
 		}
 		
-		const snapshot = {
+		const snapshot: any = {
 			boardB64: engine.packBoard(this.gameState.board),
 			turn: this.gameState.turn,
 			ply: this.gameState.ply,
 			drawOfferBy: this.gameState.drawOfferBy,
 		};
+		
+		// Include clock and buffer state in snapshot
+		const clockSnapshot = this.getClockSnapshot();
+		if (clockSnapshot && this.timeControl) {
+			snapshot.clocksMs = clockSnapshot.clocksMs;
+			snapshot.buffersMs = clockSnapshot.buffersMs;
+			snapshot.timeControl = this.timeControl;
+		}
 		
 		// Pack actions as base64
 		const actionsBuffer = new ArrayBuffer(this.actionLog.length * 4);
@@ -267,8 +388,21 @@ export class GameRoom implements DurableObject {
 			return;
 		}
 		
+		const shouldStartGame = this.gameStartTime === null && opcode !== 10 && opcode !== 11;
+		const startedAtIso = shouldStartGame ? new Date().toISOString() : null;
+		if (shouldStartGame) {
+			this.gameStartTime = Date.parse(startedAtIso!);
+		}
+
 		// Apply action
+		const previousState = this.gameState;
 		const newState = engine.applyAction(this.gameState, actionWord);
+		
+		// Update clocks if turn changed
+		const timeoutLoser =
+			previousState.turn !== newState.turn
+				? this.updateClocksAfterAction(previousState.turn, newState.turn)
+				: null;
 		
 		// Persist to DB
 		if (!this.gameId) {
@@ -289,13 +423,16 @@ export class GameRoom implements DurableObject {
 			new Date().toISOString()
 		).run();
 		
-		// Update game row
+		// Update game row with clock values
 		await this.env.DB.prepare(
-			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ? WHERE id = ?`
+			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
 		).bind(
 			newState.ply,
 			newState.turn,
 			newState.drawOfferBy,
+			this.clockBlackMs,
+			this.clockWhiteMs,
+			startedAtIso,
 			gameId
 		).run();
 		
@@ -308,6 +445,18 @@ export class GameRoom implements DurableObject {
 		// Broadcast action and Bloom filter
 		this.broadcastAction(actionWord);
 		this.broadcastBloomFilter(Array.from(legalActions));
+		
+		// Broadcast clock update if turn changed
+		if (previousState.turn !== newState.turn) {
+			this.broadcastClockUpdate(newState);
+		}
+
+		// End game on timeout
+		if (timeoutLoser !== null) {
+			await this.applyTimeoutEnd(timeoutLoser, gameId);
+		}
+
+		await this.scheduleNextAlarm();
 	}
 
 	private broadcastAction(actionWord: number): void {
@@ -333,6 +482,95 @@ export class GameRoom implements DurableObject {
 		}
 	}
 
+	/**
+	 * Update clocks and buffers after an action is completed
+	 * Applies buffer/increment rules and checks for timeouts
+	 */
+	private updateClocksAfterAction(previousTurn: engine.Color, newTurn: engine.Color): engine.Color | null {
+		if (!this.timeControl || !this.turnStartTime || this.gameState?.status === "ended") {
+			return null;
+		}
+		
+		const elapsed = Date.now() - this.turnStartTime;
+		const previousColor = previousTurn === 0 ? "black" : "white";
+		let timedOut: engine.Color | null = null;
+		
+		// Update clock and buffer for the player who just moved
+		if (previousColor === "black") {
+			if (elapsed <= this.bufferBlackMs) {
+				// Still within buffer time: consume buffer, keep clock same
+				this.bufferBlackMs = Math.max(0, this.bufferBlackMs - elapsed);
+			} else {
+				// Buffer exhausted: set buffer to 0, deduct from clock
+				const timeOverBuffer = elapsed - this.bufferBlackMs;
+				this.bufferBlackMs = 0;
+				this.clockBlackMs = Math.max(0, this.clockBlackMs - timeOverBuffer);
+			}
+			
+			if (this.clockBlackMs <= 0) {
+				this.clockBlackMs = 0;
+				timedOut = 0;
+			} else {
+				// Apply increment after turn completion
+				this.clockBlackMs = Math.max(0, this.clockBlackMs + this.timeControl.incrementMs.black);
+			}
+		} else {
+			if (elapsed <= this.bufferWhiteMs) {
+				// Still within buffer time: consume buffer, keep clock same
+				this.bufferWhiteMs = Math.max(0, this.bufferWhiteMs - elapsed);
+			} else {
+				// Buffer exhausted: set buffer to 0, deduct from clock
+				const timeOverBuffer = elapsed - this.bufferWhiteMs;
+				this.bufferWhiteMs = 0;
+				this.clockWhiteMs = Math.max(0, this.clockWhiteMs - timeOverBuffer);
+			}
+			
+			if (this.clockWhiteMs <= 0) {
+				this.clockWhiteMs = 0;
+				timedOut = 1;
+			} else {
+				// Apply increment after turn completion
+				this.clockWhiteMs = Math.max(0, this.clockWhiteMs + this.timeControl.incrementMs.white);
+			}
+		}
+		
+		// Reset buffer to full for the new active player
+		const newColor = newTurn === 0 ? "black" : "white";
+		if (newColor === "black") {
+			this.bufferBlackMs = this.timeControl.bufferMs.black;
+		} else {
+			this.bufferWhiteMs = this.timeControl.bufferMs.white;
+		}
+		
+		// Update turn start time
+		this.turnStartTime = Date.now();
+		
+		return timedOut;
+	}
+
+	private broadcastClockUpdate(state: engine.State): void {
+		const clockSnapshot = this.getClockSnapshot();
+		const message = JSON.stringify({
+			t: "clock",
+			ply: state.ply,
+			turn: state.turn === 0 ? "black" : "white",
+			clocksMs: clockSnapshot?.clocksMs ?? {
+				black: this.clockBlackMs,
+				white: this.clockWhiteMs,
+			},
+			buffersMs: clockSnapshot?.buffersMs ?? {
+				black: this.bufferBlackMs,
+				white: this.bufferWhiteMs,
+			},
+		});
+
+		for (const { ws } of this.connections.values()) {
+			if (ws.readyState === 1) { // WebSocket.OPEN
+				ws.send(message);
+			}
+		}
+	}
+
 	private broadcastBloomFilter(legalActions: number[]): void {
 		if (!this.gameState) return;
 		
@@ -348,6 +586,179 @@ export class GameRoom implements DurableObject {
 				ws.send(message);
 			}
 		}
+	}
+
+	private async applyTimeoutEnd(loserColor: engine.Color, gameId: string): Promise<void> {
+		if (!this.gameState || this.gameState.status === "ended") return;
+		
+		const endAction = engine.encodeEnd(2, loserColor);
+		const endedState = engine.applyAction(this.gameState, endAction);
+		
+		await this.env.DB.prepare(
+			`INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
+			 VALUES (?, ?, ?, ?, ?)`
+		).bind(
+			gameId,
+			endedState.ply - 1,
+			endAction,
+			null,
+			new Date().toISOString()
+		).run();
+		
+		await this.env.DB.prepare(
+			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+		).bind(
+			endedState.ply,
+			endedState.turn,
+			endedState.drawOfferBy,
+			this.clockBlackMs,
+			this.clockWhiteMs,
+			"ended",
+			endedState.winner ?? null,
+			11,
+			2,
+			gameId
+		).run();
+		
+		this.gameState = endedState;
+		const legalActions = engine.generateLegalActions(endedState);
+		this.legalSet = new Set(Array.from(legalActions));
+		this.actionLog.push(endAction);
+		
+		this.broadcastAction(endAction);
+		this.broadcastBloomFilter(Array.from(legalActions));
+	}
+
+	private getClockSnapshot(): { clocksMs: { black: number; white: number }; buffersMs: { black: number; white: number } } | null {
+		if (!this.timeControl || !this.gameState) return null;
+		const clocksMs = {
+			black: this.clockBlackMs,
+			white: this.clockWhiteMs,
+		};
+		const buffersMs = {
+			black: this.bufferBlackMs,
+			white: this.bufferWhiteMs,
+		};
+		if (this.turnStartTime === null) {
+			return { clocksMs, buffersMs };
+		}
+		const now = Date.now();
+		const elapsed = Math.max(0, now - this.turnStartTime);
+		const activeColor = this.gameState.turn === 0 ? "black" : "white";
+		const bufferFull = this.timeControl.bufferMs[activeColor];
+		const bufferRemaining = Math.max(0, bufferFull - elapsed);
+		const clockDeduction = Math.max(0, elapsed - bufferFull);
+		if (activeColor === "black") {
+			clocksMs.black = Math.max(0, clocksMs.black - clockDeduction);
+			buffersMs.black = bufferRemaining;
+		} else {
+			clocksMs.white = Math.max(0, clocksMs.white - clockDeduction);
+			buffersMs.white = bufferRemaining;
+		}
+		return { clocksMs, buffersMs };
+	}
+
+	private async scheduleNextAlarm(): Promise<void> {
+		if (!this.gameState || !this.timeControl) return;
+		if (this.gameState.status === "ended") {
+			await this.state.storage.setAlarm(null);
+			return;
+		}
+
+		let nextDeadline: number | null = null;
+		if (this.turnStartTime !== null) {
+			const activeColor = this.gameState.turn === 0 ? "black" : "white";
+			const bufferMs = this.timeControl.bufferMs[activeColor];
+			const clockMs = activeColor === "black" ? this.clockBlackMs : this.clockWhiteMs;
+			const deadline = this.turnStartTime + bufferMs + clockMs;
+			if (Number.isFinite(deadline)) {
+				nextDeadline = deadline;
+			}
+		}
+
+		if (this.timeControl.maxGameMs != null && this.gameStartTime !== null) {
+			const maxDeadline = this.gameStartTime + this.timeControl.maxGameMs;
+			if (Number.isFinite(maxDeadline)) {
+				nextDeadline = nextDeadline === null ? maxDeadline : Math.min(nextDeadline, maxDeadline);
+			}
+		}
+
+		if (nextDeadline === null) return;
+		await this.state.storage.setAlarm(nextDeadline);
+	}
+
+	private async applyMaxGameEnd(gameId: string): Promise<void> {
+		if (!this.gameState || this.gameState.status === "ended") return;
+		
+		const endAction = engine.encodeEnd(3);
+		const endedState = engine.applyAction(this.gameState, endAction);
+		
+		await this.env.DB.prepare(
+			`INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
+			 VALUES (?, ?, ?, ?, ?)`
+		).bind(
+			gameId,
+			endedState.ply - 1,
+			endAction,
+			null,
+			new Date().toISOString()
+		).run();
+		
+		await this.env.DB.prepare(
+			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+		).bind(
+			endedState.ply,
+			endedState.turn,
+			endedState.drawOfferBy,
+			this.clockBlackMs,
+			this.clockWhiteMs,
+			"ended",
+			endedState.winner ?? null,
+			11,
+			3,
+			gameId
+		).run();
+		
+		this.gameState = endedState;
+		const legalActions = engine.generateLegalActions(endedState);
+		this.legalSet = new Set(Array.from(legalActions));
+		this.actionLog.push(endAction);
+		
+		this.broadcastAction(endAction);
+		this.broadcastBloomFilter(Array.from(legalActions));
+	}
+
+	async alarm(): Promise<void> {
+		await this.loadGameState();
+		if (!this.gameState || this.gameState.status === "ended") {
+			return;
+		}
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+		const gameId = this.gameId;
+		const now = Date.now();
+
+		if (this.timeControl?.maxGameMs != null && this.gameStartTime !== null) {
+			if (now - this.gameStartTime >= this.timeControl.maxGameMs) {
+				await this.applyMaxGameEnd(gameId);
+				await this.scheduleNextAlarm();
+				return;
+			}
+		}
+
+		const snapshot = this.getClockSnapshot();
+		if (snapshot) {
+			const activeColor = this.gameState.turn === 0 ? "black" : "white";
+			if (snapshot.clocksMs[activeColor] <= 0) {
+				const loserColor: engine.Color = activeColor === "black" ? 0 : 1;
+				await this.applyTimeoutEnd(loserColor, gameId);
+			}
+		}
+
+		await this.scheduleNextAlarm();
 	}
 
 	/**
