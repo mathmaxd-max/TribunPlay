@@ -634,7 +634,9 @@ export function buildCache(
       if (dirA === undefined || dirB === undefined || dirA === dirB) return false;
 
       const action = engine.encodeCombine(centerCid, dirA, dirB, donateA, donateB);
-      return isLegal(action);
+      if (isLegal(action)) return true;
+      const swapped = engine.encodeCombine(centerCid, dirB, dirA, donateB, donateA);
+      return isLegal(swapped);
     };
 
     // Build symmetryModeForThird function

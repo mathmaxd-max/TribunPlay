@@ -368,16 +368,22 @@ export default function Game() {
     return options;
   };
 
-  const canPairWithAnyDonation = (
+  const canPairWithAnyDonations = (
     emptyCache: EmptyCache,
-    participant: { cid: number; donate: number },
-    candidateCid: number
+    donorCidA: number,
+    donorCidB: number
   ): boolean => {
-    const donationOptions = getDonationOptions(emptyCache, candidateCid);
-    if (donationOptions.length === 0) return false;
-    return donationOptions.some((donateB) =>
-      emptyCache.canPair(participant.cid, candidateCid, participant.donate, donateB)
-    );
+    const optionsA = getDonationOptions(emptyCache, donorCidA);
+    const optionsB = getDonationOptions(emptyCache, donorCidB);
+    if (optionsA.length === 0 || optionsB.length === 0) return false;
+    for (const donateA of optionsA) {
+      for (const donateB of optionsB) {
+        if (emptyCache.canPair(donorCidA, donorCidB, donateA, donateB)) {
+          return true;
+        }
+      }
+    }
+    return false;
   };
 
   const applySymmetryDonations = (
@@ -498,7 +504,7 @@ export default function Game() {
           
           if (!isCurrentlyParticipating && nextDonate > 0) {
             if (otherParticipating.length === 1) {
-              if (!canPairWithAnyDonation(emptyCache, otherParticipating[0], cid)) {
+              if (!canPairWithAnyDonations(emptyCache, otherParticipating[0].cid, cid)) {
                 return { type: 'idle' };
               }
             } else if (otherParticipating.length === 2) {
@@ -978,7 +984,7 @@ export default function Game() {
                     interactableSet.add(donorCid);
                     continue;
                   }
-                  if (canPairWithAnyDonation(emptyCache, participant, donorCid)) {
+                  if (canPairWithAnyDonations(emptyCache, participant.cid, donorCid)) {
                     interactableSet.add(donorCid);
                   }
                 }
