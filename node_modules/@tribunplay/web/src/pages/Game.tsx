@@ -29,6 +29,8 @@ interface GameSnapshot {
   turn: engine.Color;
   ply: number;
   drawOfferBy: engine.Color | null;
+  clocksMs?: { black: number; white: number };
+  timeControl?: { initialMs: number; bufferMs: number; incrementMs: number; maxGameMs?: number | null };
 }
 
 const NEIGHBOR_VECTORS = [
@@ -53,6 +55,25 @@ export default function Game() {
   const [error, setError] = useState<string | null>(null);
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
+  
+  // Clock state
+  const [clocksMs, setClocksMs] = useState<{ black: number; white: number }>({ black: 300000, white: 300000 });
+  const [bufferMsRemaining, setBufferMsRemaining] = useState<{ black: number; white: number }>({ black: 20000, white: 20000 });
+  const [timeControl, setTimeControl] = useState<{ initialMs: number; bufferMs: number; incrementMs: number; maxGameMs?: number | null }>({
+    initialMs: 300000, // 5 minutes
+    bufferMs: 20000,   // 20 seconds
+    incrementMs: 0,    // 0 increment
+    maxGameMs: null,
+  });
+  const turnStartTimeRef = useRef<number | null>(null);
+  const turnStartClockRef = useRef<number | null>(null);
+  const turnStartBufferRef = useRef<number | null>(null);
+  const lastTurnRef = useRef<engine.Color | null>(null);
+  const clocksRef = useRef<{ black: number; white: number }>(clocksMs);
+  const bufferRef = useRef<{ black: number; white: number }>(bufferMsRemaining);
+  const lastClockUpdateRef = useRef<{ black: number; white: number }>(clocksMs);
+  const gameStartTimeRef = useRef<number | null>(null);
+  const [totalGameTimeMs, setTotalGameTimeMs] = useState<number>(0);
   
   // UI State Machine
   const [uiState, setUiState] = useState<UIState>({ type: 'idle' });
@@ -193,6 +214,136 @@ export default function Game() {
     }
     return baseStates;
   }, [gameState, cache, role]);
+  // Keep clocksRef and bufferRef in sync with state and detect external updates
+  useEffect(() => {
+    const externalUpdate = 
+      lastClockUpdateRef.current.black !== clocksMs.black ||
+      lastClockUpdateRef.current.white !== clocksMs.white;
+    
+    // If external update detected and we have a timer running, reset it
+    if (externalUpdate && gameState && turnStartTimeRef.current !== null) {
+      const activeColor = gameState.turn === 0 ? 'black' : 'white';
+      turnStartTimeRef.current = Date.now();
+      turnStartClockRef.current = clocksMs[activeColor];
+      turnStartBufferRef.current = bufferMsRemaining[activeColor];
+    }
+    
+    clocksRef.current = clocksMs;
+    bufferRef.current = bufferMsRemaining;
+    lastClockUpdateRef.current = clocksMs;
+  }, [clocksMs, bufferMsRemaining, gameState]);
+
+  // Track total game time and check for max game time tie
+  useEffect(() => {
+    if (!gameState || gameStartTimeRef.current === null) return;
+    
+    const maxGameMs = timeControl.maxGameMs;
+    
+    const interval = setInterval(() => {
+      if (gameStartTimeRef.current === null) return;
+      const elapsed = Date.now() - gameStartTimeRef.current;
+      setTotalGameTimeMs(elapsed);
+      
+      // Check if max game time is reached - force tie (only if maxGameMs is set)
+      if (maxGameMs != null && elapsed >= maxGameMs) {
+        // Server is authoritative, but we can show the condition and the server will emit END(timeout-game-tie)
+        // For now, we just track it - the server will handle the actual tie action
+        clearInterval(interval);
+      }
+    }, 1000); // Update every second
+    
+    return () => clearInterval(interval);
+  }, [gameState, timeControl.maxGameMs]);
+
+  // Clock countdown effect with separate buffer tracking
+  useEffect(() => {
+    if (!gameState) return;
+    
+    const activeColor = gameState.turn === 0 ? 'black' : 'white';
+    const activeClock = clocksMs[activeColor];
+    const activeBuffer = bufferMsRemaining[activeColor];
+    
+    // Don't countdown if time is already 0 or negative
+    if (activeClock <= 0) return;
+    
+    // Reset turn start time when turn changes
+    const turnChanged = lastTurnRef.current !== null && lastTurnRef.current !== gameState.turn;
+    if (turnChanged || turnStartTimeRef.current === null || turnStartClockRef.current === null || turnStartBufferRef.current === null) {
+      turnStartTimeRef.current = Date.now();
+      turnStartClockRef.current = activeClock;
+      turnStartBufferRef.current = activeBuffer;
+      lastTurnRef.current = gameState.turn;
+    }
+    
+    const interval = setInterval(() => {
+      if (!gameState || turnStartTimeRef.current === null || turnStartClockRef.current === null || turnStartBufferRef.current === null) {
+        return;
+      }
+      
+      const currentColor = gameState.turn === 0 ? 'black' : 'white';
+      const currentClock = clocksRef.current[currentColor];
+      const currentBuffer = bufferRef.current[currentColor];
+      
+      // If turn changed, reset timer
+      if (currentColor !== activeColor) {
+        turnStartTimeRef.current = Date.now();
+        turnStartClockRef.current = currentClock;
+        turnStartBufferRef.current = currentBuffer;
+        lastTurnRef.current = gameState.turn;
+        return;
+      }
+      
+      // If clock was updated externally (e.g., from server), reset timer
+      if (turnStartClockRef.current !== currentClock || turnStartBufferRef.current !== currentBuffer) {
+        turnStartTimeRef.current = Date.now();
+        turnStartClockRef.current = currentClock;
+        turnStartBufferRef.current = currentBuffer;
+        return;
+      }
+      
+      const elapsed = Date.now() - turnStartTimeRef.current;
+      
+      // Calculate buffer and clock remaining
+      let remainingBuffer: number;
+      let remainingClock: number;
+      
+      if (elapsed <= turnStartBufferRef.current) {
+        // Still within buffer time: decrease buffer, keep clock the same
+        remainingBuffer = Math.max(0, turnStartBufferRef.current - elapsed);
+        remainingClock = turnStartClockRef.current;
+      } else {
+        // Buffer exhausted: buffer is 0, decrease clock
+        const timeOverBuffer = elapsed - turnStartBufferRef.current;
+        remainingBuffer = 0;
+        remainingClock = Math.max(0, turnStartClockRef.current - timeOverBuffer);
+      }
+      
+      // Update buffer if changed
+      if (bufferRef.current[currentColor] !== remainingBuffer) {
+        bufferRef.current[currentColor] = remainingBuffer;
+        setBufferMsRemaining((prev) => ({
+          ...prev,
+          [currentColor]: remainingBuffer,
+        }));
+      }
+      
+      // Update clock if changed
+      if (clocksRef.current[currentColor] !== remainingClock) {
+        setClocksMs((prev) => ({
+          ...prev,
+          [currentColor]: remainingClock,
+        }));
+      }
+      
+      // If time runs out, the server will handle timeout
+      if (remainingClock <= 0) {
+        clearInterval(interval);
+      }
+    }, 100); // Update every 100ms for smooth display
+    
+    return () => clearInterval(interval);
+  }, [gameState?.turn, gameState?.ply, timeControl, clocksMs, bufferMsRemaining]);
+
   useEffect(() => {
     if (!boardViewportRef.current) return;
 
@@ -299,19 +450,60 @@ export default function Game() {
                 drawOfferBy: snapshot.drawOfferBy,
               };
 
-              // Replay actions
-              let currentState = state;
-              const actions = message.actions || [];
-              try {
-                for (const action of actions) {
-                  currentState = engine.applyAction(currentState, action);
+              setGameState(state);
+              setUiState({ type: 'idle' });
+              
+              // Initialize clock state
+              if (snapshot.clocksMs) {
+                setClocksMs(snapshot.clocksMs);
+                const activeColor = snapshot.turn === 0 ? 'black' : 'white';
+                turnStartTimeRef.current = Date.now();
+                turnStartClockRef.current = snapshot.clocksMs[activeColor];
+              }
+              if (snapshot.timeControl) {
+                setTimeControl(snapshot.timeControl);
+                // Initialize buffer for both players
+                setBufferMsRemaining({
+                  black: snapshot.timeControl.bufferMs,
+                  white: snapshot.timeControl.bufferMs,
+                });
+                turnStartBufferRef.current = snapshot.timeControl.bufferMs;
+              } else {
+                // Default time control if not provided
+                const defaultTimeControl = {
+                  initialMs: 300000, // 5 minutes
+                  bufferMs: 20000,   // 20 seconds
+                  incrementMs: 0,    // 0 increment
+                  maxGameMs: null,   // Disabled by default
+                };
+                setTimeControl(defaultTimeControl);
+                // Initialize buffer for both players
+                setBufferMsRemaining({
+                  black: defaultTimeControl.bufferMs,
+                  white: defaultTimeControl.bufferMs,
+                });
+                turnStartBufferRef.current = defaultTimeControl.bufferMs;
+              }
+              // Initialize game start time for total game time tracking
+              if (gameStartTimeRef.current === null) {
+                gameStartTimeRef.current = Date.now();
+                setTotalGameTimeMs(0);
+              }
+            } else if (message.t === 'clock') {
+              // Clock update from server
+              if (message.clocksMs) {
+                setClocksMs(message.clocksMs);
+                if (message.turn !== undefined) {
+                  const activeColor = message.turn === 'black' || message.turn === 0 ? 'black' : 'white';
+                  turnStartTimeRef.current = Date.now();
+                  turnStartClockRef.current = message.clocksMs[activeColor];
+                  // Reset buffer for the active player
+                  turnStartBufferRef.current = timeControl.bufferMs;
+                  setBufferMsRemaining((prev) => ({
+                    ...prev,
+                    [activeColor]: timeControl.bufferMs,
+                  }));
                 }
-                setGameState(currentState);
-                setUiState({ type: 'idle' });
-              } catch (err) {
-                setError(err instanceof Error ? err.message : 'Failed to apply actions');
-                setGameState(state);
-                setUiState({ type: 'idle' });
               }
             } else if (message.t === 'legal') {
               // Bloom filter validator update
@@ -330,7 +522,34 @@ export default function Game() {
             try {
               setGameState((prevState) => {
                 if (!prevState) return prevState;
-                return engine.applyAction(prevState, actionWord);
+                const newState = engine.applyAction(prevState, actionWord);
+                
+                // Update clock: apply increment and start new turn timer
+                if (prevState.turn !== newState.turn) {
+                  setClocksMs((prevClocks) => {
+                    const activeColor = prevState.turn === 0 ? 'black' : 'white';
+                    const newClocks = { ...prevClocks };
+                    // Increment is applied after turn completion
+                    newClocks[activeColor] = Math.max(0, prevClocks[activeColor] + timeControl.incrementMs);
+                    
+                    // Start timer for new turn
+                    const newActiveColor = newState.turn === 0 ? 'black' : 'white';
+                    turnStartTimeRef.current = Date.now();
+                    turnStartClockRef.current = newClocks[newActiveColor];
+                    turnStartBufferRef.current = timeControl.bufferMs;
+                    
+                    return newClocks;
+                  });
+                  
+                  // Reset buffer for the new active player
+                  const newActiveColor = newState.turn === 0 ? 'black' : 'white';
+                  setBufferMsRemaining((prev) => ({
+                    ...prev,
+                    [newActiveColor]: timeControl.bufferMs,
+                  }));
+                }
+                
+                return newState;
               });
               setUiState({ type: 'idle' });
             } catch (err) {
@@ -1534,6 +1753,167 @@ export default function Game() {
         {renderBoard()}
       </div>
 
+      {/* Clock Display */}
+      {gameState && (
+        <div style={{
+          background: 'white',
+          padding: '20px',
+          borderRadius: '8px',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+          marginTop: '20px',
+        }}>
+          <h2 style={{ marginBottom: '15px' }}>Clock</h2>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-around',
+            gap: '20px',
+            flexWrap: 'wrap',
+          }}>
+            {/* Black Clock */}
+            <div style={{
+              flex: '1',
+              minWidth: '200px',
+              padding: '15px',
+              borderRadius: '8px',
+              background: gameState.turn === 0 ? '#e3f2fd' : '#f5f5f5',
+              border: gameState.turn === 0 ? '2px solid #2196F3' : '2px solid #ddd',
+              textAlign: 'center',
+            }}>
+              <div style={{
+                fontSize: '14px',
+                fontWeight: 'bold',
+                marginBottom: '8px',
+                color: '#333',
+              }}>
+                Black
+              </div>
+              <div style={{
+                fontSize: '32px',
+                fontWeight: 'bold',
+                fontFamily: 'monospace',
+                color: clocksMs.black <= 10000 ? '#d32f2f' : '#333',
+              }}>
+                {formatTime(clocksMs.black)}
+              </div>
+              {gameState.turn === 0 && bufferMsRemaining.black > 0 && (
+                <div style={{
+                  marginTop: '8px',
+                  fontSize: '14px',
+                  fontFamily: 'monospace',
+                  color: '#4CAF50',
+                  fontWeight: '500',
+                }}>
+                  Buffer: {formatTime(bufferMsRemaining.black)}
+                </div>
+              )}
+            </div>
+            
+            {/* White Clock */}
+            <div style={{
+              flex: '1',
+              minWidth: '200px',
+              padding: '15px',
+              borderRadius: '8px',
+              background: gameState.turn === 1 ? '#e3f2fd' : '#f5f5f5',
+              border: gameState.turn === 1 ? '2px solid #2196F3' : '2px solid #ddd',
+              textAlign: 'center',
+            }}>
+              <div style={{
+                fontSize: '14px',
+                fontWeight: 'bold',
+                marginBottom: '8px',
+                color: '#333',
+              }}>
+                White
+              </div>
+              <div style={{
+                fontSize: '32px',
+                fontWeight: 'bold',
+                fontFamily: 'monospace',
+                color: clocksMs.white <= 10000 ? '#d32f2f' : '#333',
+              }}>
+                {formatTime(clocksMs.white)}
+              </div>
+              {gameState.turn === 1 && bufferMsRemaining.white > 0 && (
+                <div style={{
+                  marginTop: '8px',
+                  fontSize: '14px',
+                  fontFamily: 'monospace',
+                  color: '#4CAF50',
+                  fontWeight: '500',
+                }}>
+                  Buffer: {formatTime(bufferMsRemaining.white)}
+                </div>
+              )}
+            </div>
+          </div>
+          <div style={{
+            marginTop: '15px',
+            fontSize: '12px',
+            color: '#666',
+            textAlign: 'center',
+          }}>
+            Buffer: {formatTime(timeControl.bufferMs)} | Increment: {formatTime(timeControl.incrementMs)}
+          </div>
+          <div style={{
+            marginTop: '10px',
+            padding: '10px',
+            borderRadius: '4px',
+            background: timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs 
+              ? '#ffebee' 
+              : timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs * 0.9
+              ? '#fff3e0'
+              : '#f5f5f5',
+            border: timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs
+              ? '2px solid #d32f2f'
+              : timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs * 0.9
+              ? '2px solid #f57c00'
+              : '1px solid #ddd',
+            textAlign: 'center',
+          }}>
+            <div style={{
+              fontSize: '14px',
+              fontWeight: 'bold',
+              marginBottom: '4px',
+              color: timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs ? '#d32f2f' : '#333',
+            }}>
+              Total Game Time: {formatTime(totalGameTimeMs)}
+            </div>
+            {timeControl.maxGameMs != null && (
+              <div style={{
+                fontSize: '12px',
+                color: totalGameTimeMs >= timeControl.maxGameMs ? '#d32f2f' : '#666',
+              }}>
+                Max: {formatTime(timeControl.maxGameMs)}
+                {totalGameTimeMs >= timeControl.maxGameMs && (
+                  <span style={{ marginLeft: '8px', fontWeight: 'bold' }}>— TIE (Time Limit Reached)</span>
+                )}
+                {totalGameTimeMs < timeControl.maxGameMs && totalGameTimeMs >= timeControl.maxGameMs * 0.9 && (
+                  <span style={{ marginLeft: '8px', fontWeight: 'bold' }}>— Approaching Limit</span>
+                )}
+              </div>
+            )}
+            {timeControl.maxGameMs == null && (
+              <div style={{
+                fontSize: '11px',
+                color: '#999',
+                fontStyle: 'italic',
+              }}>
+                No time limit
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
     </div>
   );
+}
+
+// Helper function to format time in MM:SS format
+function formatTime(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
