@@ -1211,6 +1211,9 @@ export default function Game() {
     const selectedSet = new Set(selectedTiles);
     const interactableSet = new Set(interactableTiles);
 
+    const splitOffsetX = 12;
+    const splitOffsetY = 15;
+
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
       const overlayUnit = previewOverlay?.units.get(cid);
       const unit: { p: number; color: engine.Color; tribun: boolean } | null = overlayUnit
@@ -1311,18 +1314,63 @@ export default function Game() {
             justifyContent: 'center',
             fontSize: '10px',
           }}>
-          {unit && (
-            <div style={{
-              fontSize: '42px',
-              fontWeight: 'bold',
-              color: unit.color === 0 ? '#000' : '#fff',
-              WebkitTextStroke: unit.color === 0 ? '1px #fff' : '1px #000',
-              textStroke: unit.color === 0 ? '1px #fff' : '1px #000',
-            }}>
-              {unit.p}
-              {unit.tribun && 'T'}
-            </div>
-          )}
+          {unit && (() => {
+            const textColor = unit.tribun
+              ? (unit.color === 0 ? '#AE0000' : '#00B4FF')
+              : (unit.color === 0 ? '#000' : '#fff');
+            const strokeColor = unit.tribun
+            ? (unit.color === 0 ? '#000' : '#fff')
+            : (unit.color === 0 ? '#fff' : '#000');
+            const mainFontSize = unit.tribun ? 65 : 55;
+            const splitFontSize = unit.tribun ? 50 : 45;
+
+            if (unit.s > 0) {
+              const primaryOffset = { x: -splitOffsetX, y: splitOffsetY };
+              const secondaryOffset = { x: splitOffsetX, y: -splitOffsetY };
+              return (
+                <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+                  <div style={{
+                    position: 'absolute',
+                    left: '50%',
+                    top: '50%',
+                    transform: `translate(calc(-50% + ${primaryOffset.x}px), calc(-50% + ${-primaryOffset.y}px))`,
+                    fontSize: `${splitFontSize}px`,
+                    fontWeight: 'bold',
+                    color: textColor,
+                    WebkitTextStroke: `1px ${strokeColor}`,
+                    textStroke: `1px ${strokeColor}`,
+                  }}>
+                    {unit.p}
+                  </div>
+                  <div style={{
+                    position: 'absolute',
+                    left: '50%',
+                    top: '50%',
+                    transform: `translate(calc(-50% + ${secondaryOffset.x}px), calc(-50% + ${-secondaryOffset.y}px))`,
+                    fontSize: `${splitFontSize}px`,
+                    fontWeight: 'bold',
+                    color: strokeColor,
+                    WebkitTextStroke: `1px ${textColor}`,
+                    textStroke: `1px ${textColor}`,
+                  }}>
+                    {unit.s}
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <div style={{
+                fontSize: `${mainFontSize}px`,
+                fontWeight: 'bold',
+                color: textColor,
+                WebkitTextStroke: `1px ${strokeColor}`,
+                textStroke: `1px ${strokeColor}`,
+              }}>
+                {unit.p}
+              </div>
+            );
+          })()}
           <div style={{
             position: 'absolute',
             bottom: '4px',
