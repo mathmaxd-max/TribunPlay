@@ -83,11 +83,17 @@ A donor participates iff `donate > 0`.
 
 ### Participation constraints
 - At most 3 donors may be participating at once.
+- **3 donors can only be selected if a symmetrical combination is possible** (either sym3 or sym6 configuration).
 
 ### Symmetry selection with 3 donors (deterministic)
 When the third donor becomes active:
 1) If the three donor positions form a legal **3-sym** configuration (3+ or 3-) → enter `sym3`.
 2) Otherwise, the only valid interpretation is **sym6** at this center (if any sym6 legal action exists). If sym6 is not available, the third donor selection MUST be rejected.
+
+### Donor interactability
+- Only donors that **can participate** given the current choice of donors should be marked as interactable.
+- If selecting a donor would make a symmetrical combination impossible (e.g., selecting a third donor when sym3 and sym6 are both unavailable), that donor MUST NOT be interactable.
+- Donors that cannot participate in any valid combine/sym-combine configuration with the currently selected donors should remain in `selectable` or `default` state, not `interactable`.
 
 ### Symmetry donation toggling
 In a symmetry mode, donation is global:
@@ -105,9 +111,15 @@ This applies to both sym3 and sym6.
 ### Click centerCid
 - If there are active donations, reset to initial display (no donors participating).
 
+### Preview
+The UI MUST show a preview of the board state that would result from the current donor selections and donations, **even if the combination is illegal** (e.g., single donor, invalid heights, invalid configurations).
+- The preview should directly construct the resulting board state without checking legality.
+- This allows users to see what the board would look like even for temporary invalid configurations.
+
 ### Submission
 Compute `candidates` as legal COMBINE/SYM_COMBINE actions matching the current donors + donate amounts + symmetry config.
 - If `candidates` is non-empty, submit `candidates[i]` (with `i` cycled by clicking `centerCid` again or the last clicked donor).
+- Submission is only allowed if the action word exists in `legalSet`.
 
 ---
 
@@ -215,6 +227,12 @@ If allocations yield a unique intended action:
   - pending action is SPLIT with the `h0..h5 = alloc[0..5]`.
 
 Submission is allowed iff the constructed action word exists in `legalSet`.
+
+### Preview
+The UI MUST show a preview of the board state that would result from the current allocation amounts, **even if the split is illegal** (e.g., invalid heights, allocations exceeding primary, etc.).
+- The preview should directly construct the resulting board state from allocation amounts without searching through legal moves (which could be 10k+).
+- This allows users to see what the board would look like even for temporary invalid configurations.
+- Heights should be displayed directly as specified in the allocation amounts.
 
 ### Notes on temporary invalidity
 The UI MAY temporarily display origin primary values that are invalid or violate SP.

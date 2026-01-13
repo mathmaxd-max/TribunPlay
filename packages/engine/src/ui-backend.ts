@@ -651,9 +651,12 @@ export function getEmptyStateOptions(
       const dirSet = new Set(dirs);
       const sym3Config1 = new Set([0, 4, 5]);
       const sym3Config2 = new Set([3, 1, 2]);
+
+      const isSym3Config1 = dirSet.size === 3 && dirs.every(d => sym3Config1.has(d));
+      const isSym3Config2 = dirSet.size === 3 && dirs.every(d => sym3Config2.has(d));
       
-      if (dirSet.size === 3 && (sym3Config1.has(dirs[0]) || sym3Config2.has(dirs[0]))) {
-        const config: 0 | 1 | 2 = sym3Config1.has(dirs[0]) ? 1 : 2;
+      if (isSym3Config1 || isSym3Config2) {
+        const config: 0 | 1 | 2 = isSym3Config1 ? 1 : 2;
         const [cid0] = participatingDonors[0];
         const unit0 = unitByteToUnit(state.board[cid0]);
         if (unit0) {

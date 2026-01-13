@@ -1,7 +1,10 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import * as engine from '@tribunplay/engine';
 import { getHexagonColor, getBaseColor, type HexagonState } from '../hexagonColors';
+import { LegalBloomValidator, type LegalValidatorMessage } from '../net/LegalBloom';
+import { buildCache } from '../ui/cache/buildCache';
+import type { UiMoveCache } from '../ui/cache/UiMoveCache';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -13,6 +16,15 @@ interface GameSnapshot {
   drawOfferBy: engine.Color | null;
 }
 
+const NEIGHBOR_VECTORS = [
+  [1, 1],
+  [1, 0],
+  [0, 1],
+  [-1, -1],
+  [-1, 0],
+  [0, -1],
+] as const;
+
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
@@ -20,19 +32,62 @@ export default function Game() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [role, setRole] = useState<Role | null>(null);
   const [gameState, setGameState] = useState<engine.State | null>(null);
-  const [legalActions, setLegalActions] = useState<Uint32Array>(new Uint32Array());
   const [error, setError] = useState<string | null>(null);
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
-  const [hoveredCid, setHoveredCid] = useState<number | null>(null);
   
   // UI State Machine
   const [uiState, setUiState] = useState<engine.UIState>({ type: 'idle' });
-  const [groupedMoves, setGroupedMoves] = useState<engine.GroupedLegalMoves | null>(null);
-  const [optionIndex, setOptionIndex] = useState(0);
-  const [emptyDonors, setEmptyDonors] = useState<Map<number, number>>(new Map()); // cid -> displayed primary
-  const [secondaryAllocations, setSecondaryAllocations] = useState<number[]>([0, 0, 0, 0, 0, 0]);
-
+  const [validator, setValidator] = useState<LegalBloomValidator | null>(null);
+  
+  const cache = useMemo(() => {
+    if (!gameState || !validator) return null;
+    return buildCache(gameState, validator);
+  }, [gameState, validator]);
+  
+  const baseTileStates = useMemo(() => {
+    const baseStates: Array<'default' | 'selectable'> = new Array(121).fill('default');
+    if (!gameState || !cache) return baseStates;
+    const isActive = gameState.turn === (role === 'black' ? 0 : 1);
+    if (!isActive) return baseStates;
+    
+    // Build idle clickable from cache - only include tiles that actually have moves
+    const idleClickable: number[] = [];
+    
+    // Enemy tiles with attack options
+    for (const cid of cache.enemy.keys()) {
+      idleClickable.push(cid);
+    }
+    
+    // Empty tiles with combine options
+    for (const cid of cache.empty.keys()) {
+      idleClickable.push(cid);
+    }
+    
+    // Own tiles with primary moves (must have targets)
+    for (const cid of cache.ownPrimary.keys()) {
+      const primaryCache = cache.ownPrimary.get(cid);
+      if (primaryCache && primaryCache.targets.size > 0) {
+        idleClickable.push(cid);
+      }
+    }
+    
+    // Own tiles with secondary moves (must have empty adjacent tiles)
+    for (const cid of cache.ownSecondary.keys()) {
+      const secondaryCache = cache.ownSecondary.get(cid);
+      if (secondaryCache && secondaryCache.split.emptyAdjDirs.length > 0) {
+        // Only add if not already added as primary (avoid duplicates)
+        if (!idleClickable.includes(cid)) {
+          idleClickable.push(cid);
+        }
+      }
+    }
+    
+    for (const cid of idleClickable) {
+      baseStates[cid] = 'selectable';
+    }
+    return baseStates;
+  }, [gameState, cache, role]);
   useEffect(() => {
     if (!boardViewportRef.current) return;
 
@@ -52,19 +107,6 @@ export default function Game() {
     observer.observe(element);
 
     return () => observer.disconnect();
-  }, [gameState]);
-
-  // Build grouped legal moves when gameState changes
-  useEffect(() => {
-    if (gameState) {
-      const grouped = engine.buildGroupedLegalMoves(gameState);
-      setGroupedMoves(grouped);
-      // Reset UI state to idle when game state changes (new turn)
-      setUiState({ type: 'idle' });
-      setOptionIndex(0);
-      setEmptyDonors(new Map());
-      setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-    }
   }, [gameState]);
 
   useEffect(() => {
@@ -154,9 +196,12 @@ export default function Game() {
               }
 
               setGameState(currentState);
-              const legal = engine.generateLegalActions(currentState);
-              setLegalActions(legal);
-              // Grouped moves will be built by useEffect
+              setUiState({ type: 'idle' });
+            } else if (message.t === 'legal') {
+              // Bloom filter validator update
+              const legalMsg = message as LegalValidatorMessage;
+              const newValidator = new LegalBloomValidator(legalMsg.bloom, legalMsg.ply);
+              setValidator(newValidator);
             } else if (message.t === 'error') {
               setError(message.message);
             }
@@ -167,16 +212,9 @@ export default function Game() {
 
             setGameState((prevState) => {
               if (!prevState) return prevState;
-              const newState = engine.applyAction(prevState, actionWord);
-              const legal = engine.generateLegalActions(newState);
-              setLegalActions(legal);
-              // Reset UI state after action is applied
-              setUiState({ type: 'idle' });
-              setOptionIndex(0);
-              setEmptyDonors(new Map());
-              setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-              return newState;
+              return engine.applyAction(prevState, actionWord);
             });
+            setUiState({ type: 'idle' });
           }
         };
 
@@ -223,7 +261,7 @@ export default function Game() {
       return;
     }
 
-    if (!groupedMoves || !engine.isActionLegal(action, groupedMoves)) {
+    if (!validator || !validator.isProbablyLegal(action)) {
       setError('Action is not legal');
       return;
     }
@@ -236,213 +274,286 @@ export default function Game() {
     // UI state will be reset when action is applied via WebSocket
   };
 
+  const cycleIndex = (currentIndex: number, delta: number, length: number) => {
+    if (length <= 0) return 0;
+    return ((currentIndex + delta) % length + length) % length;
+  };
+
+  const getNeighborDirection = (centerCid: number, neighborCid: number): number | null => {
+    try {
+      const { x: cx, y: cy } = engine.decodeCoord(centerCid);
+      const { x: nx, y: ny } = engine.decodeCoord(neighborCid);
+      const dx = nx - cx;
+      const dy = ny - cy;
+      for (let dir = 0; dir < NEIGHBOR_VECTORS.length; dir++) {
+        const [vx, vy] = NEIGHBOR_VECTORS[dir];
+        if (vx === dx && vy === dy) return dir;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
   const handleTileClick = (cid: number, d: number = 1) => {
-    if (!gameState || !groupedMoves) return;
+    if (!gameState || !cache) return;
     
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive) return;
 
-    switch (uiState.type) {
-      case 'idle': {
-        // Determine which state to enter
-        const newState = engine.getTileClickState(cid, gameState, groupedMoves);
-        if (newState) {
-          setUiState(newState);
-          setOptionIndex(0);
-        }
-        break;
-      }
-      
-      case 'enemy': {
-        if (cid === uiState.targetCid) {
-          // Cycle options
-          const options = engine.getEnemyOptions(uiState.targetCid, groupedMoves);
-          if (options.length > 0) {
-            const newIndex = ((uiState.optionIndex + d) % options.length + options.length) % options.length;
-            setOptionIndex(newIndex);
-            setUiState({ ...uiState, optionIndex: newIndex });
+    setUiState((prevState) => {
+      switch (prevState.type) {
+        case 'idle': {
+          // Check cache to determine which state to enter
+          if (cache.enemy.has(cid)) {
+            const enemyCache = cache.enemy.get(cid)!;
+            return { type: 'enemy', targetCid: cid, optionIndex: 0 };
           }
-        } else {
-          // Clicked non-clickable tile - reset to idle
-          setUiState({ type: 'idle' });
-          setOptionIndex(0);
-          setEmptyDonors(new Map());
-          setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+          if (cache.empty.has(cid)) {
+            return { type: 'empty', centerCid: cid, donors: new Map(), optionIndex: 0 };
+          }
+          
+          // For own units, check which state has moves and prefer that one
+          const ownPrimaryCache = cache.ownPrimary.get(cid);
+          const ownSecondaryCache = cache.ownSecondary.get(cid);
+          
+          // Check if primary has actual moves (targets)
+          const hasPrimaryMoves = ownPrimaryCache && ownPrimaryCache.targets.size > 0;
+          // Check if secondary has moves (empty adjacent tiles for split/backstabb)
+          const hasSecondaryMoves = ownSecondaryCache && ownSecondaryCache.split.emptyAdjDirs.length > 0;
+          
+          if (hasPrimaryMoves) {
+            return { type: 'own_primary', originCid: cid, targetCid: null, optionIndex: 0 };
+          }
+          if (hasSecondaryMoves) {
+            return { type: 'own_secondary', originCid: cid, allocations: [0, 0, 0, 0, 0, 0] };
+          }
+          
+          return prevState;
         }
-        break;
-      }
-      
-      case 'empty': {
-        if (cid === uiState.centerCid) {
-          // Click center - reset donors
-          setEmptyDonors(new Map());
-          setOptionIndex(0);
-        } else {
-          // Click donor - cycle donation
-          const donors = engine.getEmptyStateDonors(uiState.centerCid, gameState);
-          const donorInfo = donors.get(cid);
-          if (donorInfo) {
-            const validValues = engine.getValidDonationValues(cid, gameState);
-            // Initialize with actual primary if not already set
-            const currentDisp = emptyDonors.has(cid) ? emptyDonors.get(cid)! : donorInfo.actualPrimary;
-            const currentIndex = validValues.indexOf(currentDisp);
-            const nextIndex = ((currentIndex + d) % validValues.length + validValues.length) % validValues.length;
-            const newDisp = validValues[nextIndex];
+        
+        case 'enemy': {
+          if (cid !== prevState.targetCid) {
+            return { type: 'idle' };
+          }
+          const enemyCache = cache.enemy.get(prevState.targetCid);
+          if (!enemyCache || enemyCache.options.length === 0) return prevState;
+          const newIndex = cycleIndex(prevState.optionIndex, d, enemyCache.options.length);
+          return { ...prevState, optionIndex: newIndex };
+        }
+        
+        case 'empty': {
+          if (cid === prevState.centerCid) {
+            return { ...prevState, donors: new Map(), optionIndex: 0 };
+          }
+          const emptyCache = cache.empty.get(prevState.centerCid);
+          if (!emptyCache) return { type: 'idle' };
+          
+          const donorRule = emptyCache.donorRules.get(cid);
+          if (!donorRule) {
+            // Check participation restriction: if 2 donors selected, only symmetry-compatible 3rd donors allowed
+            const participating = Array.from(prevState.donors.entries()).filter(([_, hDisp]) => {
+              const rule = emptyCache.donorRules.get(cid);
+              if (!rule) return false;
+              return rule.actualPrimary - hDisp > 0;
+            });
             
-            const newDonors = new Map(emptyDonors);
-            newDonors.set(cid, newDisp);
-            setEmptyDonors(newDonors);
-            
-            // Check for valid action
-            const options = engine.getEmptyStateOptions(uiState.centerCid, newDonors, gameState, groupedMoves);
-            if (options.length > 0) {
-              setOptionIndex(0);
-            }
-          } else {
-            // Clicked non-clickable tile - reset to idle
-            setUiState({ type: 'idle' });
-            setOptionIndex(0);
-            setEmptyDonors(new Map());
-            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-          }
-        }
-        break;
-      }
-      
-      case 'own_primary': {
-        if (cid === uiState.originCid) {
-          // Click origin
-          if (uiState.targetCid !== null) {
-            // Clear target selection
-            setUiState({ ...uiState, targetCid: null, optionIndex: 0 });
-          } else {
-            // Toggle to Secondary if available
-            const secondaryOpts = groupedMoves.ownSecondaryOptions.get(uiState.originCid);
-            if (secondaryOpts && (secondaryOpts.splits.length > 0 || secondaryOpts.backstabbs.length > 0)) {
-              setUiState({ type: 'own_secondary', originCid: uiState.originCid, allocations: [0, 0, 0, 0, 0, 0] });
-              setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-            }
-          }
-        } else {
-          // Click target
-          const highlighted = engine.getOwnPrimaryHighlightedTiles(uiState.originCid, groupedMoves);
-          if (highlighted.includes(cid)) {
-            if (uiState.targetCid === cid) {
-              // Cycle options for same target
-              const options = engine.getOwnPrimaryOptions(uiState.originCid, cid, groupedMoves);
-              if (options.length > 1) {
-                const newIndex = ((uiState.optionIndex + d) % options.length + options.length) % options.length;
-                setOptionIndex(newIndex);
-                setUiState({ ...uiState, optionIndex: newIndex });
+            if (participating.length === 2) {
+              // Check if this donor could create symmetry with the 2 participating
+              const participatingCids = participating.map(([cid]) => cid);
+              const testDonors = [...participatingCids, cid];
+              const symmetryMode = emptyCache.symmetryModeForThird(testDonors);
+              if (symmetryMode === null) {
+                return { type: 'idle' }; // Not symmetry-compatible
               }
-            } else {
-              // Select new target
-              const options = engine.getOwnPrimaryOptions(uiState.originCid, cid, groupedMoves);
-              if (options.length > 0) {
-                setUiState({ ...uiState, targetCid: cid, optionIndex: 0 });
-                setOptionIndex(0);
+            } else if (participating.length > 0) {
+              // If 1 donor participating, check if this donor can pair with it
+              const [firstCid, firstDisp] = participating[0];
+              const firstRule = emptyCache.donorRules.get(firstCid);
+              if (!firstRule) return { type: 'idle' };
+              const firstDonate = firstRule.actualPrimary - firstDisp;
+              const testRule = emptyCache.donorRules.get(cid);
+              if (!testRule) return { type: 'idle' };
+              // Test if they can pair (need to know donation amount, use 1 as test)
+              if (!emptyCache.canPair(firstCid, cid, firstDonate, 1)) {
+                return { type: 'idle' }; // Cannot pair
               }
             }
-          } else {
-            // Clicked non-clickable tile - reset to idle
-            setUiState({ type: 'idle' });
-            setOptionIndex(0);
-            setEmptyDonors(new Map());
-            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-          }
-        }
-        break;
-      }
-      
-      case 'own_secondary': {
-        if (cid === uiState.originCid) {
-          // Click origin
-          const hasAllocations = secondaryAllocations.some(a => a > 0);
-          if (hasAllocations) {
-            // Clear allocations
-            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-          } else {
-            // Toggle back to Primary
-            const primaryOpts = groupedMoves.ownPrimaryOptions.get(uiState.originCid);
-            if (primaryOpts && (primaryOpts.moves.length > 0 || primaryOpts.kills.length > 0 || 
-                primaryOpts.enslaves.length > 0 || primaryOpts.tribunAttack.length > 0)) {
-              setUiState({ type: 'own_primary', originCid: uiState.originCid, targetCid: null, optionIndex: 0 });
-            }
-          }
-        } else {
-          // Click neighbor - cycle allocation
-          // Find direction from origin to neighbor
-          let dir = -1;
-          const { x: ox, y: oy } = engine.decodeCoord(uiState.originCid);
-          const { x: nx, y: ny } = engine.decodeCoord(cid);
-          const dx = nx - ox;
-          const dy = ny - oy;
-          
-          // Check against neighbor vectors: [1,1], [1,0], [0,1], [-1,-1], [-1,0], [0,-1]
-          if (dx === 1 && dy === 1) dir = 0;
-          else if (dx === 1 && dy === 0) dir = 1;
-          else if (dx === 0 && dy === 1) dir = 2;
-          else if (dx === -1 && dy === -1) dir = 3;
-          else if (dx === -1 && dy === 0) dir = 4;
-          else if (dx === 0 && dy === -1) dir = 5;
-          
-          if (dir >= 0) {
-            const allowed = engine.getAllowedAllocationValues(uiState.originCid, dir, secondaryAllocations, gameState);
-            const current = secondaryAllocations[dir];
-            const currentIndex = allowed.indexOf(current);
-            const nextIndex = ((currentIndex + d) % allowed.length + allowed.length) % allowed.length;
-            const newValue = allowed[nextIndex];
             
-            const newAllocations = [...secondaryAllocations];
-            newAllocations[dir] = newValue;
-            setSecondaryAllocations(newAllocations);
-          } else {
-            // Clicked non-clickable tile - reset to idle
-            setUiState({ type: 'idle' });
-            setOptionIndex(0);
-            setEmptyDonors(new Map());
-            setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
+            return { type: 'idle' };
           }
+          
+          const validValues = donorRule.allowedDisplayedHeights;
+          const currentDisp = prevState.donors.get(cid) ?? donorRule.actualPrimary;
+          const currentIndex = validValues.indexOf(currentDisp);
+          const nextIndex = cycleIndex(currentIndex >= 0 ? currentIndex : 0, d, validValues.length);
+          const newDisp = validValues[nextIndex];
+          const newDonors = new Map(prevState.donors);
+          newDonors.set(cid, newDisp);
+          return { ...prevState, donors: newDonors, optionIndex: 0 };
         }
-        break;
+        
+        case 'own_primary': {
+          if (cid === prevState.originCid) {
+            if (prevState.targetCid !== null) {
+              return { ...prevState, targetCid: null, optionIndex: 0 };
+            }
+            const primaryCache = cache.ownPrimary.get(prevState.originCid);
+            const secondaryCache = cache.ownSecondary.get(prevState.originCid);
+            const hasSecondaryMoves = secondaryCache && secondaryCache.split.emptyAdjDirs.length > 0;
+            
+            if (hasSecondaryMoves && primaryCache?.canEnterSecondary) {
+              return { type: 'own_secondary', originCid: prevState.originCid, allocations: [0, 0, 0, 0, 0, 0] };
+            }
+            return prevState;
+          }
+          const primaryCache = cache.ownPrimary.get(prevState.originCid);
+          if (!primaryCache || !primaryCache.highlighted.has(cid)) {
+            return { type: 'idle' };
+          }
+          const targetOptions = primaryCache.targets.get(cid);
+          if (!targetOptions || targetOptions.options.length === 0) return prevState;
+          if (prevState.targetCid === cid) {
+            if (targetOptions.options.length <= 1) return prevState;
+            const newIndex = cycleIndex(prevState.optionIndex, d, targetOptions.options.length);
+            return { ...prevState, optionIndex: newIndex };
+          }
+          const initialIndex = d === -1 ? targetOptions.options.length - 1 : 0;
+          return { ...prevState, targetCid: cid, optionIndex: initialIndex };
+        }
+        
+        case 'own_secondary': {
+          if (cid === prevState.originCid) {
+            const hasAllocations = prevState.allocations.some(value => value > 0);
+            if (hasAllocations) {
+              return { ...prevState, allocations: [0, 0, 0, 0, 0, 0] };
+            }
+            return { type: 'own_primary', originCid: prevState.originCid, targetCid: null, optionIndex: 0 };
+          }
+          const dir = getNeighborDirection(prevState.originCid, cid);
+          if (dir === null) {
+            return { type: 'idle' };
+          }
+          const secondaryCache = cache.ownSecondary.get(prevState.originCid);
+          if (!secondaryCache || !secondaryCache.split.emptyAdjDirs.includes(dir)) {
+            return { type: 'idle' };
+          }
+          const allowed = secondaryCache.split.allowedAllocValues(dir, prevState.allocations);
+          const current = prevState.allocations[dir];
+          const currentIndex = allowed.indexOf(current);
+          const nextIndex = cycleIndex(currentIndex >= 0 ? currentIndex : 0, d, allowed.length);
+          const newValue = allowed[nextIndex];
+          const newAllocations = [...prevState.allocations];
+          newAllocations[dir] = newValue;
+          return { ...prevState, allocations: newAllocations };
+        }
+      }
+    });
+  };
+
+  const getEmptyStateAction = (): number | null => {
+    if (!gameState || !cache || uiState.type !== 'empty') return null;
+    
+    const centerCid = uiState.centerCid;
+    const emptyCache = cache.empty.get(centerCid);
+    if (!emptyCache) return null;
+    
+    const participating: Array<{ cid: number; donate: number }> = [];
+
+    for (const [cid, hDisp] of uiState.donors.entries()) {
+      const donorRule = emptyCache.donorRules.get(cid);
+      if (!donorRule) continue;
+      const donate = donorRule.actualPrimary - hDisp;
+      if (donate > 0) {
+        participating.push({ cid, donate });
       }
     }
+
+    if (participating.length === 2) {
+      const [a, b] = participating;
+      return emptyCache.constructCombineAction(a.cid, b.cid, a.donate, b.donate);
+    }
+
+    if (participating.length === 3) {
+      const donors = participating.map(p => p.cid);
+      const mode = emptyCache.symmetryModeForThird(donors);
+      if (mode === null) return null;
+      const donate = participating[0].donate;
+      if (!participating.every(entry => entry.donate === donate)) return null;
+      return emptyCache.constructSymCombineAction(mode, donate);
+    }
+
+    if (participating.length === 6) {
+      const donate = participating[0].donate;
+      if (!participating.every(entry => entry.donate === donate)) return null;
+      return emptyCache.constructSymCombineAction('sym6', donate);
+    }
+
+    return null;
+  };
+
+  const getOwnSecondaryAction = (): number | null => {
+    if (!gameState || !cache || uiState.type !== 'own_secondary') return null;
+
+    const originCid = uiState.originCid;
+    const secondaryCache = cache.ownSecondary.get(originCid);
+    if (!secondaryCache) return null;
+
+    const allocations = uiState.allocations;
+    
+    // Check if remaining is valid
+    if (!secondaryCache.split.isRemainingValid(allocations)) {
+      return null;
+    }
+
+    // Check for backstabb first
+    const backstabbAction = secondaryCache.split.deriveBackstabbAction(allocations);
+    if (backstabbAction !== null) {
+      return backstabbAction;
+    }
+
+    if (allocations.some(value => value > 7)) {
+      return null;
+    }
+
+    // Otherwise construct split action
+    return secondaryCache.split.constructSplitAction(allocations);
   };
 
   const getPendingAction = (): number | null => {
-    if (!gameState || !groupedMoves) return null;
+    if (!gameState || !cache) return null;
     
     let action: number | null = null;
     
     switch (uiState.type) {
       case 'enemy': {
-        const options = engine.getEnemyOptions(uiState.targetCid, groupedMoves);
-        if (options.length > 0 && uiState.optionIndex < options.length) {
-          action = options[uiState.optionIndex];
+        const enemyCache = cache.enemy.get(uiState.targetCid);
+        if (enemyCache && enemyCache.options.length > 0 && uiState.optionIndex < enemyCache.options.length) {
+          action = enemyCache.options[uiState.optionIndex];
         }
         break;
       }
       
       case 'empty': {
-        const options = engine.getEmptyStateOptions(uiState.centerCid, emptyDonors, gameState, groupedMoves);
-        if (options.length > 0 && optionIndex < options.length) {
-          action = options[optionIndex];
-        }
+        action = getEmptyStateAction();
         break;
       }
       
       case 'own_primary': {
         if (uiState.targetCid !== null) {
-          const options = engine.getOwnPrimaryOptions(uiState.originCid, uiState.targetCid, groupedMoves);
-          if (options.length > 0 && uiState.optionIndex < options.length) {
-            action = options[uiState.optionIndex];
+          const primaryCache = cache.ownPrimary.get(uiState.originCid);
+          if (primaryCache) {
+            const targetOptions = primaryCache.targets.get(uiState.targetCid);
+            if (targetOptions && targetOptions.options.length > 0 && uiState.optionIndex < targetOptions.options.length) {
+              action = targetOptions.options[uiState.optionIndex];
+            }
           }
         }
         break;
       }
       
       case 'own_secondary': {
-        action = engine.getOwnSecondaryPendingAction(uiState.originCid, secondaryAllocations, groupedMoves, gameState);
+        action = getOwnSecondaryAction();
         break;
       }
     }
@@ -454,18 +565,6 @@ export default function Game() {
     const action = getPendingAction();
     if (action !== null) {
       sendAction(action);
-    }
-  };
-
-  // Helper function to get neighbor cid from center and direction
-  const getNeighborCidFromCenter = (centerCid: number, dir: number): number | null => {
-    try {
-      const { x, y } = engine.decodeCoord(centerCid);
-      const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
-      const [dx, dy] = neighborVectors[dir];
-      return engine.encodeCoord(x + dx, y + dy);
-    } catch {
-      return null;
     }
   };
 
@@ -526,7 +625,7 @@ export default function Game() {
       const donors = engine.getEmptyStateDonors(centerCid, gameState);
       
       for (const [cid, donorInfo] of donors.entries()) {
-        const hDisp = emptyDonors.get(cid) ?? donorInfo.actualPrimary;
+        const hDisp = uiState.donors.get(cid) ?? donorInfo.actualPrimary;
         const donate = donorInfo.actualPrimary - hDisp;
         if (donate > 0) {
           const unit = engine.unitByteToUnit(gameState.board[cid]);
@@ -644,17 +743,17 @@ export default function Game() {
       if (!originUnit) return null;
       
       const H0 = originUnit.p;
-      const totalAllocated = secondaryAllocations.reduce((a, b) => a + b, 0);
+      const allocations = uiState.allocations;
+      const totalAllocated = allocations.reduce((a, b) => a + b, 0);
       const remainder = H0 - totalAllocated;
       
       // Check for backstabb (full primary to exactly one neighbor)
       if (totalAllocated === H0 && originUnit.s > 0) {
-        const nonzeroCount = secondaryAllocations.filter(a => a > 0).length;
+        const nonzeroCount = allocations.filter(a => a > 0).length;
         if (nonzeroCount === 1) {
-          const dir = secondaryAllocations.findIndex(a => a > 0);
+          const dir = allocations.findIndex(a => a > 0);
           const { x: ox, y: oy } = engine.decodeCoord(originCid);
-          const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
-          const [dx, dy] = neighborVectors[dir];
+          const [dx, dy] = NEIGHBOR_VECTORS[dir];
           try {
             const targetCid = engine.encodeCoord(ox + dx, oy + dy);
             // Place primary on target, destroy secondary
@@ -673,11 +772,10 @@ export default function Game() {
       } else {
         // Split: place allocations on adjacent tiles
         const { x: ox, y: oy } = engine.decodeCoord(originCid);
-        const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
         
         for (let dir = 0; dir < 6; dir++) {
-          if (secondaryAllocations[dir] > 0) {
-            const [dx, dy] = neighborVectors[dir];
+          if (allocations[dir] > 0) {
+            const [dx, dy] = NEIGHBOR_VECTORS[dir];
             try {
               const targetCid = engine.encodeCoord(ox + dx, oy + dy);
               const targetUnit = engine.unitByteToUnit(newBoard[targetCid]);
@@ -686,7 +784,7 @@ export default function Game() {
                 const splitUnit: engine.Unit = {
                   color: originUnit.color,
                   tribun: false,
-                  p: roundDownInvalidHeight(secondaryAllocations[dir]),
+                  p: roundDownInvalidHeight(allocations[dir]),
                   s: 0,
                 };
                 const normalized = normalizeUnitForPreview(splitUnit);
@@ -736,7 +834,7 @@ export default function Game() {
 
   // Get preview state by applying pending action
   const getPreviewState = (): engine.State | null => {
-    if (!gameState || !groupedMoves) return null;
+    if (!gameState) return null;
     
     // For Empty and Own.Secondary, use direct preview construction
     if (uiState.type === 'empty') {
@@ -745,6 +843,7 @@ export default function Game() {
     if (uiState.type === 'own_secondary') {
       return getOwnSecondaryPreview();
     }
+    if (!cache) return null;
     
     // For other states, use existing getPendingAction logic
     const pendingAction = getPendingAction();
@@ -823,74 +922,104 @@ export default function Game() {
     // Use actual gameState for UI logic, not preview state
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     
-    // Get idle clickable tiles (for selectable state in all states)
-    const idleClickable = isActive && groupedMoves 
-      ? [...groupedMoves.idleClickable.enemy, 
-         ...groupedMoves.idleClickable.empty, 
-         ...groupedMoves.idleClickable.own]
-      : [];
+    // Always recalculate from scratch on every render to ensure no stale state
+    // This ensures interactable tiles are properly cleaned up on state transitions
+    // Initialize arrays fresh on every render - never reuse previous values
+    // This guarantees that interactable tiles are recalculated based on current uiState
+    const selectedTiles: number[] = [];
+    const interactableTiles: number[] = [];
     
-    // Determine tile states based on current UI state
-    let selectedTiles: number[] = [];
-    let interactableTiles: number[] = [];
-    let selectableTiles: number[] = [];
-    
-    if (isActive && groupedMoves) {
+    if (isActive && cache) {
       switch (uiState.type) {
         case 'idle':
-          selectableTiles = idleClickable;
           break;
           
         case 'enemy':
-          selectedTiles = [uiState.targetCid];
-          selectableTiles = idleClickable.filter(cid => cid !== uiState.targetCid);
+          // Selected: the target enemy tile
+          selectedTiles.push(uiState.targetCid);
           break;
           
         case 'empty':
-          selectedTiles = [uiState.centerCid];
-          // Get donor tiles (tiles that can donate to center)
-          const donors = engine.getEmptyStateDonors(uiState.centerCid, gameState);
-          interactableTiles = Array.from(donors.keys());
-          selectableTiles = idleClickable.filter(cid => 
-            cid !== uiState.centerCid && !interactableTiles.includes(cid)
-          );
+          // Selected: the center tile
+          selectedTiles.push(uiState.centerCid);
+          // Interactable: donor tiles (tiles that can donate to center)
+          const emptyCache = cache.empty.get(uiState.centerCid);
+          if (emptyCache) {
+            // Apply participation restriction: if 2 donors selected, only symmetry-compatible 3rd donors
+            const participating = Array.from(uiState.donors.entries()).filter(([cid, hDisp]) => {
+              const rule = emptyCache.donorRules.get(cid);
+              if (!rule) return false;
+              return rule.actualPrimary - hDisp > 0;
+            });
+            
+            if (participating.length === 2) {
+              // Only allow 3rd donors that create symmetry
+              for (const donorCid of emptyCache.donorCids) {
+                if (uiState.donors.has(donorCid)) continue; // Already selected
+                const testDonors = [...participating.map(([cid]) => cid), donorCid];
+                const symmetryMode = emptyCache.symmetryModeForThird(testDonors);
+                if (symmetryMode !== null) {
+                  interactableTiles.push(donorCid);
+                }
+              }
+            } else if (participating.length === 1) {
+              // Only allow donors that can pair with the participating one
+              const [firstCid, firstDisp] = participating[0];
+              const firstRule = emptyCache.donorRules.get(firstCid);
+              if (firstRule) {
+                const firstDonate = firstRule.actualPrimary - firstDisp;
+                for (const donorCid of emptyCache.donorCids) {
+                  if (donorCid === firstCid || uiState.donors.has(donorCid)) continue;
+                  // Test if they can pair (use 1 as test donation for second)
+                  if (emptyCache.canPair(firstCid, donorCid, firstDonate, 1)) {
+                    interactableTiles.push(donorCid);
+                  }
+                }
+              }
+            } else {
+              // No participation restriction yet, all donors are interactable
+              interactableTiles.push(...emptyCache.donorCids);
+            }
+          }
           break;
           
         case 'own_primary':
-          selectedTiles = [uiState.originCid];
+          // Selected: origin tile, and target if selected
+          selectedTiles.push(uiState.originCid);
           if (uiState.targetCid !== null) {
             selectedTiles.push(uiState.targetCid);
           }
-          // Get highlighted targets (move/kill/enslave/tribun targets), excluding origin
-          const highlighted = engine.getOwnPrimaryHighlightedTiles(uiState.originCid, groupedMoves);
-          interactableTiles = highlighted.filter(cid => cid !== uiState.originCid);
-          selectableTiles = idleClickable.filter(cid => 
-            !selectedTiles.includes(cid) && !interactableTiles.includes(cid)
-          );
+          // Interactable: highlighted targets (move/kill/enslave/tribun targets), excluding origin
+          const primaryCache = cache.ownPrimary.get(uiState.originCid);
+          if (primaryCache) {
+            const highlightedFiltered = Array.from(primaryCache.highlighted).filter(cid => cid !== uiState.originCid);
+            interactableTiles.push(...highlightedFiltered);
+          }
           break;
           
         case 'own_secondary':
-          selectedTiles = [uiState.originCid];
-          // Get adjacent empty tiles (for split/backstabb targets)
-          const { x: ox, y: oy } = engine.decodeCoord(uiState.originCid);
-          const neighborVectors = [[1, 1], [1, 0], [0, 1], [-1, -1], [-1, 0], [0, -1]];
-          for (const [dx, dy] of neighborVectors) {
-            try {
-              const neighborCid = engine.encodeCoord(ox + dx, oy + dy);
-              const unit = engine.unitByteToUnit(gameState.board[neighborCid]);
-              if (unit === null) {
+          // Selected: origin tile
+          selectedTiles.push(uiState.originCid);
+          // Interactable: adjacent empty tiles (for split/backstabb targets)
+          const secondaryCache = cache.ownSecondary.get(uiState.originCid);
+          if (secondaryCache) {
+            const { x: ox, y: oy } = engine.decodeCoord(uiState.originCid);
+            for (const dir of secondaryCache.split.emptyAdjDirs) {
+              const [dx, dy] = NEIGHBOR_VECTORS[dir];
+              try {
+                const neighborCid = engine.encodeCoord(ox + dx, oy + dy);
                 interactableTiles.push(neighborCid);
+              } catch {
+                // Invalid coordinate, skip
               }
-            } catch {
-              // Invalid coordinate, skip
             }
           }
-          selectableTiles = idleClickable.filter(cid => 
-            cid !== uiState.originCid && !interactableTiles.includes(cid)
-          );
           break;
       }
     }
+
+    const selectedSet = new Set(selectedTiles);
+    const interactableSet = new Set(interactableTiles);
 
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
       const unit = engine.unitByteToUnit(displayState.board[cid]);
@@ -906,26 +1035,25 @@ export default function Game() {
       const hexY = centerY - outerHexHeight / 2 - minPixelY;
 
       // Determine hexagon state and color using UI backend
+      // Explicitly determine state for each tile to ensure correctness
       const baseColor = getBaseColor(x, y);
-      let hexagonState: HexagonState = 'default';
+      let hexagonState: HexagonState = baseTileStates[cid] ?? 'default';
       
       // Apply priority: selected > interactable > selectable > default
-      if (selectedTiles.includes(cid)) {
+      if (selectedSet.has(cid)) {
         hexagonState = 'selected';
-      } else if (interactableTiles.includes(cid)) {
+      } else if (interactableSet.has(cid)) {
         hexagonState = 'interactable';
-      } else if (selectableTiles.includes(cid)) {
-        hexagonState = 'selectable';
       } else {
-        hexagonState = 'default';
+        hexagonState = baseTileStates[cid] ?? 'default';
       }
       
       const tileColor = getHexagonColor(baseColor, hexagonState);
       // Tile is clickable if it's selectable or interactable or selected (and we're in an active state)
-      const isClickable = isActive && groupedMoves && (
-        selectedTiles.includes(cid) || 
-        interactableTiles.includes(cid) || 
-        selectableTiles.includes(cid)
+      const isClickable = isActive && (
+        selectedSet.has(cid) || 
+        interactableSet.has(cid) || 
+        baseTileStates[cid] === 'selectable'
       );
 
       const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
@@ -948,41 +1076,29 @@ export default function Game() {
             if (isClickable) {
               e.currentTarget.style.transform = 'scale(1.1)';
               e.currentTarget.style.zIndex = '10';
-              setHoveredCid(cid);
             }
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.transform = 'scale(1)';
             e.currentTarget.style.zIndex = '1';
-            setHoveredCid(null);
           }}
-          onClick={(e) => {
-            if (groupedMoves) {
-              if (isClickable) {
-                // Left click: d = +1
-                handleTileClick(cid, 1);
-              } else if (uiState.type !== 'idle') {
-                // Click unselectable tile when not in idle - reset to idle
-                setUiState({ type: 'idle' });
-                setOptionIndex(0);
-                setEmptyDonors(new Map());
-                setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-              }
+          onClick={() => {
+            if (isClickable || (isActive && uiState.type === 'idle')) {
+              // Left click: d = +1
+              handleTileClick(cid, 1);
+            } else if (uiState.type !== 'idle') {
+              // Click unselectable tile when not in idle - reset to idle
+              setUiState({ type: 'idle' });
             }
           }}
           onContextMenu={(e) => {
             e.preventDefault();
-            if (groupedMoves) {
-              if (isClickable) {
-                // Right click: d = -1
-                handleTileClick(cid, -1);
-              } else if (uiState.type !== 'idle') {
-                // Right click unselectable tile when not in idle - reset to idle
-                setUiState({ type: 'idle' });
-                setOptionIndex(0);
-                setEmptyDonors(new Map());
-                setSecondaryAllocations([0, 0, 0, 0, 0, 0]);
-              }
+            if (isClickable || (isActive && uiState.type === 'idle')) {
+              // Right click: d = -1
+              handleTileClick(cid, -1);
+            } else if (uiState.type !== 'idle') {
+              // Right click unselectable tile when not in idle - reset to idle
+              setUiState({ type: 'idle' });
             }
           }}
         >
@@ -1095,18 +1211,18 @@ export default function Game() {
               <strong>Ply:</strong> {gameState.ply}
             </div>
             <div style={{ marginBottom: '10px' }}>
-              <strong>Legal Actions:</strong> {legalActions.length}
+              <strong>Validator Ply:</strong> {validator?.getPly() ?? 'none'}
             </div>
             <div style={{ marginBottom: '10px' }}>
               <strong>UI State:</strong> {uiState.type}
               {uiState.type === 'enemy' && ` (target: ${uiState.targetCid}, option: ${uiState.optionIndex})`}
-              {uiState.type === 'empty' && ` (center: ${uiState.centerCid}, donors: ${emptyDonors.size})`}
+              {uiState.type === 'empty' && ` (center: ${uiState.centerCid}, donors: ${uiState.donors.size})`}
               {uiState.type === 'own_primary' && ` (origin: ${uiState.originCid}, target: ${uiState.targetCid ?? 'none'}, option: ${uiState.optionIndex})`}
-              {uiState.type === 'own_secondary' && ` (origin: ${uiState.originCid}, allocations: [${secondaryAllocations.join(',')}])`}
+              {uiState.type === 'own_secondary' && ` (origin: ${uiState.originCid}, allocations: [${uiState.allocations.join(',')}])`}
             </div>
             {(() => {
               const pendingAction = getPendingAction();
-              const canSubmit = pendingAction !== null && role !== 'spectator';
+              const canSubmit = pendingAction !== null && validator && validator.isProbablyLegal(pendingAction) && role !== 'spectator';
               
               if (canSubmit) {
                 return (
@@ -1155,42 +1271,6 @@ export default function Game() {
         {renderBoard()}
       </div>
 
-      {legalActions.length > 0 && (
-        <div style={{
-          background: 'white',
-          padding: '20px',
-          borderRadius: '8px',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-          marginTop: '20px',
-        }}>
-          <h2 style={{ marginBottom: '15px' }}>Legal Actions</h2>
-          <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
-            {Array.from(legalActions).slice(0, 20).map((action, idx) => {
-              const decoded = engine.decodeAction(action);
-              return (
-                <div
-                  key={idx}
-                  style={{
-                    padding: '5px',
-                    margin: '2px 0',
-                    background: '#f0f0f0',
-                    borderRadius: '4px',
-                    cursor: role !== 'spectator' ? 'pointer' : 'default',
-                  }}
-                  onClick={() => {
-                    if (role !== 'spectator') {
-                      sendAction(action);
-                    }
-                  }}
-                >
-                  Opcode {decoded.opcode}: {JSON.stringify(decoded.fields)}
-                </div>
-              );
-            })}
-            {legalActions.length > 20 && <div>... and {legalActions.length - 20} more</div>}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

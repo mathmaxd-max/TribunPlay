@@ -31,18 +31,50 @@ This ensures a 3-coloring of the hex grid where no two adjacent hexagons share t
 ## Hexagon States
 
 ### `default`
-The default state for all hexagons. Used when the hexagon is not selectable or being interacted with.
+The default state for all hexagons. Used for tiles with no possible moves (not clickable in idle state).
 
 ### `selectable`
 A hexagon is in the `selectable` state when:
 - It is the active player's turn
-- The hexagon contains a unit that can legally move
-- The hexagon is not currently being hovered
+- The tile has possible moves (is clickable in idle state)
+- The tile does not have special meaning in the current UI state
+- The tile is not selected
+
+This state indicates tiles that can be clicked for quickTransition (allowing direct state transitions even when not in idle).
+
+### `selected`
+A hexagon is in the `selected` state when:
+- It is the tile that was clicked to enter the current non-idle UI state
+- Examples:
+  - Enemy state: the enemy target tile
+  - Empty state: the center tile
+  - Own.Primary state: the origin tile (and target if selected)
+  - Own.Secondary state: the origin tile
 
 ### `interactable`
 A hexagon is in the `interactable` state when:
-- It is in the `selectable` state
-- The mouse is hovering over it
+- It has special meaning in the current UI state
+- Examples:
+  - Empty state: donor tiles (tiles that can donate to center)
+  - Own.Primary state: highlighted target tiles (move/kill/enslave/tribun targets)
+  - Own.Secondary state: adjacent empty tiles (for split/backstabb targets)
+
+## State Priority
+
+When determining a tile's state, the following priority is applied:
+1. **selected** (highest priority)
+2. **interactable**
+3. **selectable**
+4. **default** (lowest priority)
+
+A tile can only be in one state at a time, determined by the highest priority that applies.
+
+## State Transitions
+
+Tile states MUST be recalculated from scratch on every render to ensure:
+- Interactable tiles are properly cleaned up when UI state changes
+- No stale state persists after transitions
+- All tiles are correctly categorized based on the current UI state
 
 ## Color Configuration
 

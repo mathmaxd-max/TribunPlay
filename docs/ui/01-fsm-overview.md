@@ -13,6 +13,14 @@ The UI maintains:
 The UI MUST NOT invent legality:
 - A move/action is submittable only if it matches a single action word in the authoritative `legalSet`.
 
+## Board Preview
+
+The UI MUST show a preview of how the board would look after making a move, **even for temporary illegal moves**:
+- This applies to all UI states (Enemy, Empty, Own.Primary, Own.Secondary).
+- For Empty and Own.Secondary states, the preview should be constructed directly from user input (donors/donations or allocations) without validating against legal moves.
+- The preview allows users to see the visual outcome of their selections before submission.
+- Submission remains disabled unless the action word is legal.
+
 ## Inputs required from the engine
 The client needs:
 - `legalMoves[]` and `legalSet` for the current position (or at minimum `legalSet` + enough grouping for UI).

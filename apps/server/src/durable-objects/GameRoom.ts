@@ -168,10 +168,13 @@ export class GameRoom implements DurableObject {
 			this.gameState = engine.applyAction(this.gameState, action);
 		}
 		
-		// Update legal set
+		// Update legal set and send Bloom filter
 		if (this.gameState) {
 			const legalActions = engine.generateLegalActions(this.gameState);
 			this.legalSet = new Set(Array.from(legalActions));
+			
+			// Send Bloom filter to all connections
+			this.broadcastBloomFilter(Array.from(legalActions));
 		}
 		
 		this.actionLog = actions;
@@ -203,6 +206,15 @@ export class GameRoom implements DurableObject {
 			actions: this.actionLog, // Also send as array for convenience
 			actionsB64,
 			role,
+		}));
+		
+		// Send Bloom filter after initial sync
+		const legalActions = engine.generateLegalActions(this.gameState);
+		const bloom = this.createBloomFilter(Array.from(legalActions));
+		ws.send(JSON.stringify({
+			t: "legal",
+			ply: this.gameState.ply,
+			bloom,
 		}));
 	}
 
@@ -293,8 +305,9 @@ export class GameRoom implements DurableObject {
 		this.legalSet = new Set(Array.from(legalActions));
 		this.actionLog.push(actionWord);
 		
-		// Broadcast to all connections
+		// Broadcast action and Bloom filter
 		this.broadcastAction(actionWord);
+		this.broadcastBloomFilter(Array.from(legalActions));
 	}
 
 	private broadcastAction(actionWord: number): void {
@@ -318,5 +331,69 @@ export class GameRoom implements DurableObject {
 				})
 			);
 		}
+	}
+
+	private broadcastBloomFilter(legalActions: number[]): void {
+		if (!this.gameState) return;
+		
+		const bloom = this.createBloomFilter(legalActions);
+		const message = JSON.stringify({
+			t: "legal",
+			ply: this.gameState.ply,
+			bloom,
+		});
+
+		for (const { ws } of this.connections.values()) {
+			if (ws.readyState === 1) { // WebSocket.OPEN
+				ws.send(message);
+			}
+		}
+	}
+
+	/**
+	 * Create a Bloom filter from a set of legal actions
+	 */
+	private createBloomFilter(
+		legalActions: number[],
+		m: number = Math.max(1024, legalActions.length * 8), // Default: 8 bits per action
+		k: number = 3 // Default: 3 hash functions
+	): { m: number; k: number; bitsB64: string } {
+		const bits = new Uint8Array(Math.ceil(m / 8));
+		
+		// Add each legal action to the filter
+		for (const action of legalActions) {
+			for (let i = 0; i < k; i++) {
+				const hash = this.hashAction(action, i);
+				const bitIndex = hash % m;
+				const byteIndex = Math.floor(bitIndex / 8);
+				const bitOffset = bitIndex % 8;
+				
+				if (byteIndex < bits.length) {
+					bits[byteIndex] |= (1 << bitOffset);
+				}
+			}
+		}
+		
+		// Encode to base64
+		const binary = String.fromCharCode(...bits);
+		const bitsB64 = btoa(binary);
+		
+		return { m, k, bitsB64 };
+	}
+
+	/**
+	 * Hash function for creating Bloom filter (FNV-1a)
+	 */
+	private hashAction(value: number, seed: number): number {
+		let hash = 2166136261 ^ (seed * 16777619);
+		hash ^= (value >>> 24) & 0xff;
+		hash = (hash * 16777619) >>> 0;
+		hash ^= (value >>> 16) & 0xff;
+		hash = (hash * 16777619) >>> 0;
+		hash ^= (value >>> 8) & 0xff;
+		hash = (hash * 16777619) >>> 0;
+		hash ^= value & 0xff;
+		hash = (hash * 16777619) >>> 0;
+		return hash >>> 0;
 	}
 }
