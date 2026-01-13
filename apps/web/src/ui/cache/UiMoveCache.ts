@@ -14,4 +14,5 @@ export interface UiMoveCache {
   ownPrimary: Map<Cid, OwnPrimaryTileCache>;
   ownSecondary: Map<Cid, OwnSecondaryTileCache>;
   empty: Map<Cid, EmptyTileCache>;
+  legalSet: Set<number>;
 }

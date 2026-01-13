@@ -384,7 +384,7 @@ export default function Game() {
       return;
     }
 
-    if (!validator || (validator.getPly() === gameState?.ply && !validator.isProbablyLegal(action))) {
+    if (!cache || !cache.legalSet.has(action >>> 0)) {
       setError('Action is not legal');
       return;
     }
@@ -898,7 +898,7 @@ export default function Game() {
     }
   };
 
-  type PreviewOverlayUnit = { p: number; color: engine.Color; tribun: boolean };
+  type PreviewOverlayUnit = { p: number; s: number; color: engine.Color; tribun: boolean };
   type PreviewOverlay = { units: Map<number, PreviewOverlayUnit>; empty: Set<number> };
 
   const getPreviewOverlay = (): PreviewOverlay | null => {
@@ -930,6 +930,7 @@ export default function Game() {
           if (remaining > 0) {
             overlay.units.set(cid, {
               p: remaining,
+              s: unit.s,
               color: unit.color,
               tribun: unit.tribun,
             });
@@ -947,6 +948,7 @@ export default function Game() {
       if (totalDonation > 0) {
         overlay.units.set(centerCid, {
           p: totalDonation,
+          s: 0,
           color: gameState.turn,
           tribun: tribunTransferred,
         });
@@ -975,6 +977,7 @@ export default function Game() {
             const targetCid = engine.encodeCoord(ox + dx, oy + dy);
             overlay.units.set(targetCid, {
               p: originUnit.p,
+              s: 0,
               color: originUnit.color,
               tribun: originUnit.tribun,
             });
@@ -994,6 +997,7 @@ export default function Game() {
             const targetCid = engine.encodeCoord(ox + dx, oy + dy);
             overlay.units.set(targetCid, {
               p: allocations[dir],
+              s: 0,
               color: originUnit.color,
               tribun: false,
             });
@@ -1006,6 +1010,14 @@ export default function Game() {
       if (remainder > 0) {
         overlay.units.set(originCid, {
           p: remainder,
+          s: originUnit.s,
+          color: originUnit.color,
+          tribun: originUnit.tribun,
+        });
+      } else if (originUnit.s > 0) {
+        overlay.units.set(originCid, {
+          p: 0,
+          s: originUnit.s,
           color: originUnit.color,
           tribun: originUnit.tribun,
         });
@@ -1218,7 +1230,7 @@ export default function Game() {
 
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
       const overlayUnit = previewOverlay?.units.get(cid);
-      const unit: { p: number; color: engine.Color; tribun: boolean } | null = overlayUnit
+      const unit: { p: number; s: number; color: engine.Color; tribun: boolean } | null = overlayUnit
         ? overlayUnit
         : previewOverlay?.empty.has(cid)
         ? null
@@ -1332,20 +1344,22 @@ export default function Game() {
               const centerTransform = 'translate(-50%, -50%)';
               return (
                 <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-                  <div style={{
-                    position: 'absolute',
-                    left: '50%',
-                    top: '50%',
-                    transform: `${centerTransform} translate(${primaryOffset.x}px, ${-primaryOffset.y}px)`,
-                    transformOrigin: 'center',
-                    fontSize: `${splitFontSize}px`,
-                    fontWeight: 'bold',
-                    color: textColor,
-                    WebkitTextStroke: `1px ${strokeColor}`,
-                    textStroke: `1px ${strokeColor}`,
-                  }}>
-                    {unit.p}
-                  </div>
+                  {unit.p > 0 && (
+                    <div style={{
+                      position: 'absolute',
+                      left: '50%',
+                      top: '50%',
+                      transform: `${centerTransform} translate(${primaryOffset.x}px, ${-primaryOffset.y}px)`,
+                      transformOrigin: 'center',
+                      fontSize: `${splitFontSize}px`,
+                      fontWeight: 'bold',
+                      color: textColor,
+                      WebkitTextStroke: `1px ${strokeColor}`,
+                      textStroke: `1px ${strokeColor}`,
+                    }}>
+                      {unit.p}
+                    </div>
+                  )}
                   <div style={{
                     position: 'absolute',
                     left: '50%',
@@ -1470,10 +1484,8 @@ export default function Game() {
             </div>
             {(() => {
               const pendingAction = getPendingAction();
-              const validatorAllows =
-                validator &&
-                (validator.getPly() !== gameState.ply || validator.isProbablyLegal(pendingAction ?? 0));
-              const canSubmit = pendingAction !== null && validatorAllows && role !== 'spectator';
+              const locallyLegal = pendingAction !== null && cache?.legalSet.has(pendingAction >>> 0);
+              const canSubmit = pendingAction !== null && locallyLegal && role !== 'spectator';
               
               if (canSubmit) {
                 return (

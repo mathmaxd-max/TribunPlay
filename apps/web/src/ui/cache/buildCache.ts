@@ -256,10 +256,12 @@ export function buildCache(
   validator: LegalBloomValidator
 ): UiMoveCache {
   const legalActions = engine.generateLegalActions(state);
-  const legalSet = new Set<number>(Array.from(legalActions));
-  const validatorMatches = validator.getPly() === state.ply;
-  const isLegal = (action: number): boolean =>
-    legalSet.has(action) && (!validatorMatches || validator.isProbablyLegal(action));
+  const legalSet = new Set<number>();
+  for (const action of legalActions) {
+    legalSet.add(action >>> 0);
+  }
+  const isLegal = (action: number): boolean => legalSet.has(action >>> 0);
+  const isLocallyLegal = (action: number): boolean => legalSet.has(action >>> 0);
 
   const legalByOrigin = new Map<
     Cid,
@@ -338,6 +340,7 @@ export function buildCache(
     ownPrimary: new Map(),
     ownSecondary: new Map(),
     empty: new Map(),
+    legalSet,
   };
 
   // Build enemy caches
@@ -550,7 +553,7 @@ export function buildCache(
             if (nonzeroCount === 1) {
               const dir = alloc.findIndex(a => a > 0);
               const action = engine.encodeBackstabb(cid, dir);
-              if (isLegal(action)) {
+              if (isLocallyLegal(action)) {
                 return action;
               }
             }
