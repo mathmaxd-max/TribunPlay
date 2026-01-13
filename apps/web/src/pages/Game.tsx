@@ -1327,13 +1327,15 @@ export default function Game() {
             if (unit.s > 0) {
               const primaryOffset = { x: -splitOffsetX, y: splitOffsetY };
               const secondaryOffset = { x: splitOffsetX, y: -splitOffsetY };
+              const centerTransform = 'translate(-50%, -50%)';
               return (
                 <div style={{ position: 'relative', width: '100%', height: '100%' }}>
                   <div style={{
                     position: 'absolute',
                     left: '50%',
                     top: '50%',
-                    transform: `translate(calc(-50% + ${primaryOffset.x}px), calc(-50% + ${-primaryOffset.y}px))`,
+                    transform: `${centerTransform} translate(${primaryOffset.x}px, ${-primaryOffset.y}px)`,
+                    transformOrigin: 'center',
                     fontSize: `${splitFontSize}px`,
                     fontWeight: 'bold',
                     color: textColor,
@@ -1346,7 +1348,8 @@ export default function Game() {
                     position: 'absolute',
                     left: '50%',
                     top: '50%',
-                    transform: `translate(calc(-50% + ${secondaryOffset.x}px), calc(-50% + ${-secondaryOffset.y}px))`,
+                    transform: `${centerTransform} translate(${secondaryOffset.x}px, ${-secondaryOffset.y}px)`,
+                    transformOrigin: 'center',
                     fontSize: `${splitFontSize}px`,
                     fontWeight: 'bold',
                     color: strokeColor,
