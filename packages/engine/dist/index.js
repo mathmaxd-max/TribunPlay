@@ -628,23 +628,19 @@ function buildAttackContext(state, targetCid) {
         const options = [];
         const primaryAttackReachable = getAttackReachableTiles(cid, unit.p, unit.color, unit.tribun, state.board);
         if (primaryAttackReachable.includes(targetCid)) {
-            const primaryMoveReachable = getReachableTiles(cid, unit.p, unit.color, unit.tribun, state.board, false);
             options.push({
                 cid,
                 part: 0,
                 height: unit.p,
-                canMove: primaryMoveReachable.includes(targetCid),
             });
         }
         if (unit.s > 0) {
             const secondaryAttackReachable = getAttackReachableTiles(cid, unit.s, unit.color, false, state.board);
             if (secondaryAttackReachable.includes(targetCid)) {
-                const secondaryMoveReachable = getReachableTiles(cid, unit.s, unit.color, false, state.board, false);
                 options.push({
                     cid,
                     part: 1,
                     height: unit.s,
-                    canMove: secondaryMoveReachable.includes(targetCid),
                 });
             }
         }
@@ -704,7 +700,7 @@ function canKillWithOption(context, attackerCid, part) {
         if (group.cid !== attackerCid)
             continue;
         const option = group.options.find((opt) => opt.part === part);
-        if (!option || !option.canMove) {
+        if (!option) {
             return { canKill: false };
         }
         const without = combineSumDp(context.prefix[i], context.suffix[i + 1], context.maxSum);
@@ -1092,10 +1088,7 @@ export function applyAction(state, action) {
             newBoard[targetCid] = 0;
             // Move attacker
             const moveHeight = part === 0 ? attackerUnit.p : attackerUnit.s;
-            const reachable = getReachableTiles(attackerCid, moveHeight, attackerUnit.color, part === 0 ? attackerUnit.tribun : false, newBoard, false);
-            if (!reachable.includes(targetCid)) {
-                throw new Error(`Illegal KILL: attacker cannot reach target`);
-            }
+            void moveHeight;
             if (part === 0) {
                 // Move primary only
                 const movedUnit = {
@@ -1204,12 +1197,8 @@ export function applyAction(state, action) {
             if (!attackReachable.includes(targetCid)) {
                 throw new Error(`Illegal ENSLAVE: attacker cannot attack target`);
             }
-            // Temporarily clear target for movement validation
+            // Temporarily clear target to place the enslaved unit
             newBoard[targetCid] = 0;
-            const moveReachable = getReachableTiles(attackerCid, attackerUnit.p, attackerUnit.color, attackerUnit.tribun, newBoard, false);
-            if (!moveReachable.includes(targetCid)) {
-                throw new Error(`Illegal ENSLAVE: attacker cannot move to target`);
-            }
             // Enslave: target becomes enslaved, attacker's primary moves to target
             const enslavedUnit = {
                 color: state.turn,

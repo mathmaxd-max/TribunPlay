@@ -52,7 +52,9 @@ After reducing the target's primary by `D`, the target MUST be normalized:
 - enforce SP
 - apply liberation if needed
 
-If after normalization the tile is empty, then exactly one participating attacker MUST move into the emptied tile (using a legal movement consistent with the chosen part).
+If after normalization the tile is empty, then exactly one participating attacker MUST move into the emptied tile. The mover is chosen from the participating attackers and uses the same part it used to attack.
+
+Attack participation and kill/enslave eligibility are based on the **attack relation**, not movement reachability. If the combined attack strength is enough to kill the target, any participating attacker may be the mover, and any participating attacker using its **primary** part may enslave as long as the resulting unit satisfies SP.
 
 ## 3) Enslave (Impero)
 Enslave is an alternative outcome to an attack that would otherwise empty a non-tribun target.

@@ -222,6 +222,12 @@ export default function Game() {
 
     let mounted = true;
 
+    const requestSync = () => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ t: 'sync_req' }));
+      }
+    };
+
     const connect = async () => {
       try {
         // Check if we already have a token for this game (from create or previous join)
@@ -296,12 +302,17 @@ export default function Game() {
               // Replay actions
               let currentState = state;
               const actions = message.actions || [];
-              for (const action of actions) {
-                currentState = engine.applyAction(currentState, action);
+              try {
+                for (const action of actions) {
+                  currentState = engine.applyAction(currentState, action);
+                }
+                setGameState(currentState);
+                setUiState({ type: 'idle' });
+              } catch (err) {
+                setError(err instanceof Error ? err.message : 'Failed to apply actions');
+                setGameState(state);
+                setUiState({ type: 'idle' });
               }
-
-              setGameState(currentState);
-              setUiState({ type: 'idle' });
             } else if (message.t === 'legal') {
               // Bloom filter validator update
               const legalMsg = message as LegalValidatorMessage;
@@ -316,11 +327,17 @@ export default function Game() {
             const view = new DataView(event.data);
             const actionWord = view.getUint32(0, true);
 
-            setGameState((prevState) => {
-              if (!prevState) return prevState;
-              return engine.applyAction(prevState, actionWord);
-            });
-            setUiState({ type: 'idle' });
+            try {
+              setGameState((prevState) => {
+                if (!prevState) return prevState;
+                return engine.applyAction(prevState, actionWord);
+              });
+              setUiState({ type: 'idle' });
+            } catch (err) {
+              setError(err instanceof Error ? err.message : 'Failed to apply action');
+              setUiState({ type: 'idle' });
+              requestSync();
+            }
           }
         };
 
