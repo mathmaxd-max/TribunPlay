@@ -8,6 +8,21 @@ import type { UiMoveCache } from '../ui/cache/UiMoveCache';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
+type EmptyCache = UiMoveCache['empty'] extends Map<any, infer T> ? T : never;
+
+type EmptySymmetryState = {
+  mode: 'sym3+' | 'sym3-' | 'sym6';
+  donate: number;
+  savedDonors: Map<number, number>;
+  donorCids: number[];
+};
+
+type UIState =
+  | { type: 'idle' }
+  | { type: 'enemy'; targetCid: number; optionIndex: number }
+  | { type: 'empty'; centerCid: number; donors: Map<number, number>; optionIndex: number; symmetry?: EmptySymmetryState }
+  | { type: 'own_primary'; originCid: number; targetCid: number | null; optionIndex: number }
+  | { type: 'own_secondary'; originCid: number; allocations: number[] };
 
 interface GameSnapshot {
   boardB64: string;
@@ -37,7 +52,7 @@ export default function Game() {
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
   
   // UI State Machine
-  const [uiState, setUiState] = useState<engine.UIState>({ type: 'idle' });
+  const [uiState, setUiState] = useState<UIState>({ type: 'idle' });
   const [validator, setValidator] = useState<LegalBloomValidator | null>(null);
   
   const cache = useMemo(() => {
@@ -295,6 +310,91 @@ export default function Game() {
     return null;
   };
 
+  const getDonorDisplayHeight = (
+    emptyCache: EmptyCache,
+    donors: Map<number, number>,
+    donorCid: number,
+    symmetry?: EmptySymmetryState
+  ): number | null => {
+    const rule = emptyCache.donorRules.get(donorCid);
+    if (!rule) return null;
+    if (symmetry && symmetry.donorCids.includes(donorCid)) {
+      return rule.actualPrimary - symmetry.donate;
+    }
+    return donors.get(donorCid) ?? rule.actualPrimary;
+  };
+
+  const getDonorDonation = (
+    emptyCache: EmptyCache,
+    donors: Map<number, number>,
+    donorCid: number,
+    symmetry?: EmptySymmetryState
+  ): number | null => {
+    const rule = emptyCache.donorRules.get(donorCid);
+    if (!rule) return null;
+    const displayHeight = getDonorDisplayHeight(emptyCache, donors, donorCid, symmetry);
+    if (displayHeight === null) return null;
+    return rule.actualPrimary - displayHeight;
+  };
+
+  const getParticipatingDonors = (
+    emptyCache: EmptyCache,
+    donors: Map<number, number>,
+    symmetry?: EmptySymmetryState
+  ): Array<{ cid: number; donate: number }> => {
+    const participating: Array<{ cid: number; donate: number }> = [];
+    for (const donorCid of emptyCache.donorCids) {
+      const donate = getDonorDonation(emptyCache, donors, donorCid, symmetry);
+      if (donate && donate > 0) {
+        participating.push({ cid: donorCid, donate });
+      }
+    }
+    return participating;
+  };
+
+  const getDonationOptions = (
+    emptyCache: EmptyCache,
+    donorCid: number
+  ): number[] => {
+    const rule = emptyCache.donorRules.get(donorCid);
+    if (!rule) return [];
+    const options: number[] = [];
+    for (const displayHeight of rule.allowedDisplayedHeights) {
+      const donate = rule.actualPrimary - displayHeight;
+      if (donate > 0) {
+        options.push(donate);
+      }
+    }
+    return options;
+  };
+
+  const canPairWithAnyDonation = (
+    emptyCache: EmptyCache,
+    participant: { cid: number; donate: number },
+    candidateCid: number
+  ): boolean => {
+    const donationOptions = getDonationOptions(emptyCache, candidateCid);
+    if (donationOptions.length === 0) return false;
+    return donationOptions.some((donateB) =>
+      emptyCache.canPair(participant.cid, candidateCid, participant.donate, donateB)
+    );
+  };
+
+  const applySymmetryDonations = (
+    emptyCache: EmptyCache,
+    baseDonors: Map<number, number>,
+    donorCids: number[],
+    donate: number
+  ): Map<number, number> => {
+    const next = new Map(baseDonors);
+    for (const donorCid of donorCids) {
+      const rule = emptyCache.donorRules.get(donorCid);
+      if (!rule) continue;
+      next.set(donorCid, rule.actualPrimary - donate);
+    }
+    return next;
+  };
+
   const handleTileClick = (cid: number, d: number = 1) => {
     if (!gameState || !cache) return;
     
@@ -344,43 +444,45 @@ export default function Game() {
         
         case 'empty': {
           if (cid === prevState.centerCid) {
-            return { ...prevState, donors: new Map(), optionIndex: 0 };
+            return { ...prevState, donors: new Map(), optionIndex: 0, symmetry: undefined };
           }
           const emptyCache = cache.empty.get(prevState.centerCid);
           if (!emptyCache) return { type: 'idle' };
           
           const donorRule = emptyCache.donorRules.get(cid);
-          if (!donorRule) {
-            // Check participation restriction: if 2 donors selected, only symmetry-compatible 3rd donors allowed
-            const participating = Array.from(prevState.donors.entries()).filter(([_, hDisp]) => {
-              const rule = emptyCache.donorRules.get(cid);
-              if (!rule) return false;
-              return rule.actualPrimary - hDisp > 0;
-            });
-            
-            if (participating.length === 2) {
-              // Check if this donor could create symmetry with the 2 participating
-              const participatingCids = participating.map(([cid]) => cid);
-              const testDonors = [...participatingCids, cid];
-              const symmetryMode = emptyCache.symmetryModeForThird(testDonors);
-              if (symmetryMode === null) {
-                return { type: 'idle' }; // Not symmetry-compatible
-              }
-            } else if (participating.length > 0) {
-              // If 1 donor participating, check if this donor can pair with it
-              const [firstCid, firstDisp] = participating[0];
-              const firstRule = emptyCache.donorRules.get(firstCid);
-              if (!firstRule) return { type: 'idle' };
-              const firstDonate = firstRule.actualPrimary - firstDisp;
-              const testRule = emptyCache.donorRules.get(cid);
-              if (!testRule) return { type: 'idle' };
-              // Test if they can pair (need to know donation amount, use 1 as test)
-              if (!emptyCache.canPair(firstCid, cid, firstDonate, 1)) {
-                return { type: 'idle' }; // Cannot pair
-              }
+          if (!donorRule) return { type: 'idle' };
+
+          if (prevState.symmetry) {
+            if (!prevState.symmetry.donorCids.includes(cid)) {
+              return { type: 'idle' };
             }
-            
-            return { type: 'idle' };
+            const allowed = emptyCache.allowedSymmetricDonations(prevState.symmetry.mode);
+            const currentIndex = allowed.indexOf(prevState.symmetry.donate);
+            const nextIndex = cycleIndex(currentIndex >= 0 ? currentIndex : 0, d, allowed.length);
+            const nextDonate = allowed[nextIndex];
+
+            if (nextDonate === 0) {
+              return {
+                type: 'empty',
+                centerCid: prevState.centerCid,
+                donors: new Map(prevState.symmetry.savedDonors),
+                optionIndex: 0,
+              };
+            }
+
+            const nextDonors = applySymmetryDonations(
+              emptyCache,
+              prevState.symmetry.savedDonors,
+              prevState.symmetry.donorCids,
+              nextDonate
+            );
+
+            return {
+              ...prevState,
+              donors: nextDonors,
+              optionIndex: 0,
+              symmetry: { ...prevState.symmetry, donate: nextDonate },
+            };
           }
           
           const validValues = donorRule.allowedDisplayedHeights;
@@ -388,6 +490,63 @@ export default function Game() {
           const currentIndex = validValues.indexOf(currentDisp);
           const nextIndex = cycleIndex(currentIndex >= 0 ? currentIndex : 0, d, validValues.length);
           const newDisp = validValues[nextIndex];
+          const currentDonate = donorRule.actualPrimary - currentDisp;
+          const nextDonate = donorRule.actualPrimary - newDisp;
+          const participating = getParticipatingDonors(emptyCache, prevState.donors, prevState.symmetry);
+          const otherParticipating = participating.filter((entry) => entry.cid !== cid);
+          const isCurrentlyParticipating = currentDonate > 0;
+          
+          if (!isCurrentlyParticipating && nextDonate > 0) {
+            if (otherParticipating.length === 1) {
+              if (!canPairWithAnyDonation(emptyCache, otherParticipating[0], cid)) {
+                return { type: 'idle' };
+              }
+            } else if (otherParticipating.length === 2) {
+              const symmetryMode = emptyCache.symmetryModeForThird([
+                otherParticipating[0].cid,
+                otherParticipating[1].cid,
+                cid,
+              ]);
+              if (symmetryMode === null) {
+                return { type: 'idle' };
+              }
+              const symmetryDonorCids =
+                symmetryMode === 'sym6' ? [...emptyCache.donorCids] : [
+                  otherParticipating[0].cid,
+                  otherParticipating[1].cid,
+                  cid,
+                ];
+              const allowed = emptyCache.allowedSymmetricDonations(symmetryMode);
+              const defaultDonate = allowed.includes(nextDonate)
+                ? nextDonate
+                : (allowed.find((value) => value > 0) ?? 0);
+              if (defaultDonate <= 0) {
+                return { type: 'idle' };
+              }
+              const savedDonors = new Map(prevState.donors);
+              const nextDonors = applySymmetryDonations(
+                emptyCache,
+                savedDonors,
+                symmetryDonorCids,
+                defaultDonate
+              );
+              return {
+                type: 'empty',
+                centerCid: prevState.centerCid,
+                donors: nextDonors,
+                optionIndex: 0,
+                symmetry: {
+                  mode: symmetryMode,
+                  donate: defaultDonate,
+                  savedDonors,
+                  donorCids: symmetryDonorCids,
+                },
+              };
+            } else if (otherParticipating.length >= 3) {
+              return { type: 'idle' };
+            }
+          }
+
           const newDonors = new Map(prevState.donors);
           newDonors.set(cid, newDisp);
           return { ...prevState, donors: newDonors, optionIndex: 0 };
@@ -428,6 +587,11 @@ export default function Game() {
             if (hasAllocations) {
               return { ...prevState, allocations: [0, 0, 0, 0, 0, 0] };
             }
+            const primaryCache = cache.ownPrimary.get(prevState.originCid);
+            const hasPrimaryMoves = primaryCache && primaryCache.targets.size > 0;
+            if (!hasPrimaryMoves) {
+              return prevState;
+            }
             return { type: 'own_primary', originCid: prevState.originCid, targetCid: null, optionIndex: 0 };
           }
           const dir = getNeighborDirection(prevState.originCid, cid);
@@ -457,17 +621,13 @@ export default function Game() {
     const centerCid = uiState.centerCid;
     const emptyCache = cache.empty.get(centerCid);
     if (!emptyCache) return null;
-    
-    const participating: Array<{ cid: number; donate: number }> = [];
 
-    for (const [cid, hDisp] of uiState.donors.entries()) {
-      const donorRule = emptyCache.donorRules.get(cid);
-      if (!donorRule) continue;
-      const donate = donorRule.actualPrimary - hDisp;
-      if (donate > 0) {
-        participating.push({ cid, donate });
-      }
+    if (uiState.symmetry) {
+      if (uiState.symmetry.donate <= 0) return null;
+      return emptyCache.constructSymCombineAction(uiState.symmetry.mode, uiState.symmetry.donate);
     }
+
+    const participating = getParticipatingDonors(emptyCache, uiState.donors, uiState.symmetry);
 
     if (participating.length === 2) {
       const [a, b] = participating;
@@ -477,7 +637,7 @@ export default function Game() {
     if (participating.length === 3) {
       const donors = participating.map(p => p.cid);
       const mode = emptyCache.symmetryModeForThird(donors);
-      if (mode === null) return null;
+      if (mode === null || mode === 'sym6') return null;
       const donate = participating[0].donate;
       if (!participating.every(entry => entry.donate === donate)) return null;
       return emptyCache.constructSymCombineAction(mode, donate);
@@ -568,281 +728,131 @@ export default function Game() {
     }
   };
 
-  // Helper function to round down invalid heights (matches engine logic)
-  const roundDownInvalidHeight = (h: number): engine.Height => {
-    if (h <= 0) return 0;
-    if (h === 5) return 4;
-    if (h === 7) return 6;
-    if (h >= 9) return 8;
-    if (h === 1 || h === 2 || h === 3 || h === 4 || h === 6 || h === 8) {
-      return h as engine.Height;
-    }
-    // For other invalid values, round down to nearest valid
-    if (h < 4) return h as engine.Height;
-    if (h < 6) return 4;
-    if (h < 8) return 6;
-    return 8;
-  };
+  type PreviewOverlayUnit = { p: number; color: engine.Color; tribun: boolean };
+  type PreviewOverlay = { units: Map<number, PreviewOverlayUnit>; empty: Set<number> };
 
-  // Helper function to normalize a unit (simplified version for preview)
-  const normalizeUnitForPreview = (unit: engine.Unit): engine.Unit | null => {
-    // Step 1: Round down invalid heights
-    let p = roundDownInvalidHeight(unit.p);
-    let s = roundDownInvalidHeight(unit.s);
+  const getPreviewOverlay = (): PreviewOverlay | null => {
+    if (!gameState) return null;
     
-    // Step 2: Enforce SP
-    if (s > 0 && (p > 4 || 2 * p < s)) {
-      p = 0;
-    }
-    
-    // Step 3: Liberation
-    if (p === 0 && s > 0) {
-      const newP = roundDownInvalidHeight(s);
-      return {
-        color: unit.color === 0 ? 1 : 0,
-        tribun: false,
-        p: newP,
-        s: 0,
-      };
-    }
-    
-    // Final check: empty unit
-    if (p === 0 && s === 0) return null;
-    
-    return { ...unit, p, s };
-  };
-
-  // Preview for Empty state (combine/sym-combine) - works even if illegal
-  const getEmptyStatePreview = (): engine.State | null => {
-    if (!gameState || uiState.type !== 'empty') return null;
-    
-    try {
-      const newBoard = new Uint8Array(gameState.board);
+    if (uiState.type === 'empty') {
       const centerCid = uiState.centerCid;
-      
-      // Get participating donors (donors with donation > 0)
-      const participatingDonors: Array<{ cid: number; donate: number; unit: engine.Unit }> = [];
-      const donors = engine.getEmptyStateDonors(centerCid, gameState);
-      
-      for (const [cid, donorInfo] of donors.entries()) {
-        const hDisp = uiState.donors.get(cid) ?? donorInfo.actualPrimary;
-        const donate = donorInfo.actualPrimary - hDisp;
+      if (!cache) return null;
+      const emptyCache = cache.empty.get(centerCid);
+      if (!emptyCache) return null;
+      const donors = emptyCache.donorCids;
+      const overlay: PreviewOverlay = { units: new Map(), empty: new Set() };
+      let totalDonation = 0;
+      let tribunTransferred = false;
+      let hasParticipation = false;
+
+      for (const cid of donors) {
+        const donorRule = emptyCache.donorRules.get(cid);
+        if (!donorRule) continue;
+        const hDisp = getDonorDisplayHeight(emptyCache, uiState.donors, cid, uiState.symmetry);
+        if (hDisp === null) continue;
+        const donate = donorRule.actualPrimary - hDisp;
         if (donate > 0) {
           const unit = engine.unitByteToUnit(gameState.board[cid]);
-          if (unit) {
-            participatingDonors.push({ cid, donate, unit });
+          if (!unit) continue;
+          hasParticipation = true;
+          totalDonation += donate;
+          const remaining = unit.p - donate;
+          if (remaining > 0) {
+            overlay.units.set(cid, {
+              p: remaining,
+              color: unit.color,
+              tribun: unit.tribun,
+            });
+          } else {
+            overlay.empty.add(cid);
+          }
+          if (unit.tribun && donate === unit.p) {
+            tribunTransferred = true;
           }
         }
       }
-      
-      if (participatingDonors.length === 0) return null;
-      
-      // Determine combine type
-      if (participatingDonors.length === 2) {
-        // 2-donor combine
-        const [donorA, donorB] = participatingDonors;
-        const newPrimary = donorA.donate + donorB.donate;
-        const hasTribun = donorA.unit.tribun || donorB.unit.tribun;
-        
-        const combinedUnit: engine.Unit = {
-          color: gameState.turn,
-          tribun: hasTribun,
-          p: roundDownInvalidHeight(newPrimary),
-          s: 0,
-        };
-        const normalized = normalizeUnitForPreview(combinedUnit);
-        if (normalized) {
-          newBoard[centerCid] = engine.unitToUnitByte(normalized);
-        }
-        
-        // Update donors
-        const newDonorA: engine.Unit = {
-          ...donorA.unit,
-          p: Math.max(0, donorA.unit.p - donorA.donate) as engine.Height,
-          tribun: donorA.unit.tribun && donorA.donate === donorA.unit.p ? false : donorA.unit.tribun,
-        };
-        const normA = normalizeUnitForPreview(newDonorA);
-        newBoard[donorA.cid] = normA ? engine.unitToUnitByte(normA) : 0;
-        
-        const newDonorB: engine.Unit = {
-          ...donorB.unit,
-          p: Math.max(0, donorB.unit.p - donorB.donate) as engine.Height,
-          tribun: donorB.unit.tribun && donorB.donate === donorB.unit.p ? false : donorB.unit.tribun,
-        };
-        const normB = normalizeUnitForPreview(newDonorB);
-        newBoard[donorB.cid] = normB ? engine.unitToUnitByte(normB) : 0;
-      } else if (participatingDonors.length === 3 || participatingDonors.length === 6) {
-        // Sym-combine
-        const donate = participatingDonors[0].donate; // All donate the same amount
-        const newPrimary = donate * participatingDonors.length;
-        
-        const combinedUnit: engine.Unit = {
-          color: gameState.turn,
-          tribun: false,
-          p: roundDownInvalidHeight(newPrimary),
-          s: 0,
-        };
-        const normalized = normalizeUnitForPreview(combinedUnit);
-        if (normalized) {
-          newBoard[centerCid] = engine.unitToUnitByte(normalized);
-        }
-        
-        // Update donors
-        for (const donor of participatingDonors) {
-          const newDonor: engine.Unit = {
-            ...donor.unit,
-            p: Math.max(0, donor.unit.p - donate) as engine.Height,
-          };
-          const normDonor = normalizeUnitForPreview(newDonor);
-          newBoard[donor.cid] = normDonor ? engine.unitToUnitByte(normDonor) : 0;
-        }
-      } else if (participatingDonors.length === 1) {
-        // Single donor (illegal, but show preview anyway)
-        const donor = participatingDonors[0];
-        const newPrimary = donor.donate;
-        const hasTribun = donor.unit.tribun;
-        
-        const combinedUnit: engine.Unit = {
-          color: gameState.turn,
-          tribun: hasTribun,
-          p: roundDownInvalidHeight(newPrimary),
-          s: 0,
-        };
-        const normalized = normalizeUnitForPreview(combinedUnit);
-        if (normalized) {
-          newBoard[centerCid] = engine.unitToUnitByte(normalized);
-        }
-        
-        // Update donor
-        const newDonor: engine.Unit = {
-          ...donor.unit,
-          p: Math.max(0, donor.unit.p - donor.donate) as engine.Height,
-          tribun: donor.unit.tribun && donor.donate === donor.unit.p ? false : donor.unit.tribun,
-        };
-        const normDonor = normalizeUnitForPreview(newDonor);
-        newBoard[donor.cid] = normDonor ? engine.unitToUnitByte(normDonor) : 0;
-      }
-      
-      return {
-        ...gameState,
-        board: newBoard,
-      };
-    } catch (error) {
-      return null;
-    }
-  };
 
-  // Preview for Own.Secondary state (split/backstabb) - directly from allocations
-  const getOwnSecondaryPreview = (): engine.State | null => {
-    if (!gameState || uiState.type !== 'own_secondary') return null;
-    
-    try {
-      const newBoard = new Uint8Array(gameState.board);
+      if (!hasParticipation) return null;
+
+      if (totalDonation > 0) {
+        overlay.units.set(centerCid, {
+          p: totalDonation,
+          color: gameState.turn,
+          tribun: tribunTransferred,
+        });
+      }
+
+      return overlay;
+    }
+
+    if (uiState.type === 'own_secondary') {
       const originCid = uiState.originCid;
       const originUnit = engine.unitByteToUnit(gameState.board[originCid]);
       if (!originUnit) return null;
-      
-      const H0 = originUnit.p;
+
+      const overlay: PreviewOverlay = { units: new Map(), empty: new Set() };
       const allocations = uiState.allocations;
       const totalAllocated = allocations.reduce((a, b) => a + b, 0);
-      const remainder = H0 - totalAllocated;
-      
-      // Check for backstabb (full primary to exactly one neighbor)
-      if (totalAllocated === H0 && originUnit.s > 0) {
-        const nonzeroCount = allocations.filter(a => a > 0).length;
+      const remainder = originUnit.p - totalAllocated;
+
+      if (totalAllocated === originUnit.p && originUnit.s > 0) {
+        const nonzeroCount = allocations.filter((a) => a > 0).length;
         if (nonzeroCount === 1) {
-          const dir = allocations.findIndex(a => a > 0);
+          const dir = allocations.findIndex((a) => a > 0);
           const { x: ox, y: oy } = engine.decodeCoord(originCid);
           const [dx, dy] = NEIGHBOR_VECTORS[dir];
           try {
             const targetCid = engine.encodeCoord(ox + dx, oy + dy);
-            // Place primary on target, destroy secondary
-            const newUnit: engine.Unit = {
+            overlay.units.set(targetCid, {
+              p: originUnit.p,
               color: originUnit.color,
               tribun: originUnit.tribun,
-              p: originUnit.p,
-              s: 0,
-            };
-            newBoard[targetCid] = engine.unitToUnitByte(newUnit);
-            newBoard[originCid] = 0;
+            });
+            overlay.empty.add(originCid);
+            return overlay;
           } catch {
-            // Invalid coordinate
-          }
-        }
-      } else {
-        // Split: place allocations on adjacent tiles
-        const { x: ox, y: oy } = engine.decodeCoord(originCid);
-        
-        for (let dir = 0; dir < 6; dir++) {
-          if (allocations[dir] > 0) {
-            const [dx, dy] = NEIGHBOR_VECTORS[dir];
-            try {
-              const targetCid = engine.encodeCoord(ox + dx, oy + dy);
-              const targetUnit = engine.unitByteToUnit(newBoard[targetCid]);
-              if (targetUnit === null) {
-                // Place unit with allocation height
-                const splitUnit: engine.Unit = {
-                  color: originUnit.color,
-                  tribun: false,
-                  p: roundDownInvalidHeight(allocations[dir]),
-                  s: 0,
-                };
-                const normalized = normalizeUnitForPreview(splitUnit);
-                if (normalized) {
-                  newBoard[targetCid] = engine.unitToUnitByte(normalized);
-                }
-              }
-            } catch {
-              // Invalid coordinate, skip
-            }
-          }
-        }
-        
-        // Update origin with remainder
-        if (remainder > 0) {
-          const remainingUnit: engine.Unit = {
-            ...originUnit,
-            p: roundDownInvalidHeight(remainder),
-          };
-          const normalized = normalizeUnitForPreview(remainingUnit);
-          newBoard[originCid] = normalized ? engine.unitToUnitByte(normalized) : 0;
-        } else {
-          // Origin becomes empty or has secondary
-          if (originUnit.s > 0) {
-            const remainingUnit: engine.Unit = {
-              color: originUnit.color,
-              tribun: false,
-              p: 0,
-              s: originUnit.s,
-            };
-            const normalized = normalizeUnitForPreview(remainingUnit);
-            newBoard[originCid] = normalized ? engine.unitToUnitByte(normalized) : 0;
-          } else {
-            newBoard[originCid] = 0;
+            return null;
           }
         }
       }
-      
-      return {
-        ...gameState,
-        board: newBoard,
-      };
-    } catch (error) {
-      return null;
+
+      const { x: ox, y: oy } = engine.decodeCoord(originCid);
+      for (let dir = 0; dir < 6; dir++) {
+        if (allocations[dir] > 0) {
+          const [dx, dy] = NEIGHBOR_VECTORS[dir];
+          try {
+            const targetCid = engine.encodeCoord(ox + dx, oy + dy);
+            overlay.units.set(targetCid, {
+              p: allocations[dir],
+              color: originUnit.color,
+              tribun: false,
+            });
+          } catch {
+            // Invalid coordinate, skip
+          }
+        }
+      }
+
+      if (remainder > 0) {
+        overlay.units.set(originCid, {
+          p: remainder,
+          color: originUnit.color,
+          tribun: originUnit.tribun,
+        });
+      } else {
+        overlay.empty.add(originCid);
+      }
+
+      return overlay;
     }
+
+    return null;
   };
 
   // Get preview state by applying pending action
   const getPreviewState = (): engine.State | null => {
     if (!gameState) return null;
     
-    // For Empty and Own.Secondary, use direct preview construction
-    if (uiState.type === 'empty') {
-      return getEmptyStatePreview();
-    }
-    if (uiState.type === 'own_secondary') {
-      return getOwnSecondaryPreview();
-    }
     if (!cache) return null;
     
     // For other states, use existing getPendingAction logic
@@ -862,8 +872,8 @@ export default function Game() {
   const renderBoard = () => {
     if (!gameState) return null;
 
-    // Get preview state if there's a pending action
-    const previewState = getPreviewState();
+    const previewOverlay = getPreviewOverlay();
+    const previewState = previewOverlay ? null : getPreviewState();
     const displayState = previewState || gameState;
 
     // Edge length of a tile is 1 unit, distance to center of edge is sqrt(3)/2 = d
@@ -945,41 +955,53 @@ export default function Game() {
           // Interactable: donor tiles (tiles that can donate to center)
           const emptyCache = cache.empty.get(uiState.centerCid);
           if (emptyCache) {
-            // Apply participation restriction: if 2 donors selected, only symmetry-compatible 3rd donors
-            const participating = Array.from(uiState.donors.entries()).filter(([cid, hDisp]) => {
-              const rule = emptyCache.donorRules.get(cid);
-              if (!rule) return false;
-              return rule.actualPrimary - hDisp > 0;
-            });
-            
-            if (participating.length === 2) {
-              // Only allow 3rd donors that create symmetry
-              for (const donorCid of emptyCache.donorCids) {
-                if (uiState.donors.has(donorCid)) continue; // Already selected
-                const testDonors = [...participating.map(([cid]) => cid), donorCid];
-                const symmetryMode = emptyCache.symmetryModeForThird(testDonors);
-                if (symmetryMode !== null) {
-                  interactableTiles.push(donorCid);
-                }
+            const participating = getParticipatingDonors(emptyCache, uiState.donors, uiState.symmetry);
+            const interactableSet = new Set<number>();
+
+            if (uiState.symmetry) {
+              for (const donorCid of uiState.symmetry.donorCids) {
+                interactableSet.add(donorCid);
               }
-            } else if (participating.length === 1) {
-              // Only allow donors that can pair with the participating one
-              const [firstCid, firstDisp] = participating[0];
-              const firstRule = emptyCache.donorRules.get(firstCid);
-              if (firstRule) {
-                const firstDonate = firstRule.actualPrimary - firstDisp;
+            } else {
+              for (const entry of participating) {
+                interactableSet.add(entry.cid);
+              }
+
+              if (participating.length === 0) {
                 for (const donorCid of emptyCache.donorCids) {
-                  if (donorCid === firstCid || uiState.donors.has(donorCid)) continue;
-                  // Test if they can pair (use 1 as test donation for second)
-                  if (emptyCache.canPair(firstCid, donorCid, firstDonate, 1)) {
-                    interactableTiles.push(donorCid);
+                  interactableSet.add(donorCid);
+                }
+              } else if (participating.length === 1) {
+                const participant = participating[0];
+                for (const donorCid of emptyCache.donorCids) {
+                  if (donorCid === participant.cid) {
+                    interactableSet.add(donorCid);
+                    continue;
+                  }
+                  if (canPairWithAnyDonation(emptyCache, participant, donorCid)) {
+                    interactableSet.add(donorCid);
+                  }
+                }
+              } else if (participating.length === 2) {
+                const [first, second] = participating;
+                for (const donorCid of emptyCache.donorCids) {
+                  if (donorCid === first.cid || donorCid === second.cid) {
+                    interactableSet.add(donorCid);
+                    continue;
+                  }
+                  const symmetryMode = emptyCache.symmetryModeForThird([
+                    first.cid,
+                    second.cid,
+                    donorCid,
+                  ]);
+                  if (symmetryMode !== null) {
+                    interactableSet.add(donorCid);
                   }
                 }
               }
-            } else {
-              // No participation restriction yet, all donors are interactable
-              interactableTiles.push(...emptyCache.donorCids);
             }
+
+            interactableTiles.push(...Array.from(interactableSet));
           }
           break;
           
@@ -1022,7 +1044,12 @@ export default function Game() {
     const interactableSet = new Set(interactableTiles);
 
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
-      const unit = engine.unitByteToUnit(displayState.board[cid]);
+      const overlayUnit = previewOverlay?.units.get(cid);
+      const unit: { p: number; color: engine.Color; tribun: boolean } | null = overlayUnit
+        ? overlayUnit
+        : previewOverlay?.empty.has(cid)
+        ? null
+        : engine.unitByteToUnit(displayState.board[cid]);
 
       // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
       // Position of (0,0) is at (0,0)
@@ -1051,9 +1078,9 @@ export default function Game() {
       const tileColor = getHexagonColor(baseColor, hexagonState);
       // Tile is clickable if it's selectable or interactable or selected (and we're in an active state)
       const isClickable = isActive && (
-        selectedSet.has(cid) || 
-        interactableSet.has(cid) || 
-        baseTileStates[cid] === 'selectable'
+        selectedSet.has(cid) ||
+        interactableSet.has(cid) ||
+        (uiState.type === 'idle' && baseTileStates[cid] === 'selectable')
       );
 
       const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';

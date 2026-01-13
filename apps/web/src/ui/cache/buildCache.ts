@@ -255,6 +255,10 @@ export function buildCache(
   state: engine.State,
   validator: LegalBloomValidator
 ): UiMoveCache {
+  const legalActions = engine.generateLegalActions(state);
+  const legalSet = new Set<number>(Array.from(legalActions));
+  const isLegal = (action: number): boolean => legalSet.has(action) && validator.isProbablyLegal(action);
+
   const cache: UiMoveCache = {
     enemy: new Map(),
     ownPrimary: new Map(),
@@ -274,7 +278,7 @@ export function buildCache(
     for (let dmg = 1; dmg <= 8; dmg++) {
       if (dmg >= unit.p) break; // Damage must be < target primary
       const action = engine.encodeDamage(cid, dmg);
-      if (validator.isProbablyLegal(action)) {
+      if (isLegal(action)) {
         damageOptions.push(action);
       }
     }
@@ -282,7 +286,7 @@ export function buildCache(
     // Test LIBERATE (only if target has secondary)
     if (unit.s > 0) {
       const action = engine.encodeLiberate(cid);
-      if (validator.isProbablyLegal(action)) {
+      if (isLegal(action)) {
         liberateAction = action;
       }
     }
@@ -332,14 +336,14 @@ export function buildCache(
       // Test secondary MOVE
       if (unit.s > 0 && secondaryReachable.includes(toCid)) {
         const action = engine.encodeMove(cid, toCid, 1);
-        if (validator.isProbablyLegal(action)) {
+        if (isLegal(action)) {
           options.push(action);
         }
       }
       
       // Test primary MOVE
       const action = engine.encodeMove(cid, toCid, 0);
-      if (validator.isProbablyLegal(action)) {
+      if (isLegal(action)) {
         options.push(action);
       }
 
@@ -361,7 +365,7 @@ export function buildCache(
       // Check for ATTACK_TRIBUN
       if (targetUnit.tribun) {
         const action = engine.encodeAttackTribun(cid, targetCid, state.turn);
-        if (validator.isProbablyLegal(action)) {
+        if (isLegal(action)) {
           options.push(action);
           isTribunAttack = true;
         }
@@ -369,13 +373,13 @@ export function buildCache(
         // Test KILL actions
         if (secondaryAttackReachable.includes(targetCid)) {
           const action = engine.encodeKill(cid, targetCid, 1);
-          if (validator.isProbablyLegal(action)) {
+          if (isLegal(action)) {
             options.push(action);
           }
         }
         if (primaryAttackReachable.includes(targetCid)) {
           const action = engine.encodeKill(cid, targetCid, 0);
-          if (validator.isProbablyLegal(action)) {
+          if (isLegal(action)) {
             options.push(action);
           }
         }
@@ -383,7 +387,7 @@ export function buildCache(
         // Test ENSLAVE (only primary pattern, target must not be tribun, no secondary, S >= T)
         if (targetUnit.s === 0 && !targetUnit.tribun && primaryAttackReachable.includes(targetCid)) {
           const action = engine.encodeEnslave(cid, targetCid);
-          if (validator.isProbablyLegal(action)) {
+          if (isLegal(action)) {
             options.push(action);
           }
         }
@@ -415,7 +419,7 @@ export function buildCache(
         // Quick check: test a simple split
         const testAlloc: [number, number, number, number, number, number] = [1, 0, 0, 0, 0, 0];
         const testAction = engine.encodeSplit(cid, testAlloc);
-        if (validator.isProbablyLegal(testAction)) {
+        if (isLegal(testAction)) {
           canEnterSecondary = true;
         }
       }
@@ -427,7 +431,7 @@ export function buildCache(
             const neighborUnit = engine.unitByteToUnit(state.board[neighborCid]);
             if (neighborUnit === null) {
               const action = engine.encodeBackstabb(cid, dir);
-              if (validator.isProbablyLegal(action)) {
+              if (isLegal(action)) {
                 canEnterSecondary = true;
                 break;
               }
@@ -499,7 +503,7 @@ export function buildCache(
             if (nonzeroCount === 1) {
               const dir = alloc.findIndex(a => a > 0);
               const action = engine.encodeBackstabb(cid, dir);
-              if (validator.isProbablyLegal(action)) {
+              if (isLegal(action)) {
                 return action;
               }
             }
@@ -532,6 +536,7 @@ export function buildCache(
     const donorCids: Cid[] = [];
     const donorRules = new Map<Cid, DonorRuleCache>();
     const donorDirs = new Map<Cid, number>();
+    const donorUnits = new Map<Cid, engine.Unit>();
 
     // Find adjacent owned tiles
     for (let dir = 0; dir < 6; dir++) {
@@ -541,6 +546,7 @@ export function buildCache(
         if (unit && unit.color === state.turn && unit.p > 0) {
           donorCids.push(neighborCid);
           donorDirs.set(neighborCid, dir);
+          donorUnits.set(neighborCid, unit);
 
           // Build donor rules
           const validHeights = [0, 1, 2, 3, 4, 6, 8];
@@ -590,7 +596,7 @@ export function buildCache(
         for (let donateA = 1; donateA <= aRule.actualPrimary && !hasLegalAction; donateA++) {
           for (let donateB = 1; donateB <= bRule.actualPrimary; donateB++) {
             const action = engine.encodeCombine(centerCid, dirA, dirB, donateA, donateB);
-            if (validator.isProbablyLegal(action)) {
+            if (isLegal(action)) {
               hasLegalAction = true;
               break;
             }
@@ -602,7 +608,7 @@ export function buildCache(
     // Test symmetric combines
     if (!hasLegalAction) {
       const sym6Action = engine.encodeSymCombine(centerCid, 0, 1);
-      if (validator.isProbablyLegal(sym6Action)) {
+      if (isLegal(sym6Action)) {
         hasLegalAction = true;
       }
     }
@@ -610,7 +616,7 @@ export function buildCache(
       for (const config of [1, 2] as const) {
         for (const donate of [1, 2]) {
           const action = engine.encodeSymCombine(centerCid, config, donate);
-          if (validator.isProbablyLegal(action)) {
+          if (isLegal(action)) {
             hasLegalAction = true;
             break;
           }
@@ -628,37 +634,65 @@ export function buildCache(
       if (dirA === undefined || dirB === undefined || dirA === dirB) return false;
 
       const action = engine.encodeCombine(centerCid, dirA, dirB, donateA, donateB);
-      return validator.isProbablyLegal(action);
+      return isLegal(action);
     };
 
     // Build symmetryModeForThird function
+    const sym6Possible = (() => {
+      if (donorCids.length !== 6) return false;
+      const firstCid = donorCids[0];
+      const firstUnit = donorUnits.get(firstCid);
+      if (!firstUnit || firstUnit.tribun) return false;
+      return donorCids.every((cid) => {
+        const unit = donorUnits.get(cid);
+        return (
+          unit !== undefined &&
+          !unit.tribun &&
+          unit.color === firstUnit.color &&
+          unit.p === firstUnit.p &&
+          unit.s === firstUnit.s
+        );
+      });
+    })();
+
     const symmetryModeForThird = (donors: Cid[]): 'sym3+' | 'sym3-' | 'sym6' | null => {
       if (donors.length !== 3) return null;
 
       const dirs: number[] = [];
+      const units: engine.Unit[] = [];
       for (const donorCid of donors) {
         const dir = donorDirs.get(donorCid);
         if (dir === undefined) return null;
         dirs.push(dir);
+        const unit = donorUnits.get(donorCid);
+        if (!unit) return null;
+        units.push(unit);
       }
 
       // Check for sym3 configurations
       const dirSet = new Set(dirs);
       const sym3Config1 = new Set([0, 4, 5]);
       const sym3Config2 = new Set([3, 1, 2]);
+      const firstUnit = units[0];
+      const unitsEqual = units.every(
+        (unit) =>
+          !unit.tribun &&
+          unit.color === firstUnit.color &&
+          unit.p === firstUnit.p &&
+          unit.s === firstUnit.s
+      );
 
       if (dirSet.size === 3) {
-        if (sym3Config1.has(dirs[0]) && sym3Config1.has(dirs[1]) && sym3Config1.has(dirs[2])) {
+        if (unitsEqual && sym3Config1.has(dirs[0]) && sym3Config1.has(dirs[1]) && sym3Config1.has(dirs[2])) {
           return 'sym3+';
         }
-        if (sym3Config2.has(dirs[0]) && sym3Config2.has(dirs[1]) && sym3Config2.has(dirs[2])) {
+        if (unitsEqual && sym3Config2.has(dirs[0]) && sym3Config2.has(dirs[1]) && sym3Config2.has(dirs[2])) {
           return 'sym3-';
         }
       }
 
       // Check for sym6 (test if sym6 is possible)
-      const sym6Action = engine.encodeSymCombine(centerCid, 0, 1);
-      if (validator.isProbablyLegal(sym6Action)) {
+      if (sym6Possible) {
         return 'sym6';
       }
 
