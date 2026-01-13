@@ -811,6 +811,8 @@ export default function Game() {
     const originCid = uiState.originCid;
     const secondaryCache = cache.ownSecondary.get(originCid);
     if (!secondaryCache) return null;
+    const originUnit = engine.unitByteToUnit(gameState.board[originCid]);
+    if (!originUnit || originUnit.color !== gameState.turn) return null;
 
     const allocations = uiState.allocations;
     
