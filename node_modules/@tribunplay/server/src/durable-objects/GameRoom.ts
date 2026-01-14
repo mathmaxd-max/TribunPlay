@@ -667,7 +667,7 @@ export class GameRoom implements DurableObject {
 	private async scheduleNextAlarm(): Promise<void> {
 		if (!this.gameState || !this.timeControl) return;
 		if (this.gameState.status === "ended") {
-			await this.state.storage.setAlarm(null);
+			await this.state.storage.deleteAlarm();
 			return;
 		}
 
@@ -690,7 +690,7 @@ export class GameRoom implements DurableObject {
 		}
 
 		if (nextDeadline === null) return;
-		await this.state.storage.setAlarm(nextDeadline);
+		await this.state.storage.setAlarm(new Date(nextDeadline));
 	}
 
 	private async applyMaxGameEnd(gameId: string): Promise<void> {
