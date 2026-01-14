@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { API_BASE } from '../config';
 
 export default function Home() {
   const [code, setCode] = useState('');
@@ -11,7 +12,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/game/create', {
+      const response = await fetch(`${API_BASE}/api/game/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -43,7 +44,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/game/join', {
+      const response = await fetch(`${API_BASE}/api/game/join`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: code.trim().toUpperCase() }),

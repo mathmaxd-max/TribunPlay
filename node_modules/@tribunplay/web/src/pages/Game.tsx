@@ -5,6 +5,7 @@ import { getHexagonColor, getBaseColor, type HexagonState } from '../hexagonColo
 import { LegalBloomValidator, type LegalValidatorMessage } from '../net/LegalBloom';
 import { buildCache } from '../ui/cache/buildCache';
 import type { UiMoveCache } from '../ui/cache/UiMoveCache';
+import { API_BASE, WS_BASE } from '../config';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -639,7 +640,7 @@ export default function Game() {
           setRole(seat);
         } else {
           // First time joining this game - call join API
-          const joinResponse = await fetch('/api/game/join', {
+          const joinResponse = await fetch(`${API_BASE}/api/game/join`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ code }),
@@ -662,8 +663,7 @@ export default function Game() {
         }
 
         // Connect WebSocket
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/game/${gameId}?token=${token}`;
+        const wsUrl = `${WS_BASE}/ws/game/${gameId}?token=${token}`;
         serverOffsetMsRef.current = null;
         bestRttMsRef.current = null;
         const ws = new WebSocket(wsUrl);
