@@ -18,6 +18,24 @@ openapi.post("/api/game/create", GameCreate);
 openapi.post("/api/game/join", GameJoin);
 openapi.get("/api/game/:code", GameGet);
 
+// WebSocket health endpoint (accepts handshake, then closes)
+app.get("/ws/health", (c) => {
+	const upgradeHeader = c.req.header("Upgrade");
+	if (upgradeHeader !== "websocket") {
+		return new Response("Expected WebSocket", { status: 426 });
+	}
+
+	const pair = new WebSocketPair();
+	const [client, server] = Object.values(pair);
+	server.accept();
+	server.close(1000, "OK");
+
+	return new Response(null, {
+		status: 101,
+		webSocket: client,
+	});
+});
+
 // WebSocket endpoint for game rooms
 app.get("/ws/game/:gameId", async (c) => {
 	const gameId = c.req.param("gameId");

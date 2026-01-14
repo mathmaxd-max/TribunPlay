@@ -1,12 +1,19 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { API_BASE } from '../config';
+import { useHealthCheck } from '../utils/useHealthCheck';
 
 export default function Home() {
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+  
+  // Health check for API and WebSocket
+  const { result: healthResult, checking: healthChecking } = useHealthCheck({
+    autoCheck: true,
+    timeout: 3000,
+  });
 
   const handleCreateGame = async () => {
     setLoading(true);
@@ -72,6 +79,55 @@ export default function Home() {
   return (
     <div style={{ maxWidth: '600px', margin: '50px auto', padding: '20px' }}>
       <h1 style={{ marginBottom: '30px', textAlign: 'center' }}>Tribun Play</h1>
+      
+      {/* Health Check Status */}
+      {healthResult && (
+        <div style={{
+          marginBottom: '20px',
+          padding: '12px',
+          background: healthResult.api.reachable && healthResult.websocket.reachable 
+            ? '#d4edda' 
+            : '#f8d7da',
+          color: healthResult.api.reachable && healthResult.websocket.reachable 
+            ? '#155724' 
+            : '#721c24',
+          borderRadius: '4px',
+          fontSize: '14px',
+        }}>
+          <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
+            Connection Status:
+          </div>
+          <div>
+            API: {healthResult.api.reachable ? (
+              <span style={{ color: '#28a745' }}>✓ Reachable</span>
+            ) : (
+              <span style={{ color: '#dc3545' }}>✗ Unreachable {healthResult.api.error ? `(${healthResult.api.error})` : ''}</span>
+            )}
+            {healthResult.api.responseTime && ` (${healthResult.api.responseTime}ms)`}
+          </div>
+          <div>
+            WebSocket: {healthResult.websocket.reachable ? (
+              <span style={{ color: '#28a745' }}>✓ Reachable</span>
+            ) : (
+              <span style={{ color: '#dc3545' }}>✗ Unreachable {healthResult.websocket.error ? `(${healthResult.websocket.error})` : ''}</span>
+            )}
+            {healthResult.websocket.responseTime && ` (${healthResult.websocket.responseTime}ms)`}
+          </div>
+        </div>
+      )}
+      
+      {healthChecking && !healthResult && (
+        <div style={{
+          marginBottom: '20px',
+          padding: '12px',
+          background: '#fff3cd',
+          color: '#856404',
+          borderRadius: '4px',
+          fontSize: '14px',
+        }}>
+          Checking connection status...
+        </div>
+      )}
       
       <div style={{ 
         background: 'white', 
