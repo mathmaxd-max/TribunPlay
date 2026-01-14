@@ -9,11 +9,18 @@
     "bindings": [
       {
         "name": "GAME_ROOM",
-        "class_name": "GameRoom",
-        "script_name": "tribunplay-server"
+        "class_name": "GameRoom"
       }
     ]
   },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "GameRoom"
+      ]
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
