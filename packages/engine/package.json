@@ -12,7 +12,7 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node ../../node_modules/typescript/bin/tsc --project tsconfig.json",
     "dev": "tsc --watch",
     "clean": "rm -rf dist"
   },
