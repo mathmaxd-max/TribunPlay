@@ -1,5 +1,6 @@
 import { fromHono } from "chanfana";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { GameCreate } from "./endpoints/gameCreate";
 import { GameJoin } from "./endpoints/gameJoin";
 import { GameGet } from "./endpoints/gameGet";
@@ -7,6 +8,8 @@ import { GameRoom } from "./durable-objects/GameRoom";
 
 // Start a Hono app
 const app = new Hono<{ Bindings: Env }>();
+
+app.use("*", cors({ origin: "*" }));
 
 // Setup OpenAPI registry
 const openapi = fromHono(app, {
