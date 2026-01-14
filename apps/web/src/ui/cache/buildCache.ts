@@ -451,7 +451,9 @@ export function buildCache(
 
     // Check if can enter secondary (has empty adjacent or split/backstabb possible)
     let canEnterSecondary = false;
-    if (unit.s > 0 || unit.p > 0) {
+    const canSplit = unit.p > 1 && !unit.tribun;
+    const canBackstabb = unit.s > 0;
+    if (canSplit || canBackstabb) {
       // Check for adjacent empty tiles
       for (let dir = 0; dir < 6; dir++) {
         const neighborCid = getNeighborCid(cid, dir);
@@ -465,7 +467,7 @@ export function buildCache(
       }
       
       // Also check if any split/backstabb action is probably legal
-      if (!canEnterSecondary && unit.p > 0 && !unit.tribun) {
+      if (!canEnterSecondary && canSplit) {
         // Quick check: test a simple split
         const testAlloc: [number, number, number, number, number, number] = [1, 0, 0, 0, 0, 0];
         const testAction = engine.encodeSplit(cid, testAlloc);
@@ -473,7 +475,7 @@ export function buildCache(
           canEnterSecondary = true;
         }
       }
-      if (!canEnterSecondary && unit.s > 0) {
+      if (!canEnterSecondary && canBackstabb) {
         // Test backstabb
         for (let dir = 0; dir < 6; dir++) {
           const neighborCid = getNeighborCid(cid, dir);
@@ -503,7 +505,7 @@ export function buildCache(
     }
 
     // Build ownSecondary cache
-    if (unit.p > 0 && !unit.tribun) {
+    if ((unit.p > 1 || unit.s > 0) && !unit.tribun) {
       const emptyAdjDirs: number[] = [];
       for (let dir = 0; dir < 6; dir++) {
         const neighborCid = getNeighborCid(cid, dir);

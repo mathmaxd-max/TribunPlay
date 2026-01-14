@@ -303,14 +303,20 @@ export class GameRoom implements DurableObject {
 			turn: this.gameState.turn,
 			ply: this.gameState.ply,
 			drawOfferBy: this.gameState.drawOfferBy,
+			status: this.gameState.status ?? "active",
+			winner: this.gameState.winner ?? null,
 		};
 		
 		// Include clock and buffer state in snapshot
-		const clockSnapshot = this.getClockSnapshot();
+		const nowMs = Date.now();
+		const clockSnapshot = this.getClockSnapshot(nowMs);
 		if (clockSnapshot && this.timeControl) {
 			snapshot.clocksMs = clockSnapshot.clocksMs;
 			snapshot.buffersMs = clockSnapshot.buffersMs;
 			snapshot.timeControl = this.timeControl;
+			snapshot.serverTimeMs = nowMs;
+			snapshot.turnStartTimeMs = this.turnStartTime;
+			snapshot.gameStartTimeMs = this.gameStartTime;
 		}
 		
 		// Pack actions as base64
@@ -350,6 +356,16 @@ export class GameRoom implements DurableObject {
 			const conn = this.connections.get(connectionId);
 			if (conn) {
 				await this.sendSync(ws, conn.role);
+			}
+		} else if (message.t === "time_sync" && Number.isFinite(message.clientTimeMs)) {
+			if (ws.readyState === 1) {
+				ws.send(
+					JSON.stringify({
+						t: "time_sync",
+						clientTimeMs: message.clientTimeMs,
+						serverTimeMs: Date.now(),
+					})
+				);
 			}
 		}
 	}
@@ -486,26 +502,21 @@ export class GameRoom implements DurableObject {
 	 * Update clocks and buffers after an action is completed
 	 * Applies buffer/increment rules and checks for timeouts
 	 */
-	private updateClocksAfterAction(previousTurn: engine.Color, newTurn: engine.Color): engine.Color | null {
+	private updateClocksAfterAction(previousTurn: engine.Color, _newTurn: engine.Color): engine.Color | null {
 		if (!this.timeControl || !this.turnStartTime || this.gameState?.status === "ended") {
 			return null;
 		}
 		
-		const elapsed = Date.now() - this.turnStartTime;
+		const elapsed = Math.max(0, Date.now() - this.turnStartTime);
 		const previousColor = previousTurn === 0 ? "black" : "white";
+		const bufferFull = this.timeControl.bufferMs[previousColor];
+		const timeOverBuffer = Math.max(0, elapsed - bufferFull);
 		let timedOut: engine.Color | null = null;
 		
 		// Update clock and buffer for the player who just moved
 		if (previousColor === "black") {
-			if (elapsed <= this.bufferBlackMs) {
-				// Still within buffer time: consume buffer, keep clock same
-				this.bufferBlackMs = Math.max(0, this.bufferBlackMs - elapsed);
-			} else {
-				// Buffer exhausted: set buffer to 0, deduct from clock
-				const timeOverBuffer = elapsed - this.bufferBlackMs;
-				this.bufferBlackMs = 0;
-				this.clockBlackMs = Math.max(0, this.clockBlackMs - timeOverBuffer);
-			}
+			// Buffer reduces the clock only after it is exhausted
+			this.clockBlackMs = Math.max(0, this.clockBlackMs - timeOverBuffer);
 			
 			if (this.clockBlackMs <= 0) {
 				this.clockBlackMs = 0;
@@ -515,15 +526,8 @@ export class GameRoom implements DurableObject {
 				this.clockBlackMs = Math.max(0, this.clockBlackMs + this.timeControl.incrementMs.black);
 			}
 		} else {
-			if (elapsed <= this.bufferWhiteMs) {
-				// Still within buffer time: consume buffer, keep clock same
-				this.bufferWhiteMs = Math.max(0, this.bufferWhiteMs - elapsed);
-			} else {
-				// Buffer exhausted: set buffer to 0, deduct from clock
-				const timeOverBuffer = elapsed - this.bufferWhiteMs;
-				this.bufferWhiteMs = 0;
-				this.clockWhiteMs = Math.max(0, this.clockWhiteMs - timeOverBuffer);
-			}
+			// Buffer reduces the clock only after it is exhausted
+			this.clockWhiteMs = Math.max(0, this.clockWhiteMs - timeOverBuffer);
 			
 			if (this.clockWhiteMs <= 0) {
 				this.clockWhiteMs = 0;
@@ -534,13 +538,9 @@ export class GameRoom implements DurableObject {
 			}
 		}
 		
-		// Reset buffer to full for the new active player
-		const newColor = newTurn === 0 ? "black" : "white";
-		if (newColor === "black") {
-			this.bufferBlackMs = this.timeControl.bufferMs.black;
-		} else {
-			this.bufferWhiteMs = this.timeControl.bufferMs.white;
-		}
+		// Reset buffers to full for the next turn
+		this.bufferBlackMs = this.timeControl.bufferMs.black;
+		this.bufferWhiteMs = this.timeControl.bufferMs.white;
 		
 		// Update turn start time
 		this.turnStartTime = Date.now();
@@ -549,18 +549,22 @@ export class GameRoom implements DurableObject {
 	}
 
 	private broadcastClockUpdate(state: engine.State): void {
-		const clockSnapshot = this.getClockSnapshot();
+		const nowMs = Date.now();
+		const clockSnapshot = this.getClockSnapshot(nowMs);
 		const message = JSON.stringify({
 			t: "clock",
 			ply: state.ply,
 			turn: state.turn === 0 ? "black" : "white",
+			serverTimeMs: nowMs,
+			turnStartTimeMs: this.turnStartTime,
+			gameStartTimeMs: this.gameStartTime,
 			clocksMs: clockSnapshot?.clocksMs ?? {
 				black: this.clockBlackMs,
 				white: this.clockWhiteMs,
 			},
 			buffersMs: clockSnapshot?.buffersMs ?? {
-				black: this.bufferBlackMs,
-				white: this.bufferWhiteMs,
+				black: this.timeControl?.bufferMs.black ?? this.bufferBlackMs,
+				white: this.timeControl?.bufferMs.white ?? this.bufferWhiteMs,
 			},
 		});
 
@@ -630,21 +634,22 @@ export class GameRoom implements DurableObject {
 		this.broadcastBloomFilter(Array.from(legalActions));
 	}
 
-	private getClockSnapshot(): { clocksMs: { black: number; white: number }; buffersMs: { black: number; white: number } } | null {
+	private getClockSnapshot(
+		nowMs: number = Date.now()
+	): { clocksMs: { black: number; white: number }; buffersMs: { black: number; white: number } } | null {
 		if (!this.timeControl || !this.gameState) return null;
 		const clocksMs = {
 			black: this.clockBlackMs,
 			white: this.clockWhiteMs,
 		};
 		const buffersMs = {
-			black: this.bufferBlackMs,
-			white: this.bufferWhiteMs,
+			black: this.timeControl.bufferMs.black,
+			white: this.timeControl.bufferMs.white,
 		};
 		if (this.turnStartTime === null) {
 			return { clocksMs, buffersMs };
 		}
-		const now = Date.now();
-		const elapsed = Math.max(0, now - this.turnStartTime);
+		const elapsed = Math.max(0, nowMs - this.turnStartTime);
 		const activeColor = this.gameState.turn === 0 ? "black" : "white";
 		const bufferFull = this.timeControl.bufferMs[activeColor];
 		const bufferRemaining = Math.max(0, bufferFull - elapsed);

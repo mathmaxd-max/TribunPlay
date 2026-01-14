@@ -22,6 +22,17 @@ type RawTimeControl = {
   incrementMs?: number | ColorClock;
   maxGameMs?: number | null;
 };
+type GameEndInfo = {
+  reason: string;
+  winnerLabel: string;
+};
+type EndActionInfo =
+  | { kind: 'resign'; loserColor: engine.Color; winnerColor: engine.Color }
+  | { kind: 'no-legal-moves'; loserColor: engine.Color; winnerColor: engine.Color }
+  | { kind: 'timeout-player'; loserColor: engine.Color; winnerColor: engine.Color }
+  | { kind: 'timeout-game-tie'; winnerColor: null }
+  | { kind: 'draw-accept'; winnerColor: null }
+  | { kind: 'tribun'; winnerColor: engine.Color };
 
 type EmptySymmetryState = {
   mode: 'sym3+' | 'sym3-' | 'sym6';
@@ -45,6 +56,11 @@ interface GameSnapshot {
   clocksMs?: { black: number; white: number };
   buffersMs?: { black: number; white: number };
   timeControl?: RawTimeControl;
+  serverTimeMs?: number;
+  turnStartTimeMs?: number | null;
+  gameStartTimeMs?: number | null;
+  status?: 'active' | 'ended';
+  winner?: engine.Color | null;
 }
 
 const NEIGHBOR_VECTORS = [
@@ -93,6 +109,132 @@ const normalizeTimeControl = (raw?: RawTimeControl | null): TimeControl => {
   return { initialMs, bufferMs, incrementMs, maxGameMs };
 };
 
+const resolveActiveColor = (
+  turn: engine.Color | string | undefined | null,
+  fallback: 'black' | 'white',
+): 'black' | 'white' => {
+  if (turn === 0 || turn === 'black') return 'black';
+  if (turn === 1 || turn === 'white') return 'white';
+  return fallback;
+};
+
+const formatColorName = (color?: number | null): string => {
+  if (color === 0) return 'Black';
+  if (color === 1) return 'White';
+  return 'Unknown';
+};
+
+const getEndInfoFromAction = (actionWord: number): EndActionInfo | null => {
+  const decoded = engine.decodeAction(actionWord);
+  switch (decoded.opcode) {
+    case 11: {
+      const endReason = decoded.fields.endReason;
+      const loserColor = decoded.fields.loserColor;
+      if (endReason === 0) {
+        return { kind: 'resign', loserColor, winnerColor: (loserColor ^ 1) as engine.Color };
+      }
+      if (endReason === 1) {
+        return { kind: 'no-legal-moves', loserColor, winnerColor: (loserColor ^ 1) as engine.Color };
+      }
+      if (endReason === 2) {
+        return { kind: 'timeout-player', loserColor, winnerColor: (loserColor ^ 1) as engine.Color };
+      }
+      if (endReason === 3) {
+        return { kind: 'timeout-game-tie', winnerColor: null };
+      }
+      return null;
+    }
+    case 10: {
+      const drawAction = decoded.fields.drawAction;
+      if (drawAction === 2) {
+        return { kind: 'draw-accept', winnerColor: null };
+      }
+      return null;
+    }
+    case 9: {
+      const winnerColor = decoded.fields.winnerColor as engine.Color;
+      return { kind: 'tribun', winnerColor };
+    }
+    default:
+      return null;
+  }
+};
+
+const resolveEndInfo = (params: {
+  state: engine.State | null;
+  lastActionWord: number | null;
+  clocksMs: ColorClock;
+  totalGameTimeMs: number;
+  timeControl: TimeControl;
+}): GameEndInfo | null => {
+  const { state, lastActionWord, clocksMs, totalGameTimeMs, timeControl } = params;
+  if (!state || state.status !== 'ended') return null;
+  let reason = 'Game ended';
+  let winnerLabel = state.winner === null ? 'Tie' : formatColorName(state.winner);
+
+  if (lastActionWord !== null) {
+    const fromAction = getEndInfoFromAction(lastActionWord);
+    if (fromAction) {
+      switch (fromAction.kind) {
+        case 'resign':
+          reason = `${formatColorName(fromAction.loserColor)} resigned`;
+          winnerLabel = formatColorName(fromAction.winnerColor);
+          break;
+        case 'no-legal-moves':
+          reason = `${formatColorName(fromAction.loserColor)} has no legal moves`;
+          winnerLabel = formatColorName(fromAction.winnerColor);
+          break;
+        case 'timeout-player': {
+          const clockDetail = Number.isFinite(clocksMs[fromAction.loserColor])
+            ? ` (clock ${formatTime(clocksMs[fromAction.loserColor])})`
+            : '';
+          reason = `${formatColorName(fromAction.loserColor)} ran out of time${clockDetail}`;
+          winnerLabel = formatColorName(fromAction.winnerColor);
+          break;
+        }
+        case 'timeout-game-tie': {
+          const maxGameMs = timeControl.maxGameMs;
+          if (maxGameMs != null && Number.isFinite(maxGameMs)) {
+            reason = `Time limit reached (${formatTime(totalGameTimeMs)} / ${formatTime(maxGameMs)})`;
+          } else {
+            reason = `Time limit reached (${formatTime(totalGameTimeMs)})`;
+          }
+          winnerLabel = 'Tie';
+          break;
+        }
+        case 'draw-accept':
+          reason = 'Draw agreed';
+          winnerLabel = 'Tie';
+          break;
+        case 'tribun':
+          reason = `Tribun captured by ${formatColorName(fromAction.winnerColor)}`;
+          winnerLabel = formatColorName(fromAction.winnerColor);
+          break;
+      }
+    }
+  }
+
+  return { reason, winnerLabel };
+};
+
+const advanceClockSnapshot = (
+  clocks: ColorClock,
+  buffers: ColorClock,
+  activeColor: 'black' | 'white',
+  elapsedMs: number,
+): { clocksMs: ColorClock; buffersMs: ColorClock } => {
+  const elapsed = Math.max(0, elapsedMs);
+  const bufferStart = buffers[activeColor];
+  const bufferRemaining = Math.max(0, bufferStart - elapsed);
+  const clockDeduction = Math.max(0, elapsed - bufferStart);
+  const clockRemaining = Math.max(0, clocks[activeColor] - clockDeduction);
+
+  return {
+    clocksMs: { ...clocks, [activeColor]: clockRemaining },
+    buffersMs: { ...buffers, [activeColor]: bufferRemaining },
+  };
+};
+
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
@@ -108,6 +250,9 @@ export default function Game() {
   const [clocksMs, setClocksMs] = useState<ColorClock>({ black: 300000, white: 300000 });
   const [bufferMsRemaining, setBufferMsRemaining] = useState<ColorClock>({ black: 20000, white: 20000 });
   const [timeControl, setTimeControl] = useState<TimeControl>({ ...DEFAULT_TIME_CONTROL });
+  const [gameStartTimeMs, setGameStartTimeMs] = useState<number | null>(null);
+  const [gameEndInfo, setGameEndInfo] = useState<GameEndInfo | null>(null);
+  const [lastActionWord, setLastActionWord] = useState<number | null>(null);
   const turnStartTimeRef = useRef<number | null>(null);
   const turnStartClockRef = useRef<number | null>(null);
   const turnStartBufferRef = useRef<number | null>(null);
@@ -115,7 +260,9 @@ export default function Game() {
   const clocksRef = useRef<{ black: number; white: number }>(clocksMs);
   const bufferRef = useRef<{ black: number; white: number }>(bufferMsRemaining);
   const lastClockUpdateRef = useRef<{ black: number; white: number }>(clocksMs);
-  const gameStartTimeRef = useRef<number | null>(null);
+  const timeControlRef = useRef<TimeControl>(timeControl);
+  const serverOffsetMsRef = useRef<number | null>(null);
+  const bestRttMsRef = useRef<number | null>(null);
   const [totalGameTimeMs, setTotalGameTimeMs] = useState<number>(0);
   
   // UI State Machine
@@ -127,6 +274,62 @@ export default function Game() {
     return buildCache(gameState, validator);
   }, [gameState, validator]);
 
+  const getServerNowMs = () => {
+    const offset = serverOffsetMsRef.current;
+    return offset === null ? Date.now() : Date.now() + offset;
+  };
+
+  const updateServerOffsetFromSync = (clientSentMs: number, serverTimeMs: number) => {
+    if (!Number.isFinite(clientSentMs) || !Number.isFinite(serverTimeMs)) return;
+    const nowMs = Date.now();
+    const rttMs = nowMs - clientSentMs;
+    if (!Number.isFinite(rttMs) || rttMs < 0) return;
+    const offsetMs = serverTimeMs - (clientSentMs + rttMs / 2);
+    if (bestRttMsRef.current === null || rttMs < bestRttMsRef.current) {
+      bestRttMsRef.current = rttMs;
+      serverOffsetMsRef.current = offsetMs;
+    }
+  };
+
+  const primeServerOffset = (serverTimeMs?: number) => {
+    if (typeof serverTimeMs !== 'number' || !Number.isFinite(serverTimeMs)) return;
+    if (serverOffsetMsRef.current === null) {
+      serverOffsetMsRef.current = serverTimeMs - Date.now();
+    }
+  };
+
+  const applyServerClockSnapshot = (params: {
+    clocksMs: ColorClock;
+    buffersMs: ColorClock;
+    activeColor: 'black' | 'white';
+    serverTimeMs?: number;
+  }) => {
+    primeServerOffset(params.serverTimeMs);
+    const nowServerMs = getServerNowMs();
+    const snapshotTimeMs =
+      typeof params.serverTimeMs === 'number' && Number.isFinite(params.serverTimeMs)
+        ? params.serverTimeMs
+        : nowServerMs;
+    const elapsedMs = Math.max(0, nowServerMs - snapshotTimeMs);
+    const adjusted = advanceClockSnapshot(
+      params.clocksMs,
+      params.buffersMs,
+      params.activeColor,
+      elapsedMs,
+    );
+
+    setClocksMs(adjusted.clocksMs);
+    setBufferMsRemaining(adjusted.buffersMs);
+    clocksRef.current = adjusted.clocksMs;
+    bufferRef.current = adjusted.buffersMs;
+    lastClockUpdateRef.current = adjusted.clocksMs;
+
+    turnStartTimeRef.current = snapshotTimeMs;
+    turnStartClockRef.current = params.clocksMs[params.activeColor];
+    turnStartBufferRef.current = params.buffersMs[params.activeColor];
+    lastTurnRef.current = params.activeColor === 'black' ? 0 : 1;
+  };
+
   useEffect(() => {
     if (!gameState || !cache) {
       if (uiState.type !== 'idle') {
@@ -134,8 +337,14 @@ export default function Game() {
       }
       return;
     }
+    if (gameState.status === 'ended') {
+      if (uiState.type !== 'idle') {
+        setUiState({ type: 'idle' });
+      }
+      return;
+    }
 
-    const isActive = gameState.turn === (role === 'black' ? 0 : 1);
+    const isActive = gameState.status !== 'ended' && gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive && uiState.type !== 'idle') {
       setUiState({ type: 'idle' });
       return;
@@ -216,7 +425,7 @@ export default function Game() {
   
   const baseTileStates = useMemo(() => {
     const baseStates: Array<'default' | 'selectable'> = new Array(121).fill('default');
-    if (!gameState || !cache) return baseStates;
+    if (!gameState || !cache || gameState.status === 'ended') return baseStates;
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive) return baseStates;
     
@@ -257,43 +466,37 @@ export default function Game() {
     }
     return baseStates;
   }, [gameState, cache, role]);
-  // Keep clocksRef and bufferRef in sync with state and detect external updates
+  // Keep refs in sync with state
   useEffect(() => {
-    const externalUpdate = 
-      lastClockUpdateRef.current.black !== clocksMs.black ||
-      lastClockUpdateRef.current.white !== clocksMs.white;
-    
-    // If external update detected (from server), sync our timers
-    if (externalUpdate && gameState && turnStartTimeRef.current !== null) {
-      const activeColor = gameState.turn === 0 ? 'black' : 'white';
-      
-      // Reset turn timer to sync with server clock values
-      turnStartTimeRef.current = Date.now();
-      turnStartClockRef.current = clocksMs[activeColor];
-      
-      // If buffer was reset (full value), sync it
-      // Otherwise, keep current buffer state (it's being counted down locally)
-      if (bufferMsRemaining[activeColor] === timeControl.bufferMs[activeColor]) {
-        turnStartBufferRef.current = timeControl.bufferMs[activeColor];
-      } else {
-        turnStartBufferRef.current = bufferMsRemaining[activeColor];
-      }
-    }
-    
     clocksRef.current = clocksMs;
     bufferRef.current = bufferMsRemaining;
     lastClockUpdateRef.current = clocksMs;
-  }, [clocksMs, bufferMsRemaining, gameState, timeControl.bufferMs.black, timeControl.bufferMs.white]);
+  }, [clocksMs, bufferMsRemaining]);
+
+  useEffect(() => {
+    timeControlRef.current = timeControl;
+  }, [timeControl]);
+
+  useEffect(() => {
+    const info = resolveEndInfo({
+      state: gameState,
+      lastActionWord,
+      clocksMs,
+      totalGameTimeMs,
+      timeControl,
+    });
+    setGameEndInfo(info);
+  }, [gameState?.status, gameState?.winner, lastActionWord, clocksMs, totalGameTimeMs, timeControl]);
 
   // Track total game time and check for max game time tie
   useEffect(() => {
-    if (!gameState || gameStartTimeRef.current === null) return;
+    if (!gameState || gameStartTimeMs === null || gameState.status === 'ended') return;
     
     const maxGameMs = timeControl.maxGameMs;
     
     const interval = setInterval(() => {
-      if (gameStartTimeRef.current === null) return;
-      const elapsed = Date.now() - gameStartTimeRef.current;
+      if (gameStartTimeMs === null) return;
+      const elapsed = Math.max(0, getServerNowMs() - gameStartTimeMs);
       setTotalGameTimeMs(elapsed);
       
       // Check if max game time is reached - force tie (only if maxGameMs is set)
@@ -305,96 +508,81 @@ export default function Game() {
     }, 1000); // Update every second
     
     return () => clearInterval(interval);
-  }, [gameState, timeControl.maxGameMs]);
+  }, [gameState, timeControl.maxGameMs, gameStartTimeMs]);
 
-  // Clock countdown effect with separate buffer tracking
   useEffect(() => {
-    if (!gameState) return;
-    
-    const activeColor = gameState.turn === 0 ? 'black' : 'white';
-    const activeClock = clocksMs[activeColor];
-    const activeBuffer = bufferMsRemaining[activeColor];
-    
-    // Don't countdown if time is already 0 or negative
-    if (activeClock <= 0) return;
-    
-    // Reset turn start time when turn changes
-    const turnChanged = lastTurnRef.current !== null && lastTurnRef.current !== gameState.turn;
-    if (turnChanged || turnStartTimeRef.current === null || turnStartClockRef.current === null || turnStartBufferRef.current === null) {
-      turnStartTimeRef.current = Date.now();
-      turnStartClockRef.current = activeClock;
-      turnStartBufferRef.current = activeBuffer;
-      lastTurnRef.current = gameState.turn;
+    if (!gameState || gameStartTimeMs === null) return;
+    if (gameState.status === 'ended') {
+      setTotalGameTimeMs(Math.max(0, getServerNowMs() - gameStartTimeMs));
     }
-    
-    const interval = setInterval(() => {
-      if (!gameState || turnStartTimeRef.current === null || turnStartClockRef.current === null || turnStartBufferRef.current === null) {
-        return;
-      }
-      
+  }, [gameState?.status, gameStartTimeMs]);
+
+  // Clock countdown effect with separate buffer tracking (server-time based)
+  useEffect(() => {
+    if (!gameState || gameState.status === 'ended') return;
+
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const tick = () => {
+      if (!gameState) return;
+
       const currentColor = gameState.turn === 0 ? 'black' : 'white';
-      const currentClock = clocksRef.current[currentColor];
-      const currentBuffer = bufferRef.current[currentColor];
-      
-      // If turn changed, reset timer
-      if (currentColor !== activeColor) {
-        turnStartTimeRef.current = Date.now();
-        turnStartClockRef.current = currentClock;
-        turnStartBufferRef.current = currentBuffer;
+      const nowServerMs = getServerNowMs();
+
+      // Reset anchor if turn changed or missing
+      if (
+        lastTurnRef.current !== gameState.turn ||
+        turnStartTimeRef.current === null ||
+        turnStartClockRef.current === null ||
+        turnStartBufferRef.current === null
+      ) {
+        turnStartTimeRef.current = nowServerMs;
+        turnStartClockRef.current = clocksRef.current[currentColor];
+        turnStartBufferRef.current = bufferRef.current[currentColor];
         lastTurnRef.current = gameState.turn;
+      }
+
+      if (
+        turnStartTimeRef.current === null ||
+        turnStartClockRef.current === null ||
+        turnStartBufferRef.current === null
+      ) {
         return;
       }
-      
-      // If clock was updated externally (e.g., from server), reset timer
-      if (turnStartClockRef.current !== currentClock || turnStartBufferRef.current !== currentBuffer) {
-        turnStartTimeRef.current = Date.now();
-        turnStartClockRef.current = currentClock;
-        turnStartBufferRef.current = currentBuffer;
-        return;
-      }
-      
-      const elapsed = Date.now() - turnStartTimeRef.current;
-      
-      // Calculate buffer and clock remaining
-      let remainingBuffer: number;
-      let remainingClock: number;
-      
-      if (elapsed <= turnStartBufferRef.current) {
-        // Still within buffer time: decrease buffer, keep clock the same
-        remainingBuffer = Math.max(0, turnStartBufferRef.current - elapsed);
-        remainingClock = turnStartClockRef.current;
-      } else {
-        // Buffer exhausted: buffer is 0, decrease clock
-        const timeOverBuffer = elapsed - turnStartBufferRef.current;
-        remainingBuffer = 0;
-        remainingClock = Math.max(0, turnStartClockRef.current - timeOverBuffer);
-      }
-      
-      // Update buffer if changed
+
+      const elapsed = Math.max(0, nowServerMs - turnStartTimeRef.current);
+      const bufferStart = turnStartBufferRef.current;
+      const clockStart = turnStartClockRef.current;
+      const remainingBuffer = Math.max(0, bufferStart - elapsed);
+      const timeOverBuffer = Math.max(0, elapsed - bufferStart);
+      const remainingClock = Math.max(0, clockStart - timeOverBuffer);
+
       if (bufferRef.current[currentColor] !== remainingBuffer) {
-        bufferRef.current[currentColor] = remainingBuffer;
-        setBufferMsRemaining((prev) => ({
-          ...prev,
-          [currentColor]: remainingBuffer,
-        }));
+        const nextBuffers = { ...bufferRef.current, [currentColor]: remainingBuffer };
+        bufferRef.current = nextBuffers;
+        setBufferMsRemaining(nextBuffers);
       }
-      
-      // Update clock if changed
+
       if (clocksRef.current[currentColor] !== remainingClock) {
-        setClocksMs((prev) => ({
-          ...prev,
-          [currentColor]: remainingClock,
-        }));
+        const nextClocks = { ...clocksRef.current, [currentColor]: remainingClock };
+        clocksRef.current = nextClocks;
+        setClocksMs(nextClocks);
       }
-      
-      // If time runs out, the server will handle timeout
-      if (remainingClock <= 0) {
+
+      if (remainingClock <= 0 && interval) {
         clearInterval(interval);
       }
-    }, 100); // Update every 100ms for smooth display
-    
-    return () => clearInterval(interval);
-  }, [gameState?.turn, gameState?.ply, timeControl, clocksMs, bufferMsRemaining]);
+    };
+
+    interval = setInterval(tick, 100);
+    tick();
+
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
+  }, [gameState?.turn, gameState?.ply]);
 
   useEffect(() => {
     if (!boardViewportRef.current) return;
@@ -424,6 +612,7 @@ export default function Game() {
     }
 
     let mounted = true;
+    let timeSyncInterval: ReturnType<typeof setInterval> | null = null;
 
     const requestSync = () => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -475,14 +664,24 @@ export default function Game() {
         // Connect WebSocket
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/game/${gameId}?token=${token}`;
+        serverOffsetMsRef.current = null;
+        bestRttMsRef.current = null;
         const ws = new WebSocket(wsUrl);
 
         ws.binaryType = 'arraybuffer';
+
+        const sendTimeSync = () => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          const clientTimeMs = Date.now();
+          ws.send(JSON.stringify({ t: 'time_sync', clientTimeMs }));
+        };
 
         ws.onopen = () => {
           if (mounted) {
             setConnectionState('connected');
           }
+          sendTimeSync();
+          timeSyncInterval = setInterval(sendTimeSync, 15000);
         };
 
         ws.onmessage = (event) => {
@@ -491,102 +690,87 @@ export default function Game() {
           if (typeof event.data === 'string') {
             // JSON message
             const message = JSON.parse(event.data);
-            if (message.t === 'start') {
+            if (message.t === 'time_sync') {
+              updateServerOffsetFromSync(message.clientTimeMs, message.serverTimeMs);
+            } else if (message.t === 'start') {
               // Initial sync
               const snapshot: GameSnapshot = message.snapshot;
               const board = engine.unpackBoard(snapshot.boardB64);
+              const lastAction =
+                Array.isArray(message.actions) && message.actions.length > 0
+                  ? (message.actions[message.actions.length - 1] as number)
+                  : null;
+              if (lastAction !== null) {
+                setLastActionWord(lastAction);
+              } else {
+                setLastActionWord(null);
+              }
+              const endFromAction = lastAction !== null ? getEndInfoFromAction(lastAction) : null;
+              const statusFromAction = endFromAction ? 'ended' : undefined;
+              const winnerFromAction = endFromAction ? endFromAction.winnerColor : undefined;
               const state: engine.State = {
                 board,
                 turn: snapshot.turn,
                 ply: snapshot.ply,
                 drawOfferBy: snapshot.drawOfferBy,
+                status: snapshot.status ?? statusFromAction,
+                winner: snapshot.winner ?? winnerFromAction,
               };
 
               setGameState(state);
               setUiState({ type: 'idle' });
-              
-              // Initialize clock state from server snapshot (authoritative)
-              if (snapshot.clocksMs) {
-                setClocksMs(snapshot.clocksMs);
-                clocksRef.current = snapshot.clocksMs;
-                
-                const activeColor = snapshot.turn === 0 ? 'black' : 'white';
-                turnStartTimeRef.current = Date.now();
-                turnStartClockRef.current = snapshot.clocksMs[activeColor];
-              }
-              
+              lastTurnRef.current = snapshot.turn;
+
               const normalizedTimeControl = normalizeTimeControl(snapshot.timeControl);
               setTimeControl(normalizedTimeControl);
-              
-              // Initialize buffers from snapshot if provided, otherwise use full value
-              if (snapshot.buffersMs) {
-                // Use server-provided buffer values (for late joiners)
-                setBufferMsRemaining(snapshot.buffersMs);
-                bufferRef.current = snapshot.buffersMs;
-                const activeColor = snapshot.turn === 0 ? 'black' : 'white';
-                turnStartBufferRef.current = snapshot.buffersMs[activeColor];
+
+              const baseClocks = snapshot.clocksMs ?? {
+                black: normalizedTimeControl.initialMs.black,
+                white: normalizedTimeControl.initialMs.white,
+              };
+              const baseBuffers = snapshot.buffersMs ?? {
+                black: normalizedTimeControl.bufferMs.black,
+                white: normalizedTimeControl.bufferMs.white,
+              };
+              const activeColor = snapshot.turn === 0 ? 'black' : 'white';
+
+              applyServerClockSnapshot({
+                clocksMs: baseClocks,
+                buffersMs: baseBuffers,
+                activeColor,
+                serverTimeMs: snapshot.serverTimeMs,
+              });
+
+              // Initialize game start time for total game time tracking (server-based)
+              if (typeof snapshot.gameStartTimeMs === 'number' && Number.isFinite(snapshot.gameStartTimeMs)) {
+                setGameStartTimeMs(snapshot.gameStartTimeMs);
+                setTotalGameTimeMs(Math.max(0, getServerNowMs() - snapshot.gameStartTimeMs));
               } else {
-                // Fallback: initialize to full value (backward compatibility)
-                setBufferMsRemaining({
-                  black: normalizedTimeControl.bufferMs.black,
-                  white: normalizedTimeControl.bufferMs.white,
-                });
-                bufferRef.current = {
-                  black: normalizedTimeControl.bufferMs.black,
-                  white: normalizedTimeControl.bufferMs.white,
-                };
-                turnStartBufferRef.current = normalizedTimeControl.bufferMs[snapshot.turn === 0 ? 'black' : 'white'];
-              }
-              
-              // Update last clock update ref to prevent false external update detection
-              lastClockUpdateRef.current = snapshot.clocksMs || { black: 300000, white: 300000 };
-              // Initialize game start time for total game time tracking
-              if (gameStartTimeRef.current === null) {
-                gameStartTimeRef.current = Date.now();
+                setGameStartTimeMs(null);
                 setTotalGameTimeMs(0);
               }
             } else if (message.t === 'clock') {
               // Clock update from server - this is authoritative
               // Server sends this after each move with the correct clock and buffer values
-              if (message.clocksMs) {
-                // Update clocks to match server values exactly
-                setClocksMs(message.clocksMs);
-                
-                // Update lastClockUpdateRef to prevent false external update detection
-                lastClockUpdateRef.current = message.clocksMs;
-                
-                // Sync buffers to server values exactly (not reset to full)
-                if (message.buffersMs) {
-                  setBufferMsRemaining(message.buffersMs);
-                  bufferRef.current = message.buffersMs;
-                } else {
-                  // Fallback: if server doesn't send buffers, reset to full (backward compatibility)
-                  setBufferMsRemaining({
-                    black: timeControl.bufferMs.black,
-                    white: timeControl.bufferMs.white,
-                  });
-                  bufferRef.current = {
-                    black: timeControl.bufferMs.black,
-                    white: timeControl.bufferMs.white,
-                  };
-                }
-                
-                if (message.turn !== undefined) {
-                  const activeColor = message.turn === 'black' || message.turn === 0 ? 'black' : 'white';
-                  
-                  // Reset turn timer to sync with server clock values
-                  turnStartTimeRef.current = Date.now();
-                  turnStartClockRef.current = message.clocksMs[activeColor];
-                  
-                  // Sync buffer start value from server
-                  if (message.buffersMs) {
-                    turnStartBufferRef.current = message.buffersMs[activeColor];
-                  } else {
-                    turnStartBufferRef.current = timeControl.bufferMs[activeColor];
-                  }
-                  
-                  // Update refs to match server state
-                  clocksRef.current = message.clocksMs;
+              const baseClocks: ColorClock | null = message.clocksMs ?? null;
+              if (baseClocks) {
+                const fallbackActive =
+                  lastTurnRef.current === null ? 'black' : lastTurnRef.current === 0 ? 'black' : 'white';
+                const activeColor = resolveActiveColor(message.turn, fallbackActive);
+                const baseBuffers: ColorClock = message.buffersMs ?? {
+                  black: timeControlRef.current.bufferMs.black,
+                  white: timeControlRef.current.bufferMs.white,
+                };
+
+                applyServerClockSnapshot({
+                  clocksMs: baseClocks,
+                  buffersMs: baseBuffers,
+                  activeColor,
+                  serverTimeMs: message.serverTimeMs,
+                });
+
+                if (typeof message.gameStartTimeMs === 'number' && Number.isFinite(message.gameStartTimeMs)) {
+                  setGameStartTimeMs(message.gameStartTimeMs);
                 }
               }
             } else if (message.t === 'legal') {
@@ -602,6 +786,7 @@ export default function Game() {
             // Binary action word
             const view = new DataView(event.data);
             const actionWord = view.getUint32(0, true);
+            setLastActionWord(actionWord);
 
             try {
               setGameState((prevState) => {
@@ -634,6 +819,10 @@ export default function Game() {
           if (mounted) {
             setConnectionState('disconnected');
           }
+          if (timeSyncInterval) {
+            clearInterval(timeSyncInterval);
+            timeSyncInterval = null;
+          }
         };
 
         wsRef.current = ws;
@@ -649,6 +838,10 @@ export default function Game() {
 
     return () => {
       mounted = false;
+      if (timeSyncInterval) {
+        clearInterval(timeSyncInterval);
+        timeSyncInterval = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }
@@ -658,6 +851,10 @@ export default function Game() {
   const sendAction = (action: number) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
+      return;
+    }
+    if (gameState?.status === 'ended') {
+      setError('Game has ended');
       return;
     }
 
@@ -810,7 +1007,7 @@ export default function Game() {
   };
 
   const handleTileClick = (cid: number, d: number = 1) => {
-    if (!gameState || !cache) return;
+    if (!gameState || !cache || gameState.status === 'ended') return;
     
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive) return;
@@ -1764,10 +1961,23 @@ export default function Game() {
               {uiState.type === 'own_primary' && ` (origin: ${uiState.originCid}, target: ${uiState.targetCid ?? 'none'}, option: ${uiState.optionIndex})`}
               {uiState.type === 'own_secondary' && ` (origin: ${uiState.originCid}, allocations: [${uiState.allocations.join(',')}])`}
             </div>
+            {gameEndInfo && (
+              <div style={{
+                marginBottom: '10px',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                background: '#fff3e0',
+                border: '1px solid #f57c00',
+                color: '#6d4c41',
+                fontWeight: 600,
+              }}>
+                Game ended: {gameEndInfo.reason} - Result: {gameEndInfo.winnerLabel}
+              </div>
+            )}
             {(() => {
               const pendingAction = getPendingAction();
               const locallyLegal = pendingAction !== null && cache?.legalSet.has(pendingAction >>> 0);
-              const canSubmit = pendingAction !== null && locallyLegal && role !== 'spectator';
+              const canSubmit = pendingAction !== null && locallyLegal && role !== 'spectator' && gameState.status !== 'ended';
               
               if (canSubmit) {
                 return (
@@ -1838,8 +2048,8 @@ export default function Game() {
               minWidth: '200px',
               padding: '15px',
               borderRadius: '8px',
-              background: gameState.turn === 0 ? '#e3f2fd' : '#f5f5f5',
-              border: gameState.turn === 0 ? '2px solid #2196F3' : '2px solid #ddd',
+              background: gameState.status !== 'ended' && gameState.turn === 0 ? '#e3f2fd' : '#f5f5f5',
+              border: gameState.status !== 'ended' && gameState.turn === 0 ? '2px solid #2196F3' : '2px solid #ddd',
               textAlign: 'center',
             }}>
               <div style={{
@@ -1877,8 +2087,8 @@ export default function Game() {
               minWidth: '200px',
               padding: '15px',
               borderRadius: '8px',
-              background: gameState.turn === 1 ? '#e3f2fd' : '#f5f5f5',
-              border: gameState.turn === 1 ? '2px solid #2196F3' : '2px solid #ddd',
+              background: gameState.status !== 'ended' && gameState.turn === 1 ? '#e3f2fd' : '#f5f5f5',
+              border: gameState.status !== 'ended' && gameState.turn === 1 ? '2px solid #2196F3' : '2px solid #ddd',
               textAlign: 'center',
             }}>
               <div style={{
