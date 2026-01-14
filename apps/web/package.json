@@ -4,6 +4,7 @@
   "description": "Vite React frontend for Tribun game",
   "type": "module",
   "scripts": {
+    "prebuild": "npm run build --workspace=@tribunplay/engine",
     "dev": "vite",
     "build": "node ../../node_modules/vite/bin/vite.js build",
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",

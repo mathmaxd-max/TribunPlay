@@ -1,5 +1,5 @@
 // Core types
-import defaultPositionData from './default-position.json';
+import defaultPosition from './default-position.json';
 
 export type Color = 0 | 1;
 export type Height = 0 | 1 | 2 | 3 | 4 | 6 | 8;
@@ -1802,10 +1802,10 @@ export function createInitialBoard(): Uint8Array {
   const board = new Uint8Array(121);
   
   // Use default position from JSON file
-  const defaultPosition: DefaultPosition = defaultPositionData;
+  const defaultPositionData: DefaultPosition = defaultPosition;
   
   // Place black units
-  for (const [unitType, coords] of Object.entries(defaultPosition.black)) {
+  for (const [unitType, coords] of Object.entries(defaultPositionData.black)) {
     const height = unitType === "t1" ? 1 : parseInt(unitType);
     const isTribun = unitType === "t1";
     
@@ -1822,7 +1822,7 @@ export function createInitialBoard(): Uint8Array {
   }
   
   // Place white units
-  for (const [unitType, coords] of Object.entries(defaultPosition.white)) {
+  for (const [unitType, coords] of Object.entries(defaultPositionData.white)) {
     const height = unitType === "t1" ? 1 : parseInt(unitType);
     const isTribun = unitType === "t1";
     
@@ -1840,6 +1840,9 @@ export function createInitialBoard(): Uint8Array {
   
   return board;
 }
+
+// Export default position
+export { defaultPosition };
 
 // Export UI backend functions
 export * from './ui-backend';
