@@ -1503,6 +1503,12 @@ export default function Game() {
     }
   };
 
+  // Ref to store latest submit function for keyboard handler
+  const submitCurrentActionRef = useRef(submitCurrentAction);
+  useEffect(() => {
+    submitCurrentActionRef.current = submitCurrentAction;
+  }, [submitCurrentAction]);
+
   type PreviewOverlayUnit = { p: number; s: number; color: engine.Color; tribun: boolean };
   type PreviewOverlay = { units: Map<number, PreviewOverlayUnit>; empty: Set<number> };
 
@@ -2066,6 +2072,31 @@ export default function Game() {
     roomStatus === 'active' &&
     gameState?.status !== 'ended' &&
     connectionState === 'connected';
+
+  // Handle spacebar to submit move
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Only handle spacebar
+      if (event.key !== ' ') return;
+      
+      // Don't trigger if user is typing in an input field
+      const target = event.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable) {
+        return;
+      }
+      
+      // Only submit if move can be submitted
+      if (canSubmit) {
+        event.preventDefault();
+        submitCurrentActionRef.current();
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [canSubmit]);
 
   const playerColor = role === 'black' ? 0 : role === 'white' ? 1 : null;
   const drawOfferBy = gameState?.drawOfferBy ?? null;
