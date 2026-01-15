@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { API_BASE } from '../config';
 import { useHealthCheck } from '../utils/useHealthCheck';
 
@@ -797,6 +797,51 @@ export default function Home() {
             {error}
           </div>
         )}
+      </div>
+      
+      <div style={{
+        marginTop: '40px',
+        paddingTop: '20px',
+        borderTop: '1px solid #eee',
+        textAlign: 'center',
+      }}>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'center',
+          gap: '20px',
+          flexWrap: 'wrap',
+          fontSize: '14px',
+        }}>
+          <Link 
+            to="/datenschutz" 
+            style={{ 
+              color: '#666', 
+              textDecoration: 'none',
+            }}
+          >
+            Datenschutz
+          </Link>
+          <span style={{ color: '#ccc' }}>|</span>
+          <Link 
+            to="/disclaimer" 
+            style={{ 
+              color: '#666', 
+              textDecoration: 'none',
+            }}
+          >
+            Disclaimer
+          </Link>
+          <span style={{ color: '#ccc' }}>|</span>
+          <Link 
+            to="/impressum" 
+            style={{ 
+              color: '#666', 
+              textDecoration: 'none',
+            }}
+          >
+            Impressum
+          </Link>
+        </div>
       </div>
     </div>
   );
