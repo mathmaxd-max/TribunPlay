@@ -8,12 +8,23 @@ type TimeControl = {
 	incrementMs: ColorClock;
 	maxGameMs?: number | null;
 };
+type RoomStatus = "lobby" | "active" | "ended";
+type RoomSettings = {
+	hostColor: "black" | "white" | "random";
+	startColor: "black" | "white" | "random";
+	nextStartColor: "same" | "other" | "random";
+};
 
 const DEFAULT_TIME_CONTROL: TimeControl = {
 	initialMs: { black: 300000, white: 300000 },
 	bufferMs: { black: 20000, white: 20000 },
 	incrementMs: { black: 0, white: 0 },
 	maxGameMs: null,
+};
+const DEFAULT_ROOM_SETTINGS: RoomSettings = {
+	hostColor: "random",
+	startColor: "random",
+	nextStartColor: "other",
 };
 
 const readColorClock = (raw: any, fallback: ColorClock): ColorClock => {
@@ -49,6 +60,30 @@ const normalizeTimeControl = (raw: any): TimeControl => {
 	};
 };
 
+const normalizeRoomSettings = (raw: any): RoomSettings => {
+	const base = DEFAULT_ROOM_SETTINGS;
+	if (!raw || typeof raw !== "object") {
+		return { ...base };
+	}
+	const hostColor =
+		raw.hostColor === "black" || raw.hostColor === "white" || raw.hostColor === "random"
+			? raw.hostColor
+			: base.hostColor;
+	const startColor =
+		raw.startColor === "black" || raw.startColor === "white" || raw.startColor === "random"
+			? raw.startColor
+			: base.startColor;
+	const nextStartColor =
+		raw.nextStartColor === "same" || raw.nextStartColor === "other" || raw.nextStartColor === "random"
+			? raw.nextStartColor
+			: base.nextStartColor;
+	return {
+		hostColor,
+		startColor,
+		nextStartColor,
+	};
+};
+
 /**
  * GameRoom Durable Object
  * 
@@ -76,6 +111,11 @@ export class GameRoom implements DurableObject {
 	private turnStartTime: number | null = null;
 	private timeControl: TimeControl | null = null;
 	private gameStartTime: number | null = null;
+	private roomStatus: RoomStatus = "lobby";
+	private roomSettings: RoomSettings = { ...DEFAULT_ROOM_SETTINGS };
+	private initialBoard: Uint8Array | null = null;
+	private currentStartColor: engine.Color | null = null;
+	private rematchOffers: { black: boolean; white: boolean } = { black: false, white: false };
 	
 	// Connected clients (players + spectators)
 	private connections: Map<string, { ws: WebSocket; role: "black" | "white" | "spectator"; token: string }> = new Map();
@@ -156,6 +196,7 @@ export class GameRoom implements DurableObject {
 		// Load game state and send initial sync
 		await this.loadGameState();
 		await this.sendSync(ws, role);
+		this.broadcastRoomUpdate();
 
 		// Handle incoming messages
 		ws.addEventListener("message", async (event) => {
@@ -179,6 +220,7 @@ export class GameRoom implements DurableObject {
 
 		ws.addEventListener("close", () => {
 			this.connections.delete(connectionId);
+			this.broadcastRoomUpdate();
 		});
 	}
 
@@ -199,13 +241,14 @@ export class GameRoom implements DurableObject {
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
 		const game = await this.env.DB.prepare(
 			supportsBlocked
-				? `SELECT initial_board, initial_turn, turn, ply, draw_offer_by, draw_offer_blocked,
-			        time_control_json, clock_black_ms, clock_white_ms, created_at, started_at
+				? `SELECT status, initial_board, initial_turn, turn, ply, draw_offer_by, draw_offer_blocked,
+			        time_control_json, room_settings_json, clock_black_ms, clock_white_ms, created_at, started_at
 			 FROM games WHERE id = ?`
-				: `SELECT initial_board, initial_turn, turn, ply, draw_offer_by,
-			        time_control_json, clock_black_ms, clock_white_ms, created_at, started_at
+				: `SELECT status, initial_board, initial_turn, turn, ply, draw_offer_by,
+			        time_control_json, room_settings_json, clock_black_ms, clock_white_ms, created_at, started_at
 			 FROM games WHERE id = ?`
 		).bind(gameId).first<{
+			status: string;
 			initial_board: Uint8Array;
 			initial_turn: number;
 			turn: number;
@@ -213,6 +256,7 @@ export class GameRoom implements DurableObject {
 			draw_offer_by: number | null;
 			draw_offer_blocked?: number | null;
 			time_control_json: string | null;
+			room_settings_json: string | null;
 			clock_black_ms: number | null;
 			clock_white_ms: number | null;
 			created_at: string;
@@ -222,6 +266,25 @@ export class GameRoom implements DurableObject {
 		if (!game) {
 			throw new Error("Game not found in database");
 		}
+
+		this.roomStatus =
+			game.status === "active" || game.status === "ended" || game.status === "lobby"
+				? (game.status as RoomStatus)
+				: "lobby";
+		if (game.room_settings_json) {
+			try {
+				this.roomSettings = normalizeRoomSettings(JSON.parse(game.room_settings_json));
+			} catch {
+				this.roomSettings = { ...DEFAULT_ROOM_SETTINGS };
+			}
+		} else {
+			this.roomSettings = { ...DEFAULT_ROOM_SETTINGS };
+		}
+		if (this.roomStatus !== "ended") {
+			this.rematchOffers = { black: false, white: false };
+		}
+		this.initialBoard = new Uint8Array(game.initial_board);
+		this.currentStartColor = game.initial_turn as engine.Color;
 		
 		// Load and initialize time control
 		if (game.time_control_json) {
@@ -249,7 +312,7 @@ export class GameRoom implements DurableObject {
 		
 		// Rebuild state by replaying actions
 		this.gameState = {
-			board: new Uint8Array(game.initial_board),
+			board: new Uint8Array(this.initialBoard ?? game.initial_board),
 			turn: game.initial_turn as engine.Color,
 			ply: 0,
 			drawOfferBy: game.draw_offer_by as engine.Color | null,
@@ -268,21 +331,29 @@ export class GameRoom implements DurableObject {
 		this.bufferBlackMs = this.timeControl.bufferMs.black;
 		this.bufferWhiteMs = this.timeControl.bufferMs.white;
 		
-		// Set turn start time based on last action (fallback to now if missing)
-		if (lastActionAt) {
-			const parsed = Date.parse(lastActionAt);
-			this.turnStartTime = Number.isNaN(parsed) ? Date.now() : parsed;
-		} else if (this.turnStartTime === null) {
-			this.turnStartTime = Date.now();
+		// Set turn start time based on last action (only if active)
+		if (this.roomStatus === "active") {
+			if (lastActionAt) {
+				const parsed = Date.parse(lastActionAt);
+				this.turnStartTime = Number.isNaN(parsed) ? Date.now() : parsed;
+			} else if (this.turnStartTime === null) {
+				this.turnStartTime = Date.now();
+			}
+		} else {
+			this.turnStartTime = null;
 		}
 
-		// Set game start time for max game clock
-		if (game.started_at) {
-			const parsedStart = Date.parse(game.started_at);
-			this.gameStartTime = Number.isNaN(parsedStart) ? null : parsedStart;
-		} else if (firstActionAt) {
-			const parsedStart = Date.parse(firstActionAt);
-			this.gameStartTime = Number.isNaN(parsedStart) ? null : parsedStart;
+		// Set game start time for max game clock (skip in lobby)
+		if (this.roomStatus !== "lobby") {
+			if (game.started_at) {
+				const parsedStart = Date.parse(game.started_at);
+				this.gameStartTime = Number.isNaN(parsedStart) ? null : parsedStart;
+			} else if (firstActionAt) {
+				const parsedStart = Date.parse(firstActionAt);
+				this.gameStartTime = Number.isNaN(parsedStart) ? null : parsedStart;
+			} else {
+				this.gameStartTime = null;
+			}
 		} else {
 			this.gameStartTime = null;
 		}
@@ -332,6 +403,8 @@ export class GameRoom implements DurableObject {
 			drawOfferBlocked: this.gameState.drawOfferBlocked,
 			status: this.gameState.status ?? "active",
 			winner: this.gameState.winner ?? null,
+			roomStatus: this.roomStatus,
+			roomSettings: this.roomSettings,
 		};
 		
 		// Include clock and buffer state in snapshot
@@ -372,6 +445,153 @@ export class GameRoom implements DurableObject {
 		}));
 	}
 
+	private getConnectionCounts(): { black: number; white: number; spectator: number } {
+		const counts = { black: 0, white: 0, spectator: 0 };
+		for (const conn of this.connections.values()) {
+			if (conn.role === "black") counts.black += 1;
+			else if (conn.role === "white") counts.white += 1;
+			else counts.spectator += 1;
+		}
+		return counts;
+	}
+
+	private hasBothPlayersConnected(): boolean {
+		const counts = this.getConnectionCounts();
+		return counts.black > 0 && counts.white > 0;
+	}
+
+	private broadcastRoomUpdate(): void {
+		const counts = this.getConnectionCounts();
+		const canStart = this.roomStatus === "lobby" && counts.black > 0 && counts.white > 0;
+		const rematchReady = this.rematchOffers.black && this.rematchOffers.white;
+		const message = JSON.stringify({
+			t: "room",
+			roomStatus: this.roomStatus,
+			players: { black: counts.black, white: counts.white },
+			spectators: counts.spectator,
+			canStart,
+			rematch: { ...this.rematchOffers },
+			rematchReady,
+		});
+		for (const { ws } of this.connections.values()) {
+			if (ws.readyState === 1) {
+				ws.send(message);
+			}
+		}
+	}
+
+	private resolveStartColor(pref: RoomSettings["startColor"]): engine.Color {
+		if (pref === "black") return 0;
+		if (pref === "white") return 1;
+		return Math.random() < 0.5 ? 0 : 1;
+	}
+
+	private resolveNextStartColor(): engine.Color {
+		const previous = this.currentStartColor ?? 0;
+		if (this.roomSettings.nextStartColor === "same") {
+			return previous;
+		}
+		if (this.roomSettings.nextStartColor === "other") {
+			return (previous ^ 1) as engine.Color;
+		}
+		return Math.random() < 0.5 ? 0 : 1;
+	}
+
+	private async startNewGame(mode: "start" | "next"): Promise<void> {
+		await this.loadGameState();
+		if (!this.timeControl) {
+			throw new Error("Time control not loaded");
+		}
+		if (!this.initialBoard) {
+			throw new Error("Initial board not loaded");
+		}
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+
+		const startColor =
+			mode === "start"
+				? this.resolveStartColor(this.roomSettings.startColor)
+				: this.resolveNextStartColor();
+		this.currentStartColor = startColor;
+		const nowIso = new Date().toISOString();
+		const nowMs = Date.parse(nowIso);
+
+		this.gameState = {
+			board: new Uint8Array(this.initialBoard),
+			turn: startColor,
+			ply: 0,
+			drawOfferBy: null,
+			drawOfferBlocked: null,
+		};
+		this.roomStatus = "active";
+		this.rematchOffers = { black: false, white: false };
+		this.clockBlackMs = this.timeControl.initialMs.black;
+		this.clockWhiteMs = this.timeControl.initialMs.white;
+		this.bufferBlackMs = this.timeControl.bufferMs.black;
+		this.bufferWhiteMs = this.timeControl.bufferMs.white;
+		this.turnStartTime = nowMs;
+		this.gameStartTime = nowMs;
+		this.actionLog = [];
+
+		const legalActions = engine.generateLegalActions(this.gameState);
+		this.legalSet = new Set(Array.from(legalActions));
+
+		await this.env.DB.prepare("DELETE FROM game_actions WHERE game_id = ?")
+			.bind(this.gameId)
+			.run();
+
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		if (supportsBlocked) {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, initial_turn = ?, draw_offer_by = ?, draw_offer_blocked = ?,
+				   clock_black_ms = ?, clock_white_ms = ?, status = ?, winner_color = ?, end_opcode = ?, end_reason = ?,
+				   started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
+			).bind(
+				this.gameState.ply,
+				this.gameState.turn,
+				startColor,
+				this.gameState.drawOfferBy,
+				this.gameState.drawOfferBlocked,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"active",
+				null,
+				null,
+				null,
+				nowIso,
+				startColor,
+				this.gameId
+			).run();
+		} else {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, initial_turn = ?, draw_offer_by = ?,
+				   clock_black_ms = ?, clock_white_ms = ?, status = ?, winner_color = ?, end_opcode = ?, end_reason = ?,
+				   started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
+			).bind(
+				this.gameState.ply,
+				this.gameState.turn,
+				startColor,
+				this.gameState.drawOfferBy,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"active",
+				null,
+				null,
+				null,
+				nowIso,
+				startColor,
+				this.gameId
+			).run();
+		}
+
+		for (const { ws, role } of this.connections.values()) {
+			await this.sendSync(ws, role);
+		}
+		this.broadcastRoomUpdate();
+		await this.scheduleNextAlarm();
+	}
+
 	private async handleControlMessage(
 		connectionId: string,
 		message: any,
@@ -394,6 +614,56 @@ export class GameRoom implements DurableObject {
 					})
 				);
 			}
+		} else if (message.t === "start_game") {
+			const conn = this.connections.get(connectionId);
+			if (!conn || conn.role !== "black") {
+				this.sendError(ws, "Only the host can start the game");
+				return;
+			}
+			if (this.roomStatus !== "lobby") {
+				this.sendError(ws, "Game already started");
+				return;
+			}
+			if (!this.hasBothPlayersConnected()) {
+				this.sendError(ws, "Both players must be connected");
+				return;
+			}
+			await this.startNewGame("start");
+		} else if (message.t === "rematch_offer") {
+			const conn = this.connections.get(connectionId);
+			if (!conn || conn.role === "spectator") {
+				this.sendError(ws, "Only players can offer a rematch");
+				return;
+			}
+			if (this.roomStatus !== "ended") {
+				this.sendError(ws, "Game has not ended");
+				return;
+			}
+			if (conn.role === "black") {
+				this.rematchOffers.black = true;
+			} else if (conn.role === "white") {
+				this.rematchOffers.white = true;
+			}
+			this.broadcastRoomUpdate();
+		} else if (message.t === "rematch_start") {
+			const conn = this.connections.get(connectionId);
+			if (!conn || conn.role === "spectator") {
+				this.sendError(ws, "Only players can start a rematch");
+				return;
+			}
+			if (this.roomStatus !== "ended") {
+				this.sendError(ws, "Game has not ended");
+				return;
+			}
+			if (!this.hasBothPlayersConnected()) {
+				this.sendError(ws, "Both players must be connected");
+				return;
+			}
+			if (!this.rematchOffers.black || !this.rematchOffers.white) {
+				this.sendError(ws, "Both players must offer a rematch first");
+				return;
+			}
+			await this.startNewGame("next");
 		}
 	}
 
@@ -405,6 +675,14 @@ export class GameRoom implements DurableObject {
 	): Promise<void> {
 		if (!this.gameState) {
 			this.sendError(ws, "Game state not loaded");
+			return;
+		}
+		if (this.roomStatus !== "active") {
+			this.sendError(ws, "Game has not started");
+			return;
+		}
+		if (this.gameState.status === "ended") {
+			this.sendError(ws, "Game has ended");
 			return;
 		}
 		
@@ -482,9 +760,15 @@ export class GameRoom implements DurableObject {
 		
 		// Update game row with clock values
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		const gameEnded = newState.status === "ended";
+		const winnerColor = gameEnded ? newState.winner ?? null : null;
+		const endOpcode = gameEnded ? opcode : null;
+		const endReason = gameEnded && opcode === 11 ? fields.endReason : null;
+		const nextStatus = gameEnded ? "ended" : "active";
 		if (supportsBlocked) {
 			await this.env.DB.prepare(
-				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
+				   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
 			).bind(
 				newState.ply,
 				newState.turn,
@@ -492,18 +776,27 @@ export class GameRoom implements DurableObject {
 				newState.drawOfferBlocked,
 				this.clockBlackMs,
 				this.clockWhiteMs,
+				nextStatus,
+				winnerColor,
+				endOpcode,
+				endReason,
 				startedAtIso,
 				gameId
 			).run();
 		} else {
 			await this.env.DB.prepare(
-				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+				   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
 			).bind(
 				newState.ply,
 				newState.turn,
 				newState.drawOfferBy,
 				this.clockBlackMs,
 				this.clockWhiteMs,
+				nextStatus,
+				winnerColor,
+				endOpcode,
+				endReason,
 				startedAtIso,
 				gameId
 			).run();
@@ -518,6 +811,12 @@ export class GameRoom implements DurableObject {
 		
 		// Broadcast action and Bloom filter
 		this.broadcastAction(actionWord);
+		if (gameEnded) {
+			this.roomStatus = "ended";
+			this.turnStartTime = null;
+			this.rematchOffers = { black: false, white: false };
+			this.broadcastRoomUpdate();
+		}
 		const endedForNoMoves = await this.maybeEndOnNoMoves(gameId, legalList);
 		if (!endedForNoMoves) {
 			this.broadcastBloomFilter(legalList);
@@ -735,6 +1034,10 @@ export class GameRoom implements DurableObject {
 		
 		this.broadcastAction(endAction);
 		this.broadcastBloomFilter(Array.from(legalActions));
+		this.roomStatus = "ended";
+		this.turnStartTime = null;
+		this.rematchOffers = { black: false, white: false };
+		this.broadcastRoomUpdate();
 	}
 
 	private async applyTimeoutEnd(loserColor: engine.Color, gameId: string): Promise<void> {
@@ -797,6 +1100,10 @@ export class GameRoom implements DurableObject {
 		
 		this.broadcastAction(endAction);
 		this.broadcastBloomFilter(Array.from(legalActions));
+		this.roomStatus = "ended";
+		this.turnStartTime = null;
+		this.rematchOffers = { black: false, white: false };
+		this.broadcastRoomUpdate();
 	}
 
 	private getClockSnapshot(
@@ -831,7 +1138,7 @@ export class GameRoom implements DurableObject {
 
 	private async scheduleNextAlarm(): Promise<void> {
 		if (!this.gameState || !this.timeControl) return;
-		if (this.gameState.status === "ended") {
+		if (this.roomStatus !== "active" || this.gameState.status === "ended") {
 			await this.state.storage.deleteAlarm();
 			return;
 		}
@@ -918,11 +1225,15 @@ export class GameRoom implements DurableObject {
 		
 		this.broadcastAction(endAction);
 		this.broadcastBloomFilter(Array.from(legalActions));
+		this.roomStatus = "ended";
+		this.turnStartTime = null;
+		this.rematchOffers = { black: false, white: false };
+		this.broadcastRoomUpdate();
 	}
 
 	async alarm(): Promise<void> {
 		await this.loadGameState();
-		if (!this.gameState || this.gameState.status === "ended") {
+		if (!this.gameState || this.roomStatus !== "active" || this.gameState.status === "ended") {
 			return;
 		}
 		if (!this.gameId) {

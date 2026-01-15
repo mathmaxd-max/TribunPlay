@@ -27,6 +27,11 @@ export class GameCreate extends OpenAPIRoute {
                 ]).optional(),
                 maxGameMs: z.number().nullable().optional(),
               }).optional(),
+              roomSettings: z.object({
+                hostColor: z.enum(["black", "white", "random"]).optional(),
+                startColor: z.enum(["black", "white", "random"]).optional(),
+                nextStartColor: z.enum(["same", "other", "random"]).optional(),
+              }).optional(),
               // Optional custom starting position for debugging/testing
               // Can provide either customPosition (JSON format), boardBytesB64 (121-byte base64 string), or unitsByCid (CID-based format)
               customPosition: z.object({
@@ -108,13 +113,31 @@ export class GameCreate extends OpenAPIRoute {
     }
     
     const initialTurn = 0; // Black starts
+    const rawSettings = body?.roomSettings ?? null;
+    const hostColor =
+      rawSettings && ["black", "white", "random"].includes(rawSettings.hostColor)
+        ? rawSettings.hostColor
+        : "random";
+    const startColor =
+      rawSettings && ["black", "white", "random"].includes(rawSettings.startColor)
+        ? rawSettings.startColor
+        : "random";
+    const nextStartColor =
+      rawSettings && ["same", "other", "random"].includes(rawSettings.nextStartColor)
+        ? rawSettings.nextStartColor
+        : "other";
+    const roomSettings = {
+      hostColor,
+      startColor,
+      nextStartColor,
+    };
     
     // Insert game into D1, assigning creator to black
     await env.DB.prepare(
       `INSERT INTO games (
         id, code, status, created_at, initial_turn, turn, initial_board, ply,
-        time_control_json, starting_player_color, black_player_id, black_token
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        time_control_json, room_settings_json, starting_player_color, black_player_id, black_token
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       gameId,
       code,
@@ -124,7 +147,8 @@ export class GameCreate extends OpenAPIRoute {
       initialTurn,
       initialBoard,
       0,
-      JSON.stringify(c.req.valid("json")?.timeControl || {}),
+      JSON.stringify(body?.timeControl || {}),
+      JSON.stringify(roomSettings),
       0,
       playerId,
       token

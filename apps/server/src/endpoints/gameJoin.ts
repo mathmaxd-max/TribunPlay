@@ -72,14 +72,14 @@ export class GameJoin extends OpenAPIRoute {
       seat = "black";
       const playerId = crypto.randomUUID();
       await env.DB.prepare(
-        "UPDATE games SET black_player_id = ?, black_token = ?, status = ? WHERE id = ?"
-      ).bind(playerId, token, "active", gameId).run();
+        "UPDATE games SET black_player_id = ?, black_token = ? WHERE id = ?"
+      ).bind(playerId, token, gameId).run();
     } else if (!game.white_player_id) {
       seat = "white";
       const playerId = crypto.randomUUID();
       await env.DB.prepare(
-        "UPDATE games SET white_player_id = ?, white_token = ?, status = ? WHERE id = ?"
-      ).bind(playerId, token, "active", gameId).run();
+        "UPDATE games SET white_player_id = ?, white_token = ? WHERE id = ?"
+      ).bind(playerId, token, gameId).run();
     } else {
       seat = "spectator";
     }

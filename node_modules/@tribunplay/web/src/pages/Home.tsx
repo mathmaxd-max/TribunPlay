@@ -3,8 +3,37 @@ import { useNavigate } from 'react-router-dom';
 import { API_BASE } from '../config';
 import { useHealthCheck } from '../utils/useHealthCheck';
 
+type RoomColorOption = 'black' | 'white' | 'random';
+type NextStartOption = 'same' | 'other' | 'random';
+type ClockInput = {
+  initialMinutes: number;
+  bufferSeconds: number;
+  incrementSeconds: number;
+};
+
+const DEFAULT_CLOCK: ClockInput = { initialMinutes: 5, bufferSeconds: 20, incrementSeconds: 0 };
+
+const clampNumber = (value: number, fallback: number) => {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, value);
+};
+
+const toMs = (value: number, unit: 'minutes' | 'seconds') => {
+  const factor = unit === 'minutes' ? 60000 : 1000;
+  return Math.round(clampNumber(value, 0) * factor);
+};
+
 export default function Home() {
   const [code, setCode] = useState('');
+  const [hostColor, setHostColor] = useState<RoomColorOption>('random');
+  const [startColor, setStartColor] = useState<RoomColorOption>('random');
+  const [nextStartColor, setNextStartColor] = useState<NextStartOption>('other');
+  const [sameClockSettings, setSameClockSettings] = useState(true);
+  const [sharedClock, setSharedClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
+  const [blackClock, setBlackClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
+  const [whiteClock, setWhiteClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
+  const [maxGameEnabled, setMaxGameEnabled] = useState(false);
+  const [maxGameMinutes, setMaxGameMinutes] = useState(60);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -15,14 +44,88 @@ export default function Home() {
     timeout: 3000,
   });
 
+  const handleSameClockToggle = (nextValue: boolean) => {
+    setSameClockSettings(nextValue);
+    if (nextValue) {
+      setSharedClock(blackClock);
+    } else {
+      setBlackClock(sharedClock);
+      setWhiteClock(sharedClock);
+    }
+  };
+
+  const normalizeClockInput = (clock: ClockInput): ClockInput => ({
+    initialMinutes: clampNumber(clock.initialMinutes, DEFAULT_CLOCK.initialMinutes),
+    bufferSeconds: clampNumber(clock.bufferSeconds, DEFAULT_CLOCK.bufferSeconds),
+    incrementSeconds: clampNumber(clock.incrementSeconds, DEFAULT_CLOCK.incrementSeconds),
+  });
+
+  const buildTimeControl = () => {
+    const normalizedMaxMinutes = clampNumber(maxGameMinutes, 0);
+    const maxGameMs = maxGameEnabled && normalizedMaxMinutes > 0 ? toMs(normalizedMaxMinutes, 'minutes') : null;
+    if (sameClockSettings) {
+      const normalized = normalizeClockInput(sharedClock);
+      return {
+        initialMs: toMs(normalized.initialMinutes, 'minutes'),
+        bufferMs: toMs(normalized.bufferSeconds, 'seconds'),
+        incrementMs: toMs(normalized.incrementSeconds, 'seconds'),
+        maxGameMs,
+      };
+    }
+    const normalizedBlack = normalizeClockInput(blackClock);
+    const normalizedWhite = normalizeClockInput(whiteClock);
+    return {
+      initialMs: {
+        black: toMs(normalizedBlack.initialMinutes, 'minutes'),
+        white: toMs(normalizedWhite.initialMinutes, 'minutes'),
+      },
+      bufferMs: {
+        black: toMs(normalizedBlack.bufferSeconds, 'seconds'),
+        white: toMs(normalizedWhite.bufferSeconds, 'seconds'),
+      },
+      incrementMs: {
+        black: toMs(normalizedBlack.incrementSeconds, 'seconds'),
+        white: toMs(normalizedWhite.incrementSeconds, 'seconds'),
+      },
+      maxGameMs,
+    };
+  };
+
+  const fieldLabelStyle = {
+    fontSize: '11px',
+    fontWeight: 700,
+    letterSpacing: '0.8px',
+    textTransform: 'uppercase' as const,
+    color: '#5f564a',
+    marginBottom: '6px',
+  };
+  const inputStyle = {
+    width: '100%',
+    padding: '10px',
+    fontSize: '14px',
+    border: '1px solid #d9d0c2',
+    borderRadius: '6px',
+    background: 'white',
+  };
+  const selectStyle = {
+    ...inputStyle,
+    padding: '10px 12px',
+  };
+
   const handleCreateGame = async () => {
     setLoading(true);
     setError(null);
     try {
+      const timeControl = buildTimeControl();
+      const roomSettings = {
+        hostColor,
+        startColor,
+        nextStartColor,
+      };
       const response = await fetch(`${API_BASE}/api/game/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ timeControl, roomSettings }),
       });
       
       if (!response.ok) {
@@ -136,22 +239,255 @@ export default function Home() {
         boxShadow: '0 2px 4px rgba(0,0,0,0.1)' 
       }}>
         <div style={{ marginBottom: '30px' }}>
-          <button
-            onClick={handleCreateGame}
-            disabled={loading}
-            style={{
-              width: '100%',
+          <h2 style={{ marginBottom: '16px', fontSize: '18px' }}>Create Room</h2>
+          <div style={{ display: 'grid', gap: '18px' }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+              gap: '12px',
+            }}>
+              <div>
+                <div style={fieldLabelStyle}>Host Color</div>
+                <select
+                  value={hostColor}
+                  onChange={(e) => setHostColor(e.target.value as RoomColorOption)}
+                  style={selectStyle}
+                >
+                  <option value="random">Random</option>
+                  <option value="black">Black</option>
+                  <option value="white">White</option>
+                </select>
+              </div>
+              <div>
+                <div style={fieldLabelStyle}>Start Color</div>
+                <select
+                  value={startColor}
+                  onChange={(e) => setStartColor(e.target.value as RoomColorOption)}
+                  style={selectStyle}
+                >
+                  <option value="random">Random</option>
+                  <option value="black">Black</option>
+                  <option value="white">White</option>
+                </select>
+              </div>
+              <div>
+                <div style={fieldLabelStyle}>Next Start</div>
+                <select
+                  value={nextStartColor}
+                  onChange={(e) => setNextStartColor(e.target.value as NextStartOption)}
+                  style={selectStyle}
+                >
+                  <option value="other">Other</option>
+                  <option value="same">Same</option>
+                  <option value="random">Random</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{
+              padding: '14px',
+              border: '1px solid #e7dfd2',
+              borderRadius: '10px',
+              background: '#f8f4ec',
+            }}>
+              <div style={{
+                fontSize: '12px',
+                fontWeight: 700,
+                letterSpacing: '1px',
+                textTransform: 'uppercase',
+                color: '#6b5f4d',
+                marginBottom: '10px',
+              }}>
+                Clock Settings
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px' }}>
+                <input
+                  type="checkbox"
+                  checked={sameClockSettings}
+                  onChange={(e) => handleSameClockToggle(e.target.checked)}
+                />
+                Same for both colors
+              </label>
+
+              {sameClockSettings ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '10px', marginTop: '12px' }}>
+                  <div>
+                    <div style={fieldLabelStyle}>Initial (min)</div>
+                    <input
+                      type="number"
+                      min={0}
+                      value={sharedClock.initialMinutes}
+                      onChange={(e) =>
+                        setSharedClock((prev) => ({ ...prev, initialMinutes: Number(e.target.value) }))
+                      }
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <div style={fieldLabelStyle}>Buffer (sec)</div>
+                    <input
+                      type="number"
+                      min={0}
+                      value={sharedClock.bufferSeconds}
+                      onChange={(e) =>
+                        setSharedClock((prev) => ({ ...prev, bufferSeconds: Number(e.target.value) }))
+                      }
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <div style={fieldLabelStyle}>Increment (sec)</div>
+                    <input
+                      type="number"
+                      min={0}
+                      value={sharedClock.incrementSeconds}
+                      onChange={(e) =>
+                        setSharedClock((prev) => ({ ...prev, incrementSeconds: Number(e.target.value) }))
+                      }
+                      style={inputStyle}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginTop: '12px' }}>
+                  <div style={{ padding: '10px', borderRadius: '8px', border: '1px solid #e2d8c9', background: 'white' }}>
+                    <div style={{ fontWeight: 700, marginBottom: '8px' }}>Black</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '10px' }}>
+                      <div>
+                        <div style={fieldLabelStyle}>Initial (min)</div>
+                        <input
+                          type="number"
+                          min={0}
+                          value={blackClock.initialMinutes}
+                          onChange={(e) =>
+                            setBlackClock((prev) => ({ ...prev, initialMinutes: Number(e.target.value) }))
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                      <div>
+                        <div style={fieldLabelStyle}>Buffer (sec)</div>
+                        <input
+                          type="number"
+                          min={0}
+                          value={blackClock.bufferSeconds}
+                          onChange={(e) =>
+                            setBlackClock((prev) => ({ ...prev, bufferSeconds: Number(e.target.value) }))
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                      <div>
+                        <div style={fieldLabelStyle}>Increment (sec)</div>
+                        <input
+                          type="number"
+                          min={0}
+                          value={blackClock.incrementSeconds}
+                          onChange={(e) =>
+                            setBlackClock((prev) => ({ ...prev, incrementSeconds: Number(e.target.value) }))
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ padding: '10px', borderRadius: '8px', border: '1px solid #e2d8c9', background: 'white' }}>
+                    <div style={{ fontWeight: 700, marginBottom: '8px' }}>White</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '10px' }}>
+                      <div>
+                        <div style={fieldLabelStyle}>Initial (min)</div>
+                        <input
+                          type="number"
+                          min={0}
+                          value={whiteClock.initialMinutes}
+                          onChange={(e) =>
+                            setWhiteClock((prev) => ({ ...prev, initialMinutes: Number(e.target.value) }))
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                      <div>
+                        <div style={fieldLabelStyle}>Buffer (sec)</div>
+                        <input
+                          type="number"
+                          min={0}
+                          value={whiteClock.bufferSeconds}
+                          onChange={(e) =>
+                            setWhiteClock((prev) => ({ ...prev, bufferSeconds: Number(e.target.value) }))
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                      <div>
+                        <div style={fieldLabelStyle}>Increment (sec)</div>
+                        <input
+                          type="number"
+                          min={0}
+                          value={whiteClock.incrementSeconds}
+                          onChange={(e) =>
+                            setWhiteClock((prev) => ({ ...prev, incrementSeconds: Number(e.target.value) }))
+                          }
+                          style={inputStyle}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              alignItems: 'center',
+              gap: '12px',
               padding: '12px',
-              fontSize: '16px',
-              background: '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: loading ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {loading ? 'Creating...' : 'Create Game'}
-          </button>
+              border: '1px solid #e7dfd2',
+              borderRadius: '10px',
+              background: '#fdfbf7',
+            }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 600 }}>
+                <input
+                  type="checkbox"
+                  checked={maxGameEnabled}
+                  onChange={(e) => setMaxGameEnabled(e.target.checked)}
+                />
+                Max game time
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <input
+                  type="number"
+                  min={1}
+                  value={maxGameMinutes}
+                  disabled={!maxGameEnabled}
+                  onChange={(e) => setMaxGameMinutes(Number(e.target.value))}
+                  style={{
+                    ...inputStyle,
+                    background: maxGameEnabled ? 'white' : '#f2ece1',
+                    cursor: maxGameEnabled ? 'text' : 'not-allowed',
+                  }}
+                />
+                <span style={{ fontSize: '13px', color: '#6b5f4d' }}>minutes</span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleCreateGame}
+              disabled={loading}
+              style={{
+                width: '100%',
+                padding: '12px',
+                fontSize: '16px',
+                background: '#007bff',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: loading ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {loading ? 'Creating...' : 'Create Game'}
+            </button>
+          </div>
         </div>
         
         <div style={{ 

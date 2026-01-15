@@ -11,6 +11,19 @@ type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
 type EmptyCache = UiMoveCache['empty'] extends Map<any, infer T> ? T : never;
 type ColorClock = { black: number; white: number };
+type RoomStatus = 'lobby' | 'active' | 'ended';
+type RoomSettings = {
+  hostColor: 'black' | 'white' | 'random';
+  startColor: 'black' | 'white' | 'random';
+  nextStartColor: 'same' | 'other' | 'random';
+};
+type RoomPresence = {
+  players: { black: number; white: number };
+  spectators: number;
+  canStart?: boolean;
+  rematch?: { black: boolean; white: boolean };
+  rematchReady?: boolean;
+};
 type TimeControl = {
   initialMs: ColorClock;
   bufferMs: ColorClock;
@@ -63,6 +76,8 @@ interface GameSnapshot {
   gameStartTimeMs?: number | null;
   status?: 'active' | 'ended';
   winner?: engine.Color | null;
+  roomStatus?: RoomStatus;
+  roomSettings?: RoomSettings;
 }
 
 const NEIGHBOR_VECTORS = [
@@ -82,6 +97,11 @@ const DEFAULT_TIME_CONTROL: TimeControl = {
   bufferMs: { black: 20000, white: 20000 },
   incrementMs: { black: 0, white: 0 },
   maxGameMs: null,
+};
+const DEFAULT_ROOM_SETTINGS: RoomSettings = {
+  hostColor: 'random',
+  startColor: 'random',
+  nextStartColor: 'other',
 };
 
 const readColorClock = (raw: number | ColorClock | undefined, fallback: ColorClock): ColorClock => {
@@ -246,6 +266,13 @@ export default function Game() {
   const wsRef = useRef<WebSocket | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [role, setRole] = useState<Role | null>(null);
+  const [roomStatus, setRoomStatus] = useState<RoomStatus>('lobby');
+  const [roomSettings, setRoomSettings] = useState<RoomSettings>({ ...DEFAULT_ROOM_SETTINGS });
+  const [roomPresence, setRoomPresence] = useState<RoomPresence>({
+    players: { black: 0, white: 0 },
+    spectators: 0,
+  });
+  const [showEndModal, setShowEndModal] = useState(false);
   const [gameState, setGameState] = useState<engine.State | null>(null);
   const [error, setError] = useState<string | null>(null);
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
@@ -339,6 +366,22 @@ export default function Game() {
     turnStartTimeRef.current = snapshotTimeMs;
     turnStartClockRef.current = params.clocksMs[params.activeColor];
     turnStartBufferRef.current = params.buffersMs[params.activeColor];
+    lastTurnRef.current = params.activeColor === 'black' ? 0 : 1;
+  };
+
+  const applyLobbyClockSnapshot = (params: {
+    clocksMs: ColorClock;
+    buffersMs: ColorClock;
+    activeColor: 'black' | 'white';
+  }) => {
+    setClocksMs(params.clocksMs);
+    setBufferMsRemaining(params.buffersMs);
+    clocksRef.current = params.clocksMs;
+    bufferRef.current = params.buffersMs;
+    lastClockUpdateRef.current = params.clocksMs;
+    turnStartTimeRef.current = null;
+    turnStartClockRef.current = null;
+    turnStartBufferRef.current = null;
     lastTurnRef.current = params.activeColor === 'black' ? 0 : 1;
   };
 
@@ -526,9 +569,17 @@ export default function Game() {
     setGameEndInfo(info);
   }, [gameState?.status, gameState?.winner, lastActionWord, clocksMs, totalGameTimeMs, timeControl]);
 
+  useEffect(() => {
+    if (gameState?.status === 'ended') {
+      setShowEndModal(true);
+    } else if (gameState?.status === 'active') {
+      setShowEndModal(false);
+    }
+  }, [gameState?.status]);
+
   // Track total game time and check for max game time tie
   useEffect(() => {
-    if (!gameState || gameStartTimeMs === null || gameState.status === 'ended') return;
+    if (!gameState || roomStatus !== 'active' || gameStartTimeMs === null || gameState.status === 'ended') return;
     
     const maxGameMs = timeControl.maxGameMs;
     
@@ -546,7 +597,7 @@ export default function Game() {
     }, 1000); // Update every second
     
     return () => clearInterval(interval);
-  }, [gameState, timeControl.maxGameMs, gameStartTimeMs]);
+  }, [gameState, roomStatus, timeControl.maxGameMs, gameStartTimeMs]);
 
   useEffect(() => {
     if (!gameState || gameStartTimeMs === null) return;
@@ -557,7 +608,7 @@ export default function Game() {
 
   // Clock countdown effect with separate buffer tracking (server-time based)
   useEffect(() => {
-    if (!gameState || gameState.status === 'ended') return;
+    if (!gameState || roomStatus !== 'active' || gameState.status === 'ended') return;
 
     let interval: ReturnType<typeof setInterval> | null = null;
 
@@ -620,7 +671,7 @@ export default function Game() {
         clearInterval(interval);
       }
     };
-  }, [gameState?.turn, gameState?.ply]);
+  }, [gameState?.turn, gameState?.ply, roomStatus]);
 
   useEffect(() => {
     if (!boardViewportRef.current) return;
@@ -730,9 +781,24 @@ export default function Game() {
             const message = JSON.parse(event.data);
             if (message.t === 'time_sync') {
               updateServerOffsetFromSync(message.clientTimeMs, message.serverTimeMs);
+            } else if (message.t === 'room') {
+              const players = message.players ?? { black: 0, white: 0 };
+              const spectators = Number.isFinite(message.spectators) ? message.spectators : 0;
+              setRoomPresence({
+                players,
+                spectators,
+                canStart: message.canStart,
+                rematch: message.rematch,
+                rematchReady: message.rematchReady,
+              });
+              if (message.roomStatus === 'lobby' || message.roomStatus === 'active' || message.roomStatus === 'ended') {
+                setRoomStatus(message.roomStatus);
+              }
             } else if (message.t === 'start') {
               // Initial sync
               const snapshot: GameSnapshot = message.snapshot;
+              const nextRoomStatus = snapshot.roomStatus ?? 'active';
+              const nextRoomSettings = snapshot.roomSettings ?? DEFAULT_ROOM_SETTINGS;
               const board = engine.unpackBoard(snapshot.boardB64);
               const lastAction =
                 Array.isArray(message.actions) && message.actions.length > 0
@@ -759,6 +825,8 @@ export default function Game() {
               setGameState(state);
               setUiState({ type: 'idle' });
               lastTurnRef.current = snapshot.turn;
+              setRoomStatus(nextRoomStatus);
+              setRoomSettings(nextRoomSettings);
 
               const normalizedTimeControl = normalizeTimeControl(snapshot.timeControl);
               setTimeControl(normalizedTimeControl);
@@ -772,19 +840,26 @@ export default function Game() {
                 white: normalizedTimeControl.bufferMs.white,
               };
               const activeColor = snapshot.turn === 0 ? 'black' : 'white';
-
-              applyServerClockSnapshot({
-                clocksMs: baseClocks,
-                buffersMs: baseBuffers,
-                activeColor,
-                serverTimeMs: snapshot.serverTimeMs,
-              });
-
-              // Initialize game start time for total game time tracking (server-based)
-              if (typeof snapshot.gameStartTimeMs === 'number' && Number.isFinite(snapshot.gameStartTimeMs)) {
-                setGameStartTimeMs(snapshot.gameStartTimeMs);
-                setTotalGameTimeMs(Math.max(0, getServerNowMs() - snapshot.gameStartTimeMs));
+              if (nextRoomStatus === 'active') {
+                applyServerClockSnapshot({
+                  clocksMs: baseClocks,
+                  buffersMs: baseBuffers,
+                  activeColor,
+                  serverTimeMs: snapshot.serverTimeMs,
+                });
+                if (typeof snapshot.gameStartTimeMs === 'number' && Number.isFinite(snapshot.gameStartTimeMs)) {
+                  setGameStartTimeMs(snapshot.gameStartTimeMs);
+                  setTotalGameTimeMs(Math.max(0, getServerNowMs() - snapshot.gameStartTimeMs));
+                } else {
+                  setGameStartTimeMs(null);
+                  setTotalGameTimeMs(0);
+                }
               } else {
+                applyLobbyClockSnapshot({
+                  clocksMs: baseClocks,
+                  buffersMs: baseBuffers,
+                  activeColor,
+                });
                 setGameStartTimeMs(null);
                 setTotalGameTimeMs(0);
               }
@@ -892,6 +967,10 @@ export default function Game() {
       setError('Not connected');
       return;
     }
+    if (roomStatus !== 'active') {
+      setError('Game has not started');
+      return;
+    }
     if (gameState?.status === 'ended') {
       setError('Game has ended');
       return;
@@ -913,6 +992,14 @@ export default function Game() {
     wsRef.current.send(buffer);
     
     // UI state will be reset when action is applied via WebSocket
+  };
+
+  const sendRoomCommand = (type: 'start_game' | 'rematch_offer' | 'rematch_start') => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+    wsRef.current.send(JSON.stringify({ t: type }));
   };
 
   const cycleIndex = (currentIndex: number, delta: number, length: number) => {
@@ -1976,6 +2063,7 @@ export default function Game() {
     pendingAction !== null &&
     pendingActionIsLegal &&
     role !== 'spectator' &&
+    roomStatus === 'active' &&
     gameState?.status !== 'ended' &&
     connectionState === 'connected';
 
@@ -2017,6 +2105,7 @@ export default function Game() {
 
   const canSendAction = (action: number | null) => {
     if (!action || !cache || !gameState) return false;
+    if (roomStatus !== 'active') return false;
     if (gameState.status === 'ended') return false;
     if (role === 'spectator') return false;
     if (connectionState !== 'connected') return false;
@@ -2100,6 +2189,55 @@ export default function Game() {
       </div>
     );
   };
+
+  const playersReady = roomPresence.players.black > 0 && roomPresence.players.white > 0;
+  const canHostStart = roomStatus === 'lobby' && role === 'black' && playersReady;
+  const rematchOffers = roomPresence.rematch ?? { black: false, white: false };
+  const rematchReady = Boolean(roomPresence.rematchReady ?? (rematchOffers.black && rematchOffers.white));
+  const rematchOfferedByMe =
+    role === 'black' ? rematchOffers.black : role === 'white' ? rematchOffers.white : false;
+  const canOfferRematch =
+    roomStatus === 'ended' && role !== 'spectator' && playersReady && !rematchOfferedByMe;
+
+  const formatOption = (value?: string) => {
+    if (!value) return 'Unknown';
+    return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+  };
+  const formatNextStart = (value?: RoomSettings['nextStartColor']) => {
+    if (value === 'same') return 'Same';
+    if (value === 'other') return 'Other';
+    if (value === 'random') return 'Random';
+    return 'Unknown';
+  };
+  const formatClockPair = (clock: ColorClock) => {
+    if (clock.black === clock.white) {
+      return formatTime(clock.black);
+    }
+    return `Black ${formatTime(clock.black)} / White ${formatTime(clock.white)}`;
+  };
+  const maxGameLabel =
+    timeControl.maxGameMs != null && Number.isFinite(timeControl.maxGameMs)
+      ? formatTime(timeControl.maxGameMs)
+      : 'Infinite';
+  const nextGameHint = rematchReady
+    ? null
+    : role === 'spectator'
+    ? 'Waiting for players to offer a rematch.'
+    : rematchOfferedByMe
+    ? 'Waiting for opponent to offer a rematch.'
+    : playersReady
+    ? 'Offer a rematch to continue.'
+    : 'Both players must be connected to offer a rematch.';
+  const rematchButtonLabel = rematchReady ? 'Rematch' : 'Offer Rematch';
+  const rematchButtonDisabled = rematchReady
+    ? !(roomStatus === 'ended' && role !== 'spectator' && playersReady)
+    : !canOfferRematch;
+  const lobbyActionLabel =
+    role === 'black'
+      ? playersReady
+        ? 'Start Game'
+        : 'Waiting for opponent'
+      : 'Waiting for host';
 
   const contentPadding = isWideLayout ? '16px 20px 20px' : '8px 6px 10px';
   const boardCardPadding = isWideLayout ? '12px' : '6px';
@@ -2220,6 +2358,127 @@ export default function Game() {
         </div>
       )}
 
+      {gameEndInfo && gameState?.status === 'ended' && !showEndModal && (
+        <div
+          style={{
+            margin: errorMargin,
+            padding: '10px 14px',
+            borderRadius: '10px',
+            background: '#f1ddc2',
+            color: '#3c2b18',
+            fontWeight: 700,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+          }}
+        >
+          <div>Game ended · {gameEndInfo.winnerLabel}</div>
+          <button
+            onClick={() => setShowEndModal(true)}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '999px',
+              border: '2px solid #6f5a38',
+              background: '#f2d9b2',
+              color: '#2a2218',
+              fontWeight: 700,
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              cursor: 'pointer',
+            }}
+          >
+            View Summary
+          </button>
+        </div>
+      )}
+
+      {gameEndInfo && gameState?.status === 'ended' && showEndModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(20, 15, 10, 0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+            zIndex: 50,
+          }}
+        >
+          <div
+            style={{
+              width: 'min(520px, 92vw)',
+              background: '#fff7ea',
+              borderRadius: '18px',
+              border: '2px solid #b9833b',
+              padding: '24px',
+              boxShadow: '0 24px 40px rgba(39, 30, 20, 0.25)',
+              textAlign: 'center',
+              position: 'relative',
+            }}
+          >
+            <button
+              onClick={() => setShowEndModal(false)}
+              aria-label="Close"
+              style={{
+                position: 'absolute',
+                top: '12px',
+                right: '12px',
+                width: '28px',
+                height: '28px',
+                borderRadius: '50%',
+                border: '1px solid #d4c3a5',
+                background: '#f7ecd8',
+                color: '#5a4630',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              ×
+            </button>
+            <div
+              style={{
+                fontSize: '12px',
+                fontWeight: 700,
+                letterSpacing: '2px',
+                textTransform: 'uppercase',
+                color: '#7a6543',
+                marginBottom: '12px',
+              }}
+            >
+              Game Over
+            </div>
+            <div style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px', color: '#3c2b18' }}>
+              {gameEndInfo.reason}
+            </div>
+            <div style={{ fontSize: '16px', marginBottom: '18px', color: '#5a4630' }}>
+              Result: {gameEndInfo.winnerLabel}
+            </div>
+            <button
+              onClick={() => sendRoomCommand(rematchReady ? 'rematch_start' : 'rematch_offer')}
+              disabled={rematchButtonDisabled}
+              style={{
+                padding: '12px 18px',
+                borderRadius: '999px',
+                border: '2px solid #6f5a38',
+                background: !rematchButtonDisabled ? '#f2d9b2' : '#e6dccf',
+                color: '#2a2218',
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                cursor: !rematchButtonDisabled ? 'pointer' : 'not-allowed',
+              }}
+            >
+              {rematchButtonLabel}
+            </button>
+            {nextGameHint && (
+              <div style={{ marginTop: '12px', fontSize: '12px', color: '#7a6543' }}>{nextGameHint}</div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div
         style={{
           flex: 1,
@@ -2230,6 +2489,125 @@ export default function Game() {
           padding: contentPadding,
         }}
       >
+        {roomStatus === 'lobby' ? (
+          <div
+            style={{
+              gridColumn: '1 / -1',
+              padding: isWideLayout ? '24px' : '16px',
+              borderRadius: '18px',
+              border: '2px solid #3c3226',
+              background: 'rgba(255, 250, 242, 0.85)',
+              boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
+              display: 'grid',
+              gap: '16px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+              <div>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    letterSpacing: '2px',
+                    textTransform: 'uppercase',
+                    color: '#7a6543',
+                  }}
+                >
+                  Waiting Room
+                </div>
+                <div style={{ fontSize: '22px', fontWeight: 700, color: '#2c2318' }}>
+                  {playersReady ? 'Players connected' : 'Waiting for opponent'}
+                </div>
+              </div>
+              <div
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '999px',
+                  border: '2px solid #b9833b',
+                  background: '#f1ddc2',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  color: '#4a3720',
+                }}
+              >
+                Players: {roomPresence.players.black + roomPresence.players.white}/2
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: isWideLayout ? 'minmax(0, 1fr) minmax(0, 1fr)' : '1fr',
+                gap: '16px',
+              }}
+            >
+              <div
+                style={{
+                  padding: '16px',
+                  borderRadius: '12px',
+                  border: '1px solid #d8cbb8',
+                  background: '#fffaf0',
+                  display: 'grid',
+                  gap: '10px',
+                }}
+              >
+                <div style={{ fontWeight: 700, color: '#3a2c1b' }}>Players & Spectators</div>
+                <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
+                  <div>Black: {roomPresence.players.black > 0 ? 'Connected' : 'Waiting'}</div>
+                  <div>White: {roomPresence.players.white > 0 ? 'Connected' : 'Waiting'}</div>
+                  <div>Spectators: {roomPresence.spectators}</div>
+                </div>
+                <button
+                  onClick={() => sendRoomCommand('start_game')}
+                  disabled={!canHostStart}
+                  style={{
+                    marginTop: '6px',
+                    padding: '12px 18px',
+                    borderRadius: '999px',
+                    border: '2px solid #6f5a38',
+                    background: canHostStart ? '#f2d9b2' : '#e6dccf',
+                    color: '#2a2218',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: canHostStart ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {lobbyActionLabel}
+                </button>
+                {!canHostStart && (
+                  <div style={{ fontSize: '12px', color: '#7a6543' }}>
+                    {role === 'black' ? 'Both players must connect before starting.' : 'Waiting for the host to start.'}
+                  </div>
+                )}
+              </div>
+              <div
+                style={{
+                  padding: '16px',
+                  borderRadius: '12px',
+                  border: '1px solid #d8cbb8',
+                  background: '#fffaf0',
+                  display: 'grid',
+                  gap: '10px',
+                }}
+              >
+                <div style={{ fontWeight: 700, color: '#3a2c1b' }}>Room Settings</div>
+                <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
+                  <div>Host color: {formatOption(roomSettings.hostColor)}</div>
+                  <div>Start color: {formatOption(roomSettings.startColor)}</div>
+                  <div>Next start: {formatNextStart(roomSettings.nextStartColor)}</div>
+                  <div>Initial: {formatClockPair(timeControl.initialMs)}</div>
+                  <div>Buffer: {formatClockPair(timeControl.bufferMs)}</div>
+                  <div>Increment: {formatClockPair(timeControl.incrementMs)}</div>
+                  <div>Max game time: {maxGameLabel}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
         {isWideLayout && (
           <div
             style={{
@@ -2279,21 +2657,6 @@ export default function Game() {
         )}
 
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, gap: '12px' }}>
-          {gameEndInfo && (
-            <div
-              style={{
-                padding: '10px 14px',
-                borderRadius: '12px',
-                background: '#f1ddc2',
-                border: '2px solid #b9833b',
-                color: '#3c2b18',
-                fontWeight: 700,
-                textAlign: 'center',
-              }}
-            >
-              {gameEndInfo.reason} - Result: {gameEndInfo.winnerLabel}
-            </div>
-          )}
           <div
             style={{
               flex: 1,
@@ -2452,6 +2815,8 @@ export default function Game() {
             </button>
             <div style={{ marginTop: 'auto' }}>{renderClockBox('white')}</div>
           </div>
+        )}
+          </>
         )}
       </div>
     </div>
