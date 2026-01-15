@@ -27,6 +27,17 @@ export class GameCreate extends OpenAPIRoute {
                 ]).optional(),
                 maxGameMs: z.number().nullable().optional(),
               }).optional(),
+              // Optional custom starting position for debugging/testing
+              // Can provide either customPosition (JSON format), boardBytesB64 (121-byte base64 string), or unitsByCid (CID-based format)
+              customPosition: z.object({
+                black: z.record(z.string(), z.array(z.array(z.number()))),
+                white: z.record(z.string(), z.array(z.array(z.number()))),
+              }).optional(),
+              // Alternative: 121-byte board as base64 string (one byte per tile)
+              boardBytesB64: z.string().optional(),
+              // Alternative: CID-based unit specification (e.g., {"wt1": [0], "b24": [51]})
+              // Format: "{color}{spec}" where spec can be "t1", "t{digit}", single digit, or two digits
+              unitsByCid: z.record(z.string(), z.array(z.number())).optional(),
             }).optional(),
           },
         },
@@ -58,8 +69,43 @@ export class GameCreate extends OpenAPIRoute {
     const token = crypto.randomUUID();
     const playerId = crypto.randomUUID();
     
-    // Create initial board from default position
-    const initialBoard = engine.createInitialBoard();
+    // Create initial board from default position, custom position, CID-based units, or 121-byte board string
+    // Try to get validated body, but also try raw JSON parse as fallback
+    let body: any = c.req.valid("json");
+    
+    // If validation returns undefined, try parsing raw body
+    if (!body) {
+      try {
+        const rawBody = await c.req.json();
+        console.log("Raw body parsed:", JSON.stringify(rawBody));
+        body = rawBody;
+      } catch (e) {
+        console.log("No body or parse error:", e);
+        body = null;
+      }
+    } else {
+      console.log("Validated body:", JSON.stringify(body));
+    }
+    
+    let initialBoard: Uint8Array;
+    
+    if (body?.boardBytesB64) {
+      // Use 121-byte base64 string if provided
+      console.log("Using boardBytesB64");
+      initialBoard = engine.createInitialBoard(body.boardBytesB64);
+    } else if (body?.unitsByCid) {
+      // Use CID-based unit specification if provided
+      console.log("Using custom position from unitsByCid:", JSON.stringify(body.unitsByCid));
+      initialBoard = engine.createInitialBoardFromCids(body.unitsByCid);
+    } else if (body?.customPosition) {
+      // Use custom position object if provided
+      console.log("Using customPosition");
+      initialBoard = engine.createInitialBoard(body.customPosition as engine.DefaultPosition);
+    } else {
+      // Use default position
+      console.log("Using default position");
+      initialBoard = engine.createInitialBoard();
+    }
     
     const initialTurn = 0; // Black starts
     

@@ -767,7 +767,7 @@ export function getTileClickState(
 
 /**
  * Get valid donation values for a donor in Empty state
- * For non-tribun: {0} ∪ {valid heights <= actualPrimary}
+ * For non-tribun: {0} U {donations that leave a valid remainder}
  * For tribun: {0, actualPrimary} only
  */
 export function getValidDonationValues(
@@ -777,21 +777,15 @@ export function getValidDonationValues(
   const unit = unitByteToUnit(state.board[donorCid]);
   if (!unit) return [0];
   
-  const validHeights = [0, 1, 2, 3, 4, 6, 8];
+  const validRemainders = new Set([0, 1, 2, 3, 4, 6, 8]);
   const allowed = [0];
-  
-  if (unit.tribun) {
-    // Tribun: only 0 or full primary
-    if (unit.p > 0) {
-      allowed.push(unit.p);
-    }
-  } else {
-    // Non-tribun: cycle through {0} ∪ {valid heights <= actualPrimary}
-    for (const h of validHeights) {
-      if (h > 0 && h <= unit.p) {
-        allowed.push(h);
-      }
-    }
+  const maxDonate = Math.min(unit.p, 8);
+  for (let donate = 1; donate <= maxDonate; donate++) {
+    if (unit.tribun && donate !== unit.p) continue;
+    const remaining = unit.p - donate;
+    if (!validRemainders.has(remaining)) continue;
+    if (remaining > 0 && unit.s > 0 && (remaining > 4 || 2 * remaining < unit.s)) continue;
+    allowed.push(donate);
   }
   
   return allowed;

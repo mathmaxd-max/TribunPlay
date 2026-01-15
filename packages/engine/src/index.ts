@@ -723,6 +723,18 @@ function isSlavePropertySatisfied(primary: number, secondary: number): boolean {
   return primary <= 4 && 2 * primary >= secondary;
 }
 
+function isValidHeightValue(value: number): value is Height {
+  return value === 0 || value === 1 || value === 2 || value === 3 ||
+    value === 4 || value === 6 || value === 8;
+}
+
+function isDonationRemainderValid(remaining: number, secondary: number): boolean {
+  if (!isValidHeightValue(remaining)) return false;
+  if (remaining === 0) return true;
+  if (secondary <= 0) return true;
+  return remaining <= 4 && 2 * remaining >= secondary;
+}
+
 function buildAttackContext(state: State, targetCid: number): AttackContext | null {
   const targetUnit = unitByteToUnit(state.board[targetCid]);
   if (!targetUnit || targetUnit.color === state.turn) return null;
@@ -964,29 +976,11 @@ export function generateLegalActions(state: State): Uint32Array {
             if (donorB.unit.tribun && donB !== donorB.unit.p) continue;
             
             const newPrimary = donA + donB;
-            const hasTribun = donorA.unit.tribun || donorB.unit.tribun;
-            const combinedUnit: Unit = {
-              color: state.turn,
-              tribun: hasTribun,
-              p: roundDownInvalidHeight(newPrimary) as Height,
-              s: 0,
-            };
-            const normalized = normalizeUnit(combinedUnit);
-            if (!normalized || normalized.p === 0) continue;
-            
-            const newDonorA: Unit = {
-              ...donorA.unit,
-              p: (donorA.unit.p - donA) as Height,
-              tribun: donorA.unit.tribun && donA === donorA.unit.p ? false : donorA.unit.tribun,
-            };
-            const newDonorB: Unit = {
-              ...donorB.unit,
-              p: (donorB.unit.p - donB) as Height,
-              tribun: donorB.unit.tribun && donB === donorB.unit.p ? false : donorB.unit.tribun,
-            };
-            normalizeUnit(newDonorA);
-            normalizeUnit(newDonorB);
-            
+            if (!isValidHeightValue(newPrimary)) continue;
+            const remainingA = donorA.unit.p - donA;
+            const remainingB = donorB.unit.p - donB;
+            if (!isDonationRemainderValid(remainingA, donorA.unit.s)) continue;
+            if (!isDonationRemainderValid(remainingB, donorB.unit.s)) continue;
             actions.push(encodeCombine(centerCid, donorA.dir, donorB.dir, donA, donB));
           }
         }
@@ -1007,16 +1001,10 @@ export function generateLegalActions(state: State): Uint32Array {
         const donate = 1;
         if (firstDonor.p >= donate) {
           const newPrimary = donate * donors.length;
-          const combinedUnit: Unit = {
-            color: state.turn,
-            tribun: false,
-            p: roundDownInvalidHeight(newPrimary) as Height,
-            s: 0,
-          };
-          const normalized = normalizeUnit(combinedUnit);
-          if (normalized && normalized.p > 0) {
-            actions.push(encodeSymCombine(centerCid, 0, donate));
-          }
+          const remaining = firstDonor.p - donate;
+          if (!isValidHeightValue(newPrimary)) continue;
+          if (!isDonationRemainderValid(remaining, firstDonor.s)) continue;
+          actions.push(encodeSymCombine(centerCid, 0, donate));
         }
       }
     }
@@ -1040,16 +1028,10 @@ export function generateLegalActions(state: State): Uint32Array {
         if (firstDonor.p < donate) continue;
         
         const newPrimary = donate * donors.length;
-        const combinedUnit: Unit = {
-          color: state.turn,
-          tribun: false,
-          p: roundDownInvalidHeight(newPrimary) as Height,
-          s: 0,
-        };
-        const normalized = normalizeUnit(combinedUnit);
-        if (normalized && normalized.p > 0) {
-          actions.push(encodeSymCombine(centerCid, config, donate));
-        }
+        const remaining = firstDonor.p - donate;
+        if (!isValidHeightValue(newPrimary)) continue;
+        if (!isDonationRemainderValid(remaining, firstDonor.s)) continue;
+        actions.push(encodeSymCombine(centerCid, config, donate));
       }
     }
   }
@@ -1452,6 +1434,15 @@ export function applyAction(state: State, action: number): State {
       
       // Create new unit
       const newPrimary = donateA + donateB;
+      if (!isValidHeightValue(newPrimary)) {
+        throw new Error(`Illegal COMBINE: invalid resulting height`);
+      }
+      const remainingA = donorA.p - donateA;
+      const remainingB = donorB.p - donateB;
+      if (!isDonationRemainderValid(remainingA, donorA.s) ||
+          !isDonationRemainderValid(remainingB, donorB.s)) {
+        throw new Error(`Illegal COMBINE: donor remainder invalid`);
+      }
       const hasTribun = donorA.tribun || donorB.tribun;
       if (hasTribun && (donateA !== donorA.p || donateB !== donorB.p)) {
         throw new Error(`Illegal COMBINE: tribun must donate entire primary`);
@@ -1460,14 +1451,10 @@ export function applyAction(state: State, action: number): State {
       const combinedUnit: Unit = {
         color: state.turn,
         tribun: hasTribun,
-        p: roundDownInvalidHeight(newPrimary) as Height,
+        p: newPrimary as Height,
         s: 0,
       };
-      const normalized = normalizeUnit(combinedUnit);
-      if (!normalized || normalized.p === 0) {
-        throw new Error(`Illegal COMBINE: invalid resulting height`);
-      }
-      newBoard[centerCid] = unitToUnitByte(normalized);
+      newBoard[centerCid] = unitToUnitByte(combinedUnit);
       
       // Update donors
       const newDonorA: Unit = {
@@ -1536,17 +1523,20 @@ export function applyAction(state: State, action: number): State {
       
       // Create combined unit
       const newPrimary = donate * donorCids.length;
+      const remaining = firstDonor.p - donate;
+      if (!isValidHeightValue(newPrimary)) {
+        throw new Error(`Illegal SYM_COMBINE: invalid resulting height`);
+      }
+      if (!isDonationRemainderValid(remaining, firstDonor.s)) {
+        throw new Error(`Illegal SYM_COMBINE: donor remainder invalid`);
+      }
       const combinedUnit: Unit = {
         color: state.turn,
         tribun: false,
-        p: roundDownInvalidHeight(newPrimary) as Height,
+        p: newPrimary as Height,
         s: 0,
       };
-      const normalized = normalizeUnit(combinedUnit);
-      if (!normalized || normalized.p === 0) {
-        throw new Error(`Illegal SYM_COMBINE: invalid resulting height`);
-      }
-      newBoard[centerCid] = unitToUnitByte(normalized);
+      newBoard[centerCid] = unitToUnitByte(combinedUnit);
       
       // Update donors
       for (const cid of donorCids) {
@@ -1788,7 +1778,7 @@ export function applyAction(state: State, action: number): State {
 }
 
 // Default position setup
-interface DefaultPosition {
+export interface DefaultPosition {
   black: {
     [unitType: string]: number[][];
   };
@@ -1798,14 +1788,49 @@ interface DefaultPosition {
 }
 
 // Create initial board from default position
-export function createInitialBoard(): Uint8Array {
+// Optionally accepts a custom position for debugging/testing special cases
+// 
+// Usage examples:
+//   - Default: createInitialBoard() uses default-position.json
+//   - Custom position: createInitialBoard({ black: { "1": [[0, 0]] }, white: { "1": [[1, 1]] } })
+//   - 121-byte board: createInitialBoard(new Uint8Array(121).fill(...))
+//   - Base64 string: createInitialBoard("base64encodedstring...")
+//   - For quick debugging, you can also directly edit default-position.json
+export function createInitialBoard(
+  customInput?: DefaultPosition | Uint8Array | string
+): Uint8Array {
+  // If no input provided, use default position
+  if (!customInput) {
+    return createInitialBoardFromPosition(defaultPosition);
+  }
+  
+  // If input is a string, assume it's base64 encoded board
+  if (typeof customInput === "string") {
+    const board = unpackBoard(customInput);
+    if (board.length !== 121) {
+      throw new Error(`Board must be exactly 121 bytes, got ${board.length}`);
+    }
+    return board;
+  }
+  
+  // If input is a Uint8Array, validate and return it
+  if (customInput instanceof Uint8Array) {
+    if (customInput.length !== 121) {
+      throw new Error(`Board must be exactly 121 bytes, got ${customInput.length}`);
+    }
+    return new Uint8Array(customInput); // Return a copy
+  }
+  
+  // Otherwise, treat as DefaultPosition object
+  return createInitialBoardFromPosition(customInput);
+}
+
+// Helper function to create board from position object
+function createInitialBoardFromPosition(position: DefaultPosition): Uint8Array {
   const board = new Uint8Array(121);
   
-  // Use default position from JSON file
-  const defaultPositionData: DefaultPosition = defaultPosition;
-  
   // Place black units
-  for (const [unitType, coords] of Object.entries(defaultPositionData.black)) {
+  for (const [unitType, coords] of Object.entries(position.black)) {
     const height = unitType === "t1" ? 1 : parseInt(unitType);
     const isTribun = unitType === "t1";
     
@@ -1822,7 +1847,7 @@ export function createInitialBoard(): Uint8Array {
   }
   
   // Place white units
-  for (const [unitType, coords] of Object.entries(defaultPositionData.white)) {
+  for (const [unitType, coords] of Object.entries(position.white)) {
     const height = unitType === "t1" ? 1 : parseInt(unitType);
     const isTribun = unitType === "t1";
     
@@ -1843,6 +1868,87 @@ export function createInitialBoard(): Uint8Array {
 
 // Export default position
 export { defaultPosition };
+
+// Helper function to create board from CID-based unit specifications
+// Useful for debugging/testing specific positions
+// 
+// Example usage:
+//   createInitialBoardFromCids({
+//     "wt1": [0],           // white tribun (p=1, s=0)
+//     "w1": [1, 11, 12],     // white p=1, s=0
+//     "b2": [69, 79],        // black p=2, s=0
+//     "b24": [51],           // black p=2, s=4
+//     "bt4": [28]            // black tribun (p=4, s=0)
+//   })
+//
+// Unit format: (b|w)t?\d\d?
+//   - (b|w): color - "b" (black) or "w" (white)
+//   - t?: optional tribun marker
+//   - \d: primary height (required)
+//   - \d?: secondary height (optional, defaults to 0)
+// Examples:
+//   - "b1" = black, p=1, s=0
+//   - "b12" = black, p=1, s=2
+//   - "bt1" = black tribun, p=1, s=0
+//   - "bt12" = black tribun, p=1, s=2
+//   - "w4" = white, p=4, s=0
+//   - "wt4" = white tribun, p=4, s=0
+//   - "w48" = white, p=4, s=8
+export function createInitialBoardFromCids(
+  units: Record<string, number[]>
+): Uint8Array {
+  const board = new Uint8Array(121);
+  const validHeights: Height[] = [0, 1, 2, 3, 4, 6, 8];
+  
+  // Helper to round height to nearest valid height
+  const roundHeight = (h: number): Height => {
+    if (validHeights.includes(h as Height)) {
+      return h as Height;
+    }
+    // Find closest valid height (round down)
+    const validHeight = validHeights.reduce((prev, curr) => 
+      curr <= h && curr > prev ? curr : prev, 0
+    );
+    if (validHeight === 0 && h > 0) {
+      return 8; // Use max valid height if can't round down
+    }
+    return validHeight as Height;
+  };
+  
+  for (const [unitSpec, cids] of Object.entries(units)) {
+    // Parse unit specification: format is (b|w)t?\d\d?
+    // Examples: "b1", "b12", "bt1", "bt12", "w4", "wt4", "w48"
+    const match = unitSpec.match(/^(b|w)(t?)(\d)(\d?)$/);
+    if (!match) {
+      throw new Error(`Invalid unit specification: ${unitSpec}. Expected format: "b1", "b12", "bt1", "bt12", "w4", "wt4", etc.`);
+    }
+    
+    const color = match[1] === "w" ? 1 : 0; // white=1, black=0
+    const isTribun = match[2] === "t"; // tribun if "t" is present
+    const primaryDigit = match[3]; // first digit (primary height)
+    const secondaryDigit = match[4] || ""; // optional second digit (secondary height)
+    
+    const p = roundHeight(parseInt(primaryDigit, 10));
+    const s = secondaryDigit ? roundHeight(parseInt(secondaryDigit, 10)) : 0;
+    
+    // Place units at specified CIDs
+    for (const cid of cids) {
+      if (cid < 0 || cid > 120) {
+        throw new Error(`Invalid CID: ${cid}. Must be between 0 and 120.`);
+      }
+      
+      const unit: Unit = {
+        color: color as Color,
+        tribun: isTribun,
+        p: p,
+        s: s,
+      };
+      board[cid] = unitToUnitByte(unit);
+    }
+  }
+  
+  return board;
+}
 
 // Export UI backend functions
 export * from './ui-backend';

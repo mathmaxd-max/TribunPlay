@@ -1,3 +1,4 @@
+import defaultPosition from './default-position.json';
 export type Color = 0 | 1;
 export type Height = 0 | 1 | 2 | 3 | 4 | 6 | 8;
 export interface Unit {
@@ -45,6 +46,16 @@ export declare function packBoard(board: Uint8Array): string;
 export declare function unpackBoard(b64: string): Uint8Array;
 export declare function generateLegalActions(state: State): Uint32Array;
 export declare function applyAction(state: State, action: number): State;
-export declare function createInitialBoard(): Uint8Array;
+export interface DefaultPosition {
+    black: {
+        [unitType: string]: number[][];
+    };
+    white: {
+        [unitType: string]: number[][];
+    };
+}
+export declare function createInitialBoard(customInput?: DefaultPosition | Uint8Array | string): Uint8Array;
+export { defaultPosition };
+export declare function createInitialBoardFromCids(units: Record<string, number[]>): Uint8Array;
 export * from './ui-backend';
 //# sourceMappingURL=index.d.ts.map

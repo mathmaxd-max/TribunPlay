@@ -107,9 +107,7 @@ export interface EmptyTileCache {
   // Symmetry preview support: mode determined by 3rd donor
   symmetryModeForThird: (donors: Cid[]) => 'sym3+' | 'sym3-' | 'sym6' | null;
 
-  // Allowed symmetric donation amounts:
-  // sym3: [0,1,2]
-  // sym6: [0,1]
+  // Allowed symmetric donation amounts (includes 0 for cancel), filtered by donor validity.
   allowedSymmetricDonations: (mode: 'sym3+'|'sym3-'|'sym6') => number[];
 
   // Constructors for action words

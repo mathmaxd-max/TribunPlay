@@ -29,6 +29,15 @@ const NEIGHBOR_VECTORS = [
   [0, -1],  // 5: left-down
 ];
 
+const VALID_HEIGHTS = [0, 1, 2, 3, 4, 6, 8];
+
+function isDonationRemainderValid(remaining: number, secondary: number): boolean {
+  if (!VALID_HEIGHTS.includes(remaining)) return false;
+  if (remaining === 0) return true;
+  if (secondary <= 0) return true;
+  return remaining <= 4 && 2 * remaining >= secondary;
+}
+
 /**
  * Get neighbor cid in given direction
  */
@@ -589,6 +598,7 @@ export function buildCache(
     const donorRules = new Map<Cid, DonorRuleCache>();
     const donorDirs = new Map<Cid, number>();
     const donorUnits = new Map<Cid, engine.Unit>();
+    const donorCidsByDir: Array<Cid | null> = new Array(6).fill(null);
 
     // Find adjacent owned tiles
     for (let dir = 0; dir < 6; dir++) {
@@ -599,22 +609,14 @@ export function buildCache(
           donorCids.push(neighborCid);
           donorDirs.set(neighborCid, dir);
           donorUnits.set(neighborCid, unit);
+          donorCidsByDir[dir] = neighborCid;
 
           // Build donor rules
-          const validHeights = [0, 1, 2, 3, 4, 6, 8];
-          const allowedDisplayedHeights: number[] = [0];
-          
-          if (unit.tribun) {
-            // Tribun: [0, H]
-            if (unit.p > 0) {
-              allowedDisplayedHeights.push(unit.p);
-            }
-          } else {
-            // Non-tribun: [0, ...validHeights<=H]
-            for (const h of validHeights) {
-              if (h > 0 && h <= unit.p) {
-                allowedDisplayedHeights.push(h);
-              }
+          const allowedDisplayedHeights: number[] = [];
+          const candidates = unit.tribun ? [0, unit.p] : VALID_HEIGHTS.filter(h => h <= unit.p);
+          for (const h of candidates) {
+            if (isDonationRemainderValid(h, unit.s)) {
+              allowedDisplayedHeights.push(h);
             }
           }
 
@@ -753,12 +755,44 @@ export function buildCache(
       return null;
     };
 
-    const allowedSymmetricDonations = (mode: 'sym3+' | 'sym3-' | 'sym6'): number[] => {
-      if (mode === 'sym6') {
-        return [0, 1];
-      } else {
-        return [0, 1, 2];
+    const getSymmetryUnits = (mode: 'sym3+' | 'sym3-' | 'sym6'): engine.Unit[] | null => {
+      const dirs = mode === 'sym6' ? [0, 1, 2, 3, 4, 5] : mode === 'sym3+' ? [0, 4, 5] : [3, 1, 2];
+      const units: engine.Unit[] = [];
+      for (const dir of dirs) {
+        const cid = donorCidsByDir[dir];
+        if (cid === null || cid === undefined) return null;
+        const unit = donorUnits.get(cid);
+        if (!unit) return null;
+        units.push(unit);
       }
+      return units;
+    };
+
+    const allowedSymmetricDonations = (mode: 'sym3+' | 'sym3-' | 'sym6'): number[] => {
+      const allowed = [0];
+      const units = getSymmetryUnits(mode);
+      if (!units || units.length === 0) return allowed;
+
+      const firstUnit = units[0];
+      const unitsEqual = units.every(
+        (unit) =>
+          !unit.tribun &&
+          unit.color === firstUnit.color &&
+          unit.p === firstUnit.p &&
+          unit.s === firstUnit.s
+      );
+      if (!unitsEqual) return allowed;
+
+      const maxDonate = mode === 'sym6' ? 1 : 2;
+      for (let donate = 1; donate <= maxDonate; donate++) {
+        if (donate > firstUnit.p) continue;
+        const remaining = firstUnit.p - donate;
+        const newPrimary = donate * units.length;
+        if (!VALID_HEIGHTS.includes(newPrimary)) continue;
+        if (!isDonationRemainderValid(remaining, firstUnit.s)) continue;
+        allowed.push(donate);
+      }
+      return allowed;
     };
 
     const constructCombineAction = (aCid: Cid, bCid: Cid, donateA: number, donateB: number): number => {

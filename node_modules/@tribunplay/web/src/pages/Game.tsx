@@ -1413,6 +1413,13 @@ export default function Game() {
               color: unit.color,
               tribun: unit.tribun,
             });
+          } else if (unit.s > 0) {
+            overlay.units.set(cid, {
+              p: 0,
+              s: unit.s,
+              color: unit.color,
+              tribun: false,
+            });
           } else {
             overlay.empty.add(cid);
           }
@@ -1811,9 +1818,11 @@ export default function Game() {
             const textColor = unit.tribun
               ? (unit.color === 0 ? '#AE0000' : '#00B4FF')
               : (unit.color === 0 ? '#000' : '#fff');
+            const textColorSecondary = unit.color === 0 ? '#fff' : '#000';
             const strokeColor = unit.tribun
             ? (unit.color === 0 ? '#000' : '#fff')
             : (unit.color === 0 ? '#fff' : '#000');
+            const strokeColorSecondary = unit.color === 0 ? '#000' : '#fff';
             const mainFontSize = unit.tribun ? 65 : 55;
             const splitFontSize = unit.tribun ? 50 : 45;
 
@@ -1847,9 +1856,9 @@ export default function Game() {
                     transformOrigin: 'center',
                     fontSize: `${splitFontSize}px`,
                     fontWeight: 'bold',
-                    color: strokeColor,
-                    WebkitTextStroke: `1px ${textColor}`,
-                    textStroke: `1px ${textColor}`,
+                    color: textColorSecondary,
+                    WebkitTextStroke: `1px ${strokeColorSecondary}`,
+                    textStroke: `1px ${strokeColorSecondary}`,
                   }}>
                     {unit.s}
                   </div>
