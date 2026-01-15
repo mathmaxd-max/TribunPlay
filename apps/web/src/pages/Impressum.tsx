@@ -17,75 +17,42 @@ export default function Impressum() {
           </p>
 
           <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Verantwortlich für den Inhalt nach § 55 Abs. 2 RStV:</h2>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Angaben gemäß § 5 TMG</h2>
             <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              [Name / Firmenname]<br />
-              [Straße Hausnummer]<br />
-              [Postleitzahl Ort]<br />
+              Maximilian Leon Deffland<br />
+              Gutenbergstraße 8A<br />
+              37075 Göttingen<br />
               Deutschland
             </p>
           </section>
 
           <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Kontakt:</h2>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Kontakt</h2>
             <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              Telefon: [Telefonnummer]<br />
-              E-Mail: [E-Mail-Adresse]
+              Telefon: +49 176 578 37 110<br />
+              E-Mail: maximilian-deffland@web.de
             </p>
           </section>
 
           <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Registereintrag:</h2>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Vertreten durch</h2>
             <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              Eintragung im Handelsregister.<br />
-              Registergericht: [Amtsgericht Ort]<br />
-              Registernummer: [Handelsregisternummer]
+              Maximilian Leon Deffland
             </p>
           </section>
 
           <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Umsatzsteuer-ID:</h2>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Verantwortlich für den Inhalt nach § 55 Abs. 2 RStV</h2>
             <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              Umsatzsteuer-Identifikationsnummer gemäß § 27 a Umsatzsteuergesetz:<br />
-              [USt-ID]
+              Maximilian Leon Deffland<br />
+              Gutenbergstraße 8A<br />
+              37075 Göttingen<br />
+              Deutschland
             </p>
           </section>
 
           <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Wirtschafts-ID:</h2>
-            <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              Wirtschafts-Identifikationsnummer gemäß § 139c Abgabenordnung:<br />
-              [Wirtschafts-ID]
-            </p>
-          </section>
-
-          <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Aufsichtsbehörde:</h2>
-            <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              [Name der Aufsichtsbehörde, falls zutreffend]
-            </p>
-          </section>
-
-          <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Berufsbezeichnung und berufsrechtliche Regelungen:</h2>
-            <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              [Berufsbezeichnung, falls zutreffend]<br />
-              [Zuständige Kammer, falls zutreffend]<br />
-              [Verliehen in: Land, falls zutreffend]
-            </p>
-          </section>
-
-          <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Redaktionell verantwortlich:</h2>
-            <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              [Name]<br />
-              [Adresse]<br />
-              [Postleitzahl Ort]
-            </p>
-          </section>
-
-          <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>EU-Streitschlichtung:</h2>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Streitschlichtung</h2>
             <p style={{ marginBottom: '10px' }}>
               Die Europäische Kommission stellt eine Plattform zur Online-Streitbeilegung (OS) bereit: 
               <a 
@@ -96,15 +63,39 @@ export default function Impressum() {
               >
                 https://ec.europa.eu/consumers/odr/
               </a>
-              <br />
-              Unsere E-Mail-Adresse finden Sie oben im Impressum.
+            </p>
+            <p style={{ marginBottom: '10px' }}>
+              Wir sind nicht bereit oder verpflichtet, an Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle teilzunehmen.
             </p>
           </section>
 
           <section style={{ marginBottom: '30px' }}>
-            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Verbraucherstreitbeilegung / Universalschlichtungsstelle:</h2>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Haftung für Inhalte</h2>
             <p style={{ marginBottom: '10px' }}>
-              Wir sind nicht bereit oder verpflichtet, an Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle teilzunehmen.
+              Als Diensteanbieter sind wir gemäß § 7 Abs.1 TMG für eigene Inhalte auf diesen Seiten nach den allgemeinen Gesetzen verantwortlich. Nach §§ 8 bis 10 TMG sind wir als Diensteanbieter jedoch nicht verpflichtet, übermittelte oder gespeicherte fremde Informationen zu überwachen oder nach Umständen zu forschen, die auf eine rechtswidrige Tätigkeit hinweisen.
+            </p>
+            <p style={{ marginBottom: '10px' }}>
+              Verpflichtungen zur Entfernung oder Sperrung der Nutzung von Informationen nach den allgemeinen Gesetzen bleiben hiervon unberührt. Eine diesbezügliche Haftung ist jedoch erst ab dem Zeitpunkt der Kenntnis einer konkreten Rechtsverletzung möglich. Bei Bekanntwerden von entsprechenden Rechtsverletzungen werden wir diese Inhalte umgehend entfernen.
+            </p>
+          </section>
+
+          <section style={{ marginBottom: '30px' }}>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Haftung für Links</h2>
+            <p style={{ marginBottom: '10px' }}>
+              Unser Angebot enthält Links zu externen Websites Dritter, auf deren Inhalte wir keinen Einfluss haben. Deshalb können wir für diese fremden Inhalte auch keine Gewähr übernehmen. Für die Inhalte der verlinkten Seiten ist stets der jeweilige Anbieter oder Betreiber der Seiten verantwortlich. Die verlinkten Seiten wurden zum Zeitpunkt der Verlinkung auf mögliche Rechtsverstöße überprüft. Rechtswidrige Inhalte waren zum Zeitpunkt der Verlinkung nicht erkennbar.
+            </p>
+            <p style={{ marginBottom: '10px' }}>
+              Eine permanente inhaltliche Kontrolle der verlinkten Seiten ist jedoch ohne konkrete Anhaltspunkte einer Rechtsverletzung nicht zumutbar. Bei Bekanntwerden von Rechtsverstößen werden wir derartige Links umgehend entfernen.
+            </p>
+          </section>
+
+          <section style={{ marginBottom: '30px' }}>
+            <h2 style={{ marginBottom: '15px', fontSize: '18px', color: '#5f564a' }}>Urheberrecht</h2>
+            <p style={{ marginBottom: '10px' }}>
+              Die durch die Seitenbetreiber erstellten Inhalte und Werke auf diesen Seiten unterliegen dem deutschen Urheberrecht. Die Vervielfältigung, Bearbeitung, Verbreitung und jede Art der Verwertung außerhalb der Grenzen des Urheberrechtes bedürfen der schriftlichen Zustimmung des jeweiligen Autors bzw. Erstellers. Downloads und Kopien dieser Seite sind nur für den privaten, nicht kommerziellen Gebrauch gestattet.
+            </p>
+            <p style={{ marginBottom: '10px' }}>
+              Soweit die Inhalte auf dieser Seite nicht vom Betreiber erstellt wurden, werden die Urheberrechte Dritter beachtet. Insbesondere werden Inhalte Dritter als solche gekennzeichnet. Sollten Sie trotzdem auf eine Urheberrechtsverletzung aufmerksam werden, bitten wir um einen entsprechenden Hinweis. Bei Bekanntwerden von Rechtsverstößen werden wir derartige Inhalte umgehend entfernen.
             </p>
           </section>
         </div>

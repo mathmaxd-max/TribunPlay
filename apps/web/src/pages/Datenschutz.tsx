@@ -22,11 +22,12 @@ export default function Datenschutz() {
               Verantwortlich für die Datenverarbeitung auf dieser Website ist:
             </p>
             <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              [Firmenname / Name]<br />
-              [Adresse]<br />
-              [Postleitzahl Ort]<br />
-              E-Mail: [E-Mail-Adresse]<br />
-              Telefon: [Telefonnummer]
+              Maximilian Leon Deffland<br />
+              Gutenbergstraße 8A<br />
+              37075 Göttingen<br />
+              Deutschland<br />
+              E-Mail: maximilian-deffland@web.de<br />
+              Telefon: +49 176 578 37 110
             </p>
           </section>
 
@@ -90,7 +91,8 @@ export default function Datenschutz() {
               Bei Fragen zur Datenverarbeitung können Sie sich jederzeit an uns wenden:
             </p>
             <p style={{ marginBottom: '10px', paddingLeft: '20px' }}>
-              E-Mail: [E-Mail-Adresse]
+              E-Mail: maximilian-deffland@web.de<br />
+              Telefon: +49 176 578 37 110
             </p>
           </section>
         </div>
