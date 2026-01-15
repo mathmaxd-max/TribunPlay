@@ -280,17 +280,21 @@ export class GameRoom implements DurableObject {
 		}
 
 		await this.scheduleNextAlarm();
+
+		this.actionLog = actions;
 		
 		// Update legal set and send Bloom filter
 		if (this.gameState) {
 			const legalActions = engine.generateLegalActions(this.gameState);
-			this.legalSet = new Set(Array.from(legalActions));
-			
-			// Send Bloom filter to all connections
-			this.broadcastBloomFilter(Array.from(legalActions));
+			const legalList = Array.from(legalActions);
+			this.legalSet = new Set(legalList);
+
+			const endedForNoMoves = await this.maybeEndOnNoMoves(gameId, legalList);
+			if (!endedForNoMoves) {
+				// Send Bloom filter to all connections
+				this.broadcastBloomFilter(legalList);
+			}
 		}
-		
-		this.actionLog = actions;
 	}
 
 	private async sendSync(ws: WebSocket, role: "black" | "white" | "spectator"): Promise<void> {
@@ -455,12 +459,16 @@ export class GameRoom implements DurableObject {
 		// Update local state
 		this.gameState = newState;
 		const legalActions = engine.generateLegalActions(this.gameState);
-		this.legalSet = new Set(Array.from(legalActions));
+		const legalList = Array.from(legalActions);
+		this.legalSet = new Set(legalList);
 		this.actionLog.push(actionWord);
 		
 		// Broadcast action and Bloom filter
 		this.broadcastAction(actionWord);
-		this.broadcastBloomFilter(Array.from(legalActions));
+		const endedForNoMoves = await this.maybeEndOnNoMoves(gameId, legalList);
+		if (!endedForNoMoves) {
+			this.broadcastBloomFilter(legalList);
+		}
 		
 		// Broadcast clock update if turn changed
 		if (previousState.turn !== newState.turn) {
@@ -590,6 +598,70 @@ export class GameRoom implements DurableObject {
 				ws.send(message);
 			}
 		}
+	}
+
+	private hasPlayableActions(legalActions: number[]): boolean {
+		for (const action of legalActions) {
+			const op = engine.opcode(action);
+			if (op <= 9) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private async maybeEndOnNoMoves(gameId: string, legalActions: number[]): Promise<boolean> {
+		if (!this.gameState || this.gameState.status === "ended") {
+			return false;
+		}
+		if (this.hasPlayableActions(legalActions)) {
+			return false;
+		}
+		const loserColor = this.gameState.turn;
+		await this.applyNoLegalMovesEnd(loserColor, gameId);
+		return true;
+	}
+
+	private async applyNoLegalMovesEnd(loserColor: engine.Color, gameId: string): Promise<void> {
+		if (!this.gameState || this.gameState.status === "ended") return;
+		
+		const endAction = engine.encodeEnd(1, loserColor);
+		const endedState = engine.applyAction(this.gameState, endAction);
+		
+		await this.env.DB.prepare(
+			`INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
+			 VALUES (?, ?, ?, ?, ?)`
+		).bind(
+			gameId,
+			endedState.ply - 1,
+			endAction,
+			null,
+			new Date().toISOString()
+		).run();
+		
+		await this.env.DB.prepare(
+			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+		).bind(
+			endedState.ply,
+			endedState.turn,
+			endedState.drawOfferBy,
+			this.clockBlackMs,
+			this.clockWhiteMs,
+			"ended",
+			endedState.winner ?? null,
+			11,
+			1,
+			gameId
+		).run();
+		
+		this.gameState = endedState;
+		const legalActions = engine.generateLegalActions(endedState);
+		this.legalSet = new Set(Array.from(legalActions));
+		this.actionLog.push(endAction);
+		
+		this.broadcastAction(endAction);
+		this.broadcastBloomFilter(Array.from(legalActions));
 	}
 
 	private async applyTimeoutEnd(loserColor: engine.Color, gameId: string): Promise<void> {

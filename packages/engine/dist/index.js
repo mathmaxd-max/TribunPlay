@@ -466,40 +466,23 @@ function getReachableTiles(fromCid, height, color, isTribun, board, forAttack = 
     }
     else if (height === 6) {
         if (forAttack) {
-            // Height 6 attack: expand t1 adjacency outward until the nearest units are found.
-            const visited = new Set();
-            const queue = [];
-            let foundDist = null;
-            for (let dir = 0; dir < 6; dir++) {
-                const neighborCid = getNeighborCid(fromCid, dir);
-                if (neighborCid !== null) {
-                    queue.push({ cid: neighborCid, dist: 1 });
-                }
-            }
-            while (queue.length > 0) {
-                const { cid: currentCid, dist } = queue.shift();
-                if (visited.has(currentCid))
-                    continue;
-                visited.add(currentCid);
-                if (foundDist !== null && dist > foundDist) {
-                    break;
-                }
-                const unit = unitByteToUnit(board[currentCid]);
-                if (unit !== null) {
-                    if (foundDist === null) {
-                        foundDist = dist;
-                    }
-                    if (dist === foundDist) {
-                        reachable.push(currentCid);
-                    }
-                    continue;
-                }
-                if (foundDist === null) {
-                    for (let dir = 0; dir < 6; dir++) {
-                        const neighborCid = getNeighborCid(currentCid, dir);
-                        if (neighborCid !== null && !visited.has(neighborCid)) {
-                            queue.push({ cid: neighborCid, dist: dist + 1 });
+            // Height 6 attack: ray along adjacency directions, first unit blocks.
+            for (const [vx, vy] of NEIGHBOR_VECTORS) {
+                let step = 1;
+                while (true) {
+                    try {
+                        const nx = x + vx * step;
+                        const ny = y + vy * step;
+                        const cid = encodeCoord(nx, ny);
+                        const unit = unitByteToUnit(board[cid]);
+                        if (unit !== null) {
+                            reachable.push(cid);
+                            break;
                         }
+                        step++;
+                    }
+                    catch {
+                        break;
                     }
                 }
             }

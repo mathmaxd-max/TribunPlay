@@ -1054,6 +1054,7 @@ export default function Game() {
         }
         
         case 'empty': {
+          const delta = -d;
           if (cid === prevState.centerCid) {
             return { ...prevState, donors: new Map(), optionIndex: 0, symmetry: undefined };
           }
@@ -1099,7 +1100,7 @@ export default function Game() {
           const validValues = donorRule.allowedDisplayedHeights;
           const currentDisp = prevState.donors.get(cid) ?? donorRule.actualPrimary;
           const currentIndex = validValues.indexOf(currentDisp);
-          const nextIndex = cycleIndex(currentIndex >= 0 ? currentIndex : 0, d, validValues.length);
+          const nextIndex = cycleIndex(currentIndex >= 0 ? currentIndex : 0, delta, validValues.length);
           const newDisp = validValues[nextIndex];
           const currentDonate = donorRule.actualPrimary - currentDisp;
           const nextDonate = donorRule.actualPrimary - newDisp;
