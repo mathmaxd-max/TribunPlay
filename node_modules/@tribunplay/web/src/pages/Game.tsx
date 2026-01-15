@@ -246,6 +246,13 @@ export default function Game() {
   const [error, setError] = useState<string | null>(null);
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
+  const [boardViewportHeight, setBoardViewportHeight] = useState(0);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const autoFlipRef = useRef(true);
+  const [isWideLayout, setIsWideLayout] = useState(
+    typeof window !== 'undefined' ? window.innerWidth >= 980 : false,
+  );
+  const [isReady, setIsReady] = useState(false);
   
   // Clock state
   const [clocksMs, setClocksMs] = useState<ColorClock>({ black: 300000, white: 300000 });
@@ -467,6 +474,32 @@ export default function Game() {
     }
     return baseStates;
   }, [gameState, cache, role]);
+
+  useEffect(() => {
+    setIsReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const updateLayout = () => {
+      setIsWideLayout(window.innerWidth >= 980);
+    };
+    updateLayout();
+    window.addEventListener('resize', updateLayout);
+    return () => window.removeEventListener('resize', updateLayout);
+  }, []);
+
+  useEffect(() => {
+    if (!autoFlipRef.current) return;
+    if (role === 'black') {
+      setIsFlipped(true);
+      autoFlipRef.current = false;
+    } else if (role === 'white') {
+      setIsFlipped(false);
+      autoFlipRef.current = false;
+    }
+  }, [role]);
+
   // Keep refs in sync with state
   useEffect(() => {
     clocksRef.current = clocksMs;
@@ -589,18 +622,19 @@ export default function Game() {
     if (!boardViewportRef.current) return;
 
     const element = boardViewportRef.current;
-    const updateWidth = () => {
+    const updateSize = () => {
       setBoardViewportWidth(element.clientWidth);
+      setBoardViewportHeight(element.clientHeight);
     };
 
-    updateWidth();
+    updateSize();
 
     if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateWidth);
-      return () => window.removeEventListener('resize', updateWidth);
+      window.addEventListener('resize', updateSize);
+      return () => window.removeEventListener('resize', updateSize);
     }
 
-    const observer = new ResizeObserver(() => updateWidth());
+    const observer = new ResizeObserver(() => updateSize());
     observer.observe(element);
 
     return () => observer.disconnect();
@@ -1564,12 +1598,14 @@ export default function Game() {
     const innerOffsetY = (outerHexHeight - innerHexHeight) / 2;
 
     // Collect valid tiles
-    const validTiles: Array<{ cid: number; x: number; y: number }> = [];
+    const validTiles: Array<{ cid: number; x: number; y: number; displayX: number; displayY: number }> = [];
 
     for (let cid = 0; cid < 121; cid++) {
       if (engine.isValidTile(cid)) {
         const { x, y } = engine.decodeCoord(cid);
-        validTiles.push({ cid, x, y });
+        const displayX = isFlipped ? -x : x;
+        const displayY = isFlipped ? -y : y;
+        validTiles.push({ cid, x, y, displayX, displayY });
       }
     }
 
@@ -1579,12 +1615,12 @@ export default function Game() {
     let minPixelX = Infinity, maxPixelX = -Infinity;
     let minPixelY = Infinity, maxPixelY = -Infinity;
 
-    validTiles.forEach(({ x, y }) => {
+    validTiles.forEach(({ displayX, displayY }) => {
       // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
       // Apply spacing multiplier to add gaps between hexagons
-      const z = y - x;
+      const z = displayY - displayX;
       const centerX = (3 * z / 2) * centerSize;
-      const centerY = (x + y) * d; // d = sqrt(3)/2 * size (already scaled)
+      const centerY = (displayX + displayY) * d; // d = sqrt(3)/2 * size (already scaled)
       // Calculate actual left/top position of hexagon (outer div with border)
       const leftX = centerX - outerHexWidth / 2;
       const topY = centerY - outerHexHeight / 2;
@@ -1715,7 +1751,7 @@ export default function Game() {
     const splitOffsetX = 12;
     const splitOffsetY = 15;
 
-    const tiles: JSX.Element[] = validTiles.map(({ cid, x, y }) => {
+    const tiles: JSX.Element[] = validTiles.map(({ cid, x, y, displayX, displayY }) => {
       const overlayUnit = previewOverlay?.units.get(cid);
       const unit: { p: number; s: number; color: engine.Color; tribun: boolean } | null = overlayUnit
         ? overlayUnit
@@ -1726,9 +1762,9 @@ export default function Game() {
       // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
       // Position of (0,0) is at (0,0)
       // Apply spacing multiplier to add gaps between hexagons
-      const z = y - x;
+      const z = displayY - displayX;
       const centerX = (3 * z / 2) * centerSize;
-      const centerY = (x + y) * d; // d = sqrt(3)/2 * size (already scaled)
+      const centerY = (displayX + displayY) * d; // d = sqrt(3)/2 * size (already scaled)
       // Calculate actual left/top position relative to container
       const hexX = centerX - outerHexWidth / 2 - minPixelX;
       const hexY = centerY - outerHexHeight / 2 - minPixelY;
@@ -1841,6 +1877,7 @@ export default function Game() {
                       transform: `${centerTransform} translate(${primaryOffset.x}px, ${-primaryOffset.y}px)`,
                       transformOrigin: 'center',
                       fontSize: `${splitFontSize}px`,
+                      fontFamily: '"Segoe UI", "Arial", sans-serif',
                       fontWeight: 'bold',
                       color: textColor,
                       WebkitTextStroke: `1px ${strokeColor}`,
@@ -1856,6 +1893,7 @@ export default function Game() {
                     transform: `${centerTransform} translate(${secondaryOffset.x}px, ${-secondaryOffset.y}px)`,
                     transformOrigin: 'center',
                     fontSize: `${splitFontSize}px`,
+                    fontFamily: '"Segoe UI", "Arial", sans-serif',
                     fontWeight: 'bold',
                     color: textColorSecondary,
                     WebkitTextStroke: `1px ${strokeColorSecondary}`,
@@ -1870,6 +1908,7 @@ export default function Game() {
             return (
               <div style={{
                 fontSize: `${mainFontSize}px`,
+                fontFamily: '"Segoe UI", "Arial", sans-serif',
                 fontWeight: 'bold',
                 color: textColor,
                 WebkitTextStroke: `1px ${strokeColor}`,
@@ -1901,8 +1940,8 @@ export default function Game() {
     const boardHeight = maxPixelY - minPixelY + safetyMargin;
 
     const availableWidth = boardViewportWidth || boardWidth;
-    const scale = Math.min(1, availableWidth / boardWidth);
-    const scaledBoardHeight = boardHeight * scale;
+    const availableHeight = boardViewportHeight || boardHeight;
+    const scale = Math.min(1, availableWidth / boardWidth, availableHeight / boardHeight);
 
     return (
       <div
@@ -1910,20 +1949,19 @@ export default function Game() {
         style={{
           position: 'relative',
           width: '100%',
-          height: `${scaledBoardHeight}px`,
+          height: '100%',
+          minHeight: 0,
           overflow: 'hidden',
-          display: 'flex',
-          justifyContent: 'center',
         }}
       >
         <div style={{
           position: 'absolute',
-          top: 0,
           left: '50%',
+          top: '50%',
           width: `${boardWidth}px`,
           height: `${boardHeight}px`,
-          transform: `translateX(-50%) scale(${scale})`,
-          transformOrigin: 'top center',
+          transform: `translate(-50%, -50%) scale(${scale})`,
+          transformOrigin: 'center',
         }}>
           {tiles}
         </div>
@@ -1931,266 +1969,498 @@ export default function Game() {
     );
   };
 
-  return (
-    <div style={{ maxWidth: '800px', margin: '20px auto', padding: '20px' }}>
-      <div style={{ marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1>Game: {code}</h1>
-        <button onClick={() => navigate('/')} style={{ padding: '8px 16px' }}>
-          Home
-        </button>
-      </div>
+  const pendingAction = getPendingAction();
+  const pendingActionIsLegal = pendingAction !== null && cache?.legalSet.has(pendingAction >>> 0);
+  const canSubmit =
+    pendingAction !== null &&
+    pendingActionIsLegal &&
+    role !== 'spectator' &&
+    gameState?.status !== 'ended' &&
+    connectionState === 'connected';
 
-      <div style={{
-        background: 'white',
-        padding: '20px',
-        borderRadius: '8px',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-        marginBottom: '20px',
-      }}>
-        <div style={{ marginBottom: '10px' }}>
-          <strong>Connection:</strong> {connectionState}
+  const playerColor = role === 'black' ? 0 : role === 'white' ? 1 : null;
+  const drawOfferBy = gameState?.drawOfferBy ?? null;
+  const hasDrawOffer = drawOfferBy !== null;
+  const isOfferer = hasDrawOffer && playerColor !== null && drawOfferBy === playerColor;
+  const isReceiver = hasDrawOffer && playerColor !== null && drawOfferBy !== playerColor;
+  const drawButtonLabel = !hasDrawOffer ? 'Offer Draw' : isOfferer ? 'Withdraw Offer' : 'Decline Draw';
+  const surrenderButtonLabel = isReceiver ? 'Accept Draw' : 'Surrender';
+
+  const drawAction = gameState
+    ? !hasDrawOffer
+      ? engine.encodeDraw(0, gameState.turn)
+      : isOfferer
+      ? engine.encodeDraw(1, gameState.turn)
+      : null
+    : null;
+
+  const surrenderAction = gameState
+    ? isReceiver
+      ? engine.encodeDraw(2, gameState.turn)
+      : engine.encodeEnd(0, gameState.turn)
+    : null;
+
+  const canSendAction = (action: number | null) => {
+    if (!action || !cache || !gameState) return false;
+    if (gameState.status === 'ended') return false;
+    if (role === 'spectator') return false;
+    if (connectionState !== 'connected') return false;
+    return cache.legalSet.has(action >>> 0);
+  };
+
+  const renderClockBox = (color: 'black' | 'white') => {
+    const isActive =
+      gameState?.status !== 'ended' && gameState?.turn === (color === 'black' ? 0 : 1);
+    const showBuffer = Boolean(isActive && bufferMsRemaining[color] > 0);
+    const clockValue = formatTime(clocksMs[color]);
+    const bufferValue = formatTime(bufferMsRemaining[color]);
+    const tone = color === 'black' ? '#1c1b19' : '#f4efe6';
+    const surface = color === 'black' ? '#f6eddf' : '#2b2620';
+
+    return (
+      <div
+        style={{
+          position: 'relative',
+          height: '72px',
+          borderRadius: '12px',
+          border: `2px solid ${isActive ? '#b9833b' : '#3b3327'}`,
+          background: surface,
+          color: tone,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontFamily: '"JetBrains Mono", "Cascadia Mono", monospace',
+          letterSpacing: '1px',
+          boxShadow: '0 8px 16px rgba(20, 15, 10, 0.12)',
+        }}
+      >
+        <div
+          style={{
+            position: 'absolute',
+            top: '6px',
+            right: '8px',
+            fontSize: '10px',
+            fontWeight: 700,
+            letterSpacing: '1px',
+            textTransform: 'uppercase',
+            padding: '2px 6px',
+            borderRadius: '999px',
+            background: color === 'black' ? '#e8ddcc' : '#17130f',
+            color: color === 'black' ? '#2a241c' : '#f3e8d6',
+          }}
+        >
+          {color === 'black' ? 'Black' : 'White'}
         </div>
-        <div style={{ marginBottom: '10px' }}>
-          <strong>Role:</strong> {role || '...'}
-        </div>
-        {gameState && (
+        {showBuffer ? (
           <>
-            <div style={{ marginBottom: '10px' }}>
-              <strong>Turn:</strong> {gameState.turn === 0 ? 'Black' : 'White'}
+            <div
+              style={{
+                position: 'absolute',
+                top: '8px',
+                left: '10px',
+                fontSize: '12px',
+                fontWeight: 700,
+                color: color === 'black' ? '#2f6b3f' : '#9fd8b6',
+              }}
+            >
+              {bufferValue}
             </div>
-            <div style={{ marginBottom: '10px' }}>
-              <strong>Ply:</strong> {gameState.ply}
+            <div
+              style={{
+                position: 'absolute',
+                right: '10px',
+                bottom: '8px',
+                fontSize: '18px',
+                fontWeight: 700,
+              }}
+            >
+              {clockValue}
             </div>
-            <div style={{ marginBottom: '10px' }}>
-              <strong>Validator Ply:</strong> {validator?.getPly() ?? 'none'}
-            </div>
-            <div style={{ marginBottom: '10px' }}>
-              <strong>UI State:</strong> {uiState.type}
-              {uiState.type === 'enemy' && ` (target: ${uiState.targetCid}, option: ${uiState.optionIndex})`}
-              {uiState.type === 'empty' && ` (center: ${uiState.centerCid}, donors: ${uiState.donors.size})`}
-              {uiState.type === 'own_primary' && ` (origin: ${uiState.originCid}, target: ${uiState.targetCid ?? 'none'}, option: ${uiState.optionIndex})`}
-              {uiState.type === 'own_secondary' && ` (origin: ${uiState.originCid}, allocations: [${uiState.allocations.join(',')}])`}
-            </div>
-            {gameEndInfo && (
-              <div style={{
-                marginBottom: '10px',
-                padding: '8px 12px',
-                borderRadius: '6px',
-                background: '#fff3e0',
-                border: '1px solid #f57c00',
-                color: '#6d4c41',
-                fontWeight: 600,
-              }}>
-                Game ended: {gameEndInfo.reason} - Result: {gameEndInfo.winnerLabel}
-              </div>
-            )}
-            {(() => {
-              const pendingAction = getPendingAction();
-              const locallyLegal = pendingAction !== null && cache?.legalSet.has(pendingAction >>> 0);
-              const canSubmit = pendingAction !== null && locallyLegal && role !== 'spectator' && gameState.status !== 'ended';
-              
-              if (canSubmit) {
-                return (
-                  <button
-                    onClick={() => submitCurrentAction()}
-                    style={{
-                      padding: '8px 16px',
-                      background: '#4CAF50',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '14px',
-                      fontWeight: 'bold',
-                    }}
-                  >
-                    Submit Action
-                  </button>
-                );
-              }
-              return null;
-            })()}
           </>
+        ) : (
+          <div style={{ fontSize: '22px', fontWeight: 700 }}>{clockValue}</div>
         )}
+      </div>
+    );
+  };
+
+  const contentPadding = isWideLayout ? '16px 20px 20px' : '12px 10px 14px';
+  const boardCardPadding = isWideLayout ? '12px' : '8px';
+  const navPadding = isWideLayout ? '12px 20px' : '10px 12px';
+  const errorMargin = isWideLayout ? '12px 20px 0' : '10px 10px 0';
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        maxHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        background:
+          'radial-gradient(circle at top, rgba(255, 250, 240, 0.98), rgba(234, 219, 194, 0.98)), linear-gradient(135deg, #f7f0e5 0%, #e7d7ba 45%, #d9c29c 100%)',
+        color: '#1d1a14',
+        fontFamily: '"Space Grotesk", "Trebuchet MS", sans-serif',
+        overflow: 'hidden',
+        opacity: isReady ? 1 : 0,
+        transform: isReady ? 'translateY(0)' : 'translateY(12px)',
+        transition: 'opacity 0.4s ease, transform 0.4s ease',
+      }}
+    >
+      <style>
+        {`
+          @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@500&display=swap');
+        `}
+      </style>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: navPadding,
+          gap: '16px',
+          background: 'rgba(26, 21, 15, 0.92)',
+          color: '#f8f1e7',
+          borderBottom: '2px solid #3a2f22',
+          flexWrap: 'wrap',
+        }}
+      >
+        <div style={{ minWidth: '140px' }}>
+          <div
+            style={{
+              fontSize: '10px',
+              letterSpacing: '2px',
+              textTransform: 'uppercase',
+              color: '#ccb896',
+              fontWeight: 700,
+            }}
+          >
+            Game Code
+          </div>
+          <div style={{ fontSize: '20px', fontWeight: 700 }}>{code}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '6px 12px',
+              borderRadius: '999px',
+              background: '#2d2418',
+              fontSize: '12px',
+              fontWeight: 600,
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+            }}
+          >
+            <span
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '999px',
+                background:
+                  connectionState === 'connected'
+                    ? '#58d68d'
+                    : connectionState === 'connecting'
+                    ? '#f5c26b'
+                    : '#e57373',
+              }}
+            />
+            {connectionState}
+          </div>
+          <div
+            style={{
+              padding: '6px 12px',
+              borderRadius: '999px',
+              background: '#2d2418',
+              fontSize: '12px',
+              fontWeight: 600,
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+            }}
+          >
+            {role ?? '...'}
+          </div>
+          <button
+            onClick={() => navigate('/')}
+            style={{
+              padding: '8px 14px',
+              borderRadius: '999px',
+              background: '#f2d9b2',
+              border: '2px solid #6f5a38',
+              color: '#2a2218',
+              fontWeight: 700,
+              letterSpacing: '1px',
+              textTransform: 'uppercase',
+              cursor: 'pointer',
+            }}
+          >
+            Home
+          </button>
+        </div>
       </div>
 
       {error && (
-        <div style={{
-          padding: '10px',
-          background: '#f8d7da',
-          color: '#721c24',
-          borderRadius: '4px',
-          marginBottom: '20px',
-        }}>
+        <div
+          style={{
+            margin: errorMargin,
+            padding: '10px 14px',
+            borderRadius: '10px',
+            background: '#f7d7d5',
+            color: '#5c1c16',
+            fontWeight: 600,
+          }}
+        >
           {error}
         </div>
       )}
 
-      <div style={{
-        background: 'white',
-        padding: '20px',
-        borderRadius: '8px',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-      }}>
-        <h2 style={{ marginBottom: '15px' }}>Board</h2>
-        {renderBoard()}
-      </div>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'grid',
+          gridTemplateColumns: isWideLayout ? '220px minmax(0, 1fr) 220px' : 'minmax(0, 1fr)',
+          gap: '16px',
+          padding: contentPadding,
+        }}
+      >
+        {isWideLayout && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+              minHeight: 0,
+            }}
+          >
+            <button
+              onClick={() => submitCurrentAction()}
+              disabled={!canSubmit}
+              style={{
+                padding: '12px',
+                borderRadius: '12px',
+                border: '2px solid #183628',
+                background: canSubmit ? '#2f6b3f' : '#8ea593',
+                color: '#f7f3eb',
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                cursor: canSubmit ? 'pointer' : 'not-allowed',
+                boxShadow: canSubmit ? '0 10px 18px rgba(24, 54, 40, 0.22)' : 'none',
+              }}
+            >
+              Submit Move
+            </button>
+            <button
+              onClick={() => surrenderAction && sendAction(surrenderAction)}
+              disabled={!canSendAction(surrenderAction)}
+              style={{
+                padding: '12px',
+                borderRadius: '12px',
+                border: '2px solid #5b2a2a',
+                background: canSendAction(surrenderAction) ? '#8b3b3b' : '#b9a2a2',
+                color: '#f8f1e7',
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                cursor: canSendAction(surrenderAction) ? 'pointer' : 'not-allowed',
+              }}
+            >
+              {surrenderButtonLabel}
+            </button>
+            <button
+              onClick={() => {
+                autoFlipRef.current = false;
+                setIsFlipped((prev) => !prev);
+              }}
+              style={{
+                padding: '12px',
+                borderRadius: '12px',
+                border: '2px solid #3c3327',
+                background: '#f2dfc3',
+                color: '#2a2218',
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                cursor: 'pointer',
+              }}
+            >
+              Flip Board
+            </button>
+            <div style={{ marginTop: 'auto' }}>{renderClockBox('black')}</div>
+          </div>
+        )}
 
-      {/* Clock Display */}
-      {gameState && (
-        <div style={{
-          background: 'white',
-          padding: '20px',
-          borderRadius: '8px',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-          marginTop: '20px',
-        }}>
-          <h2 style={{ marginBottom: '15px' }}>Clock</h2>
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-around',
-            gap: '20px',
-            flexWrap: 'wrap',
-          }}>
-            {/* Black Clock */}
-            <div style={{
-              flex: '1',
-              minWidth: '200px',
-              padding: '15px',
-              borderRadius: '8px',
-              background: gameState.status !== 'ended' && gameState.turn === 0 ? '#e3f2fd' : '#f5f5f5',
-              border: gameState.status !== 'ended' && gameState.turn === 0 ? '2px solid #2196F3' : '2px solid #ddd',
-              textAlign: 'center',
-            }}>
-              <div style={{
-                fontSize: '14px',
-                fontWeight: 'bold',
-                marginBottom: '8px',
-                color: '#333',
-              }}>
-                Black
-              </div>
-              <div style={{
-                fontSize: '32px',
-                fontWeight: 'bold',
-                fontFamily: 'monospace',
-                color: clocksMs.black <= 10000 ? '#d32f2f' : '#333',
-              }}>
-                {formatTime(clocksMs.black)}
-              </div>
-              {gameState.turn === 0 && bufferMsRemaining.black > 0 && (
-                <div style={{
-                  marginTop: '8px',
-                  fontSize: '14px',
-                  fontFamily: 'monospace',
-                  color: '#4CAF50',
-                  fontWeight: '500',
-                }}>
-                  Buffer: {formatTime(bufferMsRemaining.black)}
-                </div>
-              )}
+        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, gap: '12px' }}>
+          {gameEndInfo && (
+            <div
+              style={{
+                padding: '10px 14px',
+                borderRadius: '12px',
+                background: '#f1ddc2',
+                border: '2px solid #b9833b',
+                color: '#3c2b18',
+                fontWeight: 700,
+                textAlign: 'center',
+              }}
+            >
+              {gameEndInfo.reason} - Result: {gameEndInfo.winnerLabel}
             </div>
-            
-            {/* White Clock */}
-            <div style={{
-              flex: '1',
-              minWidth: '200px',
-              padding: '15px',
-              borderRadius: '8px',
-              background: gameState.status !== 'ended' && gameState.turn === 1 ? '#e3f2fd' : '#f5f5f5',
-              border: gameState.status !== 'ended' && gameState.turn === 1 ? '2px solid #2196F3' : '2px solid #ddd',
-              textAlign: 'center',
-            }}>
-              <div style={{
-                fontSize: '14px',
-                fontWeight: 'bold',
-                marginBottom: '8px',
-                color: '#333',
-              }}>
-                White
-              </div>
-              <div style={{
-                fontSize: '32px',
-                fontWeight: 'bold',
-                fontFamily: 'monospace',
-                color: clocksMs.white <= 10000 ? '#d32f2f' : '#333',
-              }}>
-                {formatTime(clocksMs.white)}
-              </div>
-              {gameState.turn === 1 && bufferMsRemaining.white > 0 && (
-                <div style={{
-                  marginTop: '8px',
-                  fontSize: '14px',
-                  fontFamily: 'monospace',
-                  color: '#4CAF50',
-                  fontWeight: '500',
-                }}>
-                  Buffer: {formatTime(bufferMsRemaining.white)}
-                </div>
-              )}
-            </div>
-          </div>
-          <div style={{
-            marginTop: '15px',
-            fontSize: '12px',
-            color: '#666',
-            textAlign: 'center',
-          }}>
-            Buffer B/W: {formatTime(timeControl.bufferMs.black)} / {formatTime(timeControl.bufferMs.white)} | Increment B/W: {formatTime(timeControl.incrementMs.black)} / {formatTime(timeControl.incrementMs.white)}
-          </div>
-          <div style={{
-            marginTop: '10px',
-            padding: '10px',
-            borderRadius: '4px',
-            background: timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs 
-              ? '#ffebee' 
-              : timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs * 0.9
-              ? '#fff3e0'
-              : '#f5f5f5',
-            border: timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs
-              ? '2px solid #d32f2f'
-              : timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs * 0.9
-              ? '2px solid #f57c00'
-              : '1px solid #ddd',
-            textAlign: 'center',
-          }}>
-            <div style={{
-              fontSize: '14px',
-              fontWeight: 'bold',
-              marginBottom: '4px',
-              color: timeControl.maxGameMs != null && totalGameTimeMs >= timeControl.maxGameMs ? '#d32f2f' : '#333',
-            }}>
-              Total Game Time: {formatTime(totalGameTimeMs)}
-            </div>
-            {timeControl.maxGameMs != null && (
-              <div style={{
-                fontSize: '12px',
-                color: totalGameTimeMs >= timeControl.maxGameMs ? '#d32f2f' : '#666',
-              }}>
-                Max: {formatTime(timeControl.maxGameMs)}
-                {totalGameTimeMs >= timeControl.maxGameMs && (
-                  <span style={{ marginLeft: '8px', fontWeight: 'bold' }}>— TIE (Time Limit Reached)</span>
-                )}
-                {totalGameTimeMs < timeControl.maxGameMs && totalGameTimeMs >= timeControl.maxGameMs * 0.9 && (
-                  <span style={{ marginLeft: '8px', fontWeight: 'bold' }}>— Approaching Limit</span>
-                )}
-              </div>
-            )}
-            {timeControl.maxGameMs == null && (
-              <div style={{
-                fontSize: '11px',
-                color: '#999',
-                fontStyle: 'italic',
-              }}>
-                No time limit
-              </div>
+          )}
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              borderRadius: '18px',
+              border: '2px solid #3c3226',
+              background: 'rgba(255, 250, 242, 0.7)',
+              boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
+              padding: boardCardPadding,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {gameState ? (
+              <div style={{ width: '100%', height: '100%', minHeight: 0 }}>{renderBoard()}</div>
+            ) : (
+              <div style={{ fontWeight: 700, letterSpacing: '1px' }}>Loading board...</div>
             )}
           </div>
+
+          {!isWideLayout && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <button
+                onClick={() => submitCurrentAction()}
+                disabled={!canSubmit}
+                style={{
+                  padding: '12px',
+                  borderRadius: '12px',
+                  border: '2px solid #183628',
+                  background: canSubmit ? '#2f6b3f' : '#8ea593',
+                  color: '#f7f3eb',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  cursor: canSubmit ? 'pointer' : 'not-allowed',
+                }}
+              >
+                Submit Move
+              </button>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <button
+                  onClick={() => surrenderAction && sendAction(surrenderAction)}
+                  disabled={!canSendAction(surrenderAction)}
+                  style={{
+                    padding: '10px',
+                    borderRadius: '10px',
+                    border: '2px solid #5b2a2a',
+                    background: canSendAction(surrenderAction) ? '#8b3b3b' : '#b9a2a2',
+                    color: '#f8f1e7',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: canSendAction(surrenderAction) ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {surrenderButtonLabel}
+                </button>
+                <button
+                  onClick={() => drawAction && sendAction(drawAction)}
+                  disabled={!canSendAction(drawAction)}
+                  style={{
+                    padding: '10px',
+                    borderRadius: '10px',
+                    border: '2px solid #5a4a2f',
+                    background: canSendAction(drawAction) ? '#c9a565' : '#d8c8ab',
+                    color: '#2a2218',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: canSendAction(drawAction) ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {drawButtonLabel}
+                </button>
+              </div>
+              <button
+                onClick={() => {
+                  autoFlipRef.current = false;
+                  setIsFlipped((prev) => !prev);
+                }}
+                style={{
+                  padding: '10px',
+                  borderRadius: '10px',
+                  border: '2px solid #3c3327',
+                  background: '#f2dfc3',
+                  color: '#2a2218',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  cursor: 'pointer',
+                }}
+              >
+                Flip Board
+              </button>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                {renderClockBox('black')}
+                {renderClockBox('white')}
+              </div>
+            </div>
+          )}
         </div>
-      )}
 
+        {isWideLayout && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+              minHeight: 0,
+            }}
+          >
+            <button
+              onClick={() => submitCurrentAction()}
+              disabled={!canSubmit}
+              style={{
+                padding: '12px',
+                borderRadius: '12px',
+                border: '2px solid #183628',
+                background: canSubmit ? '#2f6b3f' : '#8ea593',
+                color: '#f7f3eb',
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                cursor: canSubmit ? 'pointer' : 'not-allowed',
+              }}
+            >
+              Submit Move
+            </button>
+            <button
+              onClick={() => drawAction && sendAction(drawAction)}
+              disabled={!canSendAction(drawAction)}
+              style={{
+                padding: '12px',
+                borderRadius: '12px',
+                border: '2px solid #5a4a2f',
+                background: canSendAction(drawAction) ? '#c9a565' : '#d8c8ab',
+                color: '#2a2218',
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                cursor: canSendAction(drawAction) ? 'pointer' : 'not-allowed',
+              }}
+            >
+              {drawButtonLabel}
+            </button>
+            <div style={{ marginTop: 'auto' }}>{renderClockBox('white')}</div>
+          </div>
+        )}
+      </div>
     </div>
   );
+
 }
 
 // Helper function to format time in MM:SS format
