@@ -19,26 +19,10 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      // Custom starting position for debugging
-      const customPosition = {
-        unitsByCid: {
-          "wt1": [0],
-          "w1": [1, 11, 12, 25, 73],
-          "w3": [61],
-          "bt4": [28],
-          "b1": [37, 38, 82, 83, 93, 95, 105, 106],
-          "b2": [69, 79, 92],
-          "b8": [49],
-          "b23": [68, 81, 91],
-          "b24": [51],
-          "b48": [35]
-        }
-      };
-      
       const response = await fetch(`${API_BASE}/api/game/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(customPosition),
+        body: JSON.stringify({}),
       });
       
       if (!response.ok) {
