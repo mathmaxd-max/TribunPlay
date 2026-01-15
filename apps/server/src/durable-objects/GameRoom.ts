@@ -746,17 +746,7 @@ export class GameRoom implements DurableObject {
 		}
 		const gameId = this.gameId;
 		const actorColor = role === "spectator" ? null : (role === "black" ? 0 : 1);
-		
-		await this.env.DB.prepare(
-			`INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
-			 VALUES (?, ?, ?, ?, ?)`
-		).bind(
-			gameId,
-			newState.ply - 1, // ply before this action
-			actionWord,
-			actorColor,
-			new Date().toISOString()
-		).run();
+		const actionPly = newState.ply - 1; // ply before this action
 		
 		// Update game row with clock values
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
@@ -765,6 +755,28 @@ export class GameRoom implements DurableObject {
 		const endOpcode = gameEnded ? opcode : null;
 		const endReason = gameEnded && opcode === 11 ? fields.endReason : null;
 		const nextStatus = gameEnded ? "ended" : "active";
+		
+		// Use INSERT OR IGNORE to handle race conditions
+		// Insert first and check if it succeeded before updating game state
+		const insertResult = await this.env.DB.prepare(
+			`INSERT OR IGNORE INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
+			 VALUES (?, ?, ?, ?, ?)`
+		).bind(
+			gameId,
+			actionPly,
+			actionWord,
+			actorColor,
+			new Date().toISOString()
+		).run();
+		
+		// Check if the insert succeeded (INSERT OR IGNORE returns changes=0 if row already exists)
+		if (insertResult.meta.changes === 0) {
+			// Race condition: another request already inserted this ply
+			this.sendError(ws, "Action already processed");
+			return;
+		}
+		
+		// Only update game state if the insert succeeded
 		if (supportsBlocked) {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
