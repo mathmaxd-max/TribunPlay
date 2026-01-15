@@ -2049,23 +2049,25 @@ export default function Game() {
           boxShadow: '0 8px 16px rgba(20, 15, 10, 0.12)',
         }}
       >
-        <div
-          style={{
-            position: 'absolute',
-            top: '6px',
-            right: '8px',
-            fontSize: '10px',
-            fontWeight: 700,
-            letterSpacing: '1px',
-            textTransform: 'uppercase',
-            padding: '2px 6px',
-            borderRadius: '999px',
-            background: color === 'black' ? '#17130f' : '#e8ddcc',
-            color: color === 'black' ? '#f3e8d6' : '#2a241c',
-          }}
-        >
-          {color === 'black' ? 'Black' : 'White'}
-        </div>
+        {role === color && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '6px',
+              right: '8px',
+              fontSize: '10px',
+              fontWeight: 700,
+              letterSpacing: '1px',
+              textTransform: 'uppercase',
+              padding: '2px 6px',
+              borderRadius: '999px',
+              background: color === 'black' ? '#17130f' : '#e8ddcc',
+              color: color === 'black' ? '#f3e8d6' : '#2a241c',
+            }}
+          >
+            You
+          </div>
+        )}
         {showBuffer ? (
           <>
             <div
@@ -2152,7 +2154,7 @@ export default function Game() {
           >
             Game Code
           </div>
-          <div style={{ fontSize: '20px', fontWeight: 700 }}>{code}</div>
+          <div style={{ fontSize: '20px', fontWeight: 400 }}>{code}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
           <div
@@ -2183,19 +2185,6 @@ export default function Game() {
               }}
             />
             {connectionState}
-          </div>
-          <div
-            style={{
-              padding: '6px 12px',
-              borderRadius: '999px',
-              background: '#2d2418',
-              fontSize: '12px',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '1px',
-            }}
-          >
-            {role ?? '...'}
           </div>
           <button
             onClick={() => navigate('/')}
@@ -2347,9 +2336,7 @@ export default function Game() {
                 boxShadow: '0 6px 12px rgba(20, 15, 10, 0.18)',
                 zIndex: 2,
               }}
-            >
-              F
-            </button>
+            ></button>
             {gameState ? (
               <div style={{ width: '100%', height: '100%', minHeight: 0 }}>{renderBoard()}</div>
             ) : (
