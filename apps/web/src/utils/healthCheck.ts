@@ -132,11 +132,7 @@ export async function checkWebSocketHealth(
         }
       };
       
-      let errorOccurred = false;
-      
-      ws.onerror = (event) => {
-        // Mark that an error occurred, but wait for close event for more info
-        errorOccurred = true;
+      ws.onerror = () => {
         // If close doesn't fire within a short time after error, it's likely unreachable
         setTimeout(() => {
           if (!resolved && !closeReceived) {

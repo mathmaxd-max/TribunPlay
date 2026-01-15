@@ -9,16 +9,7 @@
 import * as engine from '@tribunplay/engine';
 import type { LegalBloomValidator } from '../../net/LegalBloom';
 import type { UiMoveCache } from './UiMoveCache';
-import type {
-  EnemyTileCache,
-  OwnPrimaryTileCache,
-  OwnPrimaryTargetOptions,
-  OwnSecondaryTileCache,
-  SplitAllocationCache,
-  EmptyTileCache,
-  DonorRuleCache,
-  Cid,
-} from './types';
+import type { OwnPrimaryTargetOptions, SplitAllocationCache, DonorRuleCache, Cid } from './types';
 
 const NEIGHBOR_VECTORS = [
   [1, 1],   // 0: up
@@ -57,193 +48,13 @@ function getNeighborCid(centerCid: number, dir: number): number | null {
 }
 
 /**
- * Get reachable tiles for a movement pattern (reuse engine logic)
- * This is a simplified version that matches the engine's getReachableTiles
- */
-function getReachableTiles(
-  fromCid: number,
-  height: engine.Height,
-  color: engine.Color,
-  isTribun: boolean,
-  board: Uint8Array,
-  forAttack: boolean = false
-): number[] {
-  const { x, y } = engine.decodeCoord(fromCid);
-  const reachable: number[] = [];
-
-  if (height === 1) {
-    if (isTribun) {
-      // t1: all 6 neighbors
-      for (let dir = 0; dir < 6; dir++) {
-        const cid = getNeighborCid(fromCid, dir);
-        if (cid !== null) {
-          reachable.push(cid);
-        }
-      }
-    } else {
-      // Height 1: color-dependent
-      const offsets = color === 0 ? [[1, 1]] : [[-1, -1]];
-      if (forAttack) {
-        const attackOffsets = color === 0 ? [[1, 0], [0, 1]] : [[-1, 0], [0, -1]];
-        for (const [dx, dy] of attackOffsets) {
-          try {
-            reachable.push(engine.encodeCoord(x + dx, y + dy));
-          } catch {}
-        }
-      } else {
-        for (const [dx, dy] of offsets) {
-          try {
-            reachable.push(engine.encodeCoord(x + dx, y + dy));
-          } catch {}
-        }
-      }
-    }
-  } else if (height === 2) {
-    const offsets = [[1, 2], [-1, 1], [2, 1], [-1, -2], [1, -1], [-2, -1]];
-    for (const [dx, dy] of offsets) {
-      try {
-        reachable.push(engine.encodeCoord(x + dx, y + dy));
-      } catch {}
-    }
-  } else if (height === 3) {
-    const offsets = [
-      [3, 2], [2, 3], [1, 3], [3, 1], [-1, 2], [2, -1],
-      [-3, -2], [-2, -3], [-1, -3], [-3, -1], [1, -2], [-2, 1],
-    ];
-    for (const [dx, dy] of offsets) {
-      try {
-        reachable.push(engine.encodeCoord(x + dx, y + dy));
-      } catch {}
-    }
-  } else if (height === 4) {
-    // Sliding: use height 2 offsets as direction vectors
-    const dirVectors = [[1, 2], [-1, 1], [2, 1], [-1, -2], [1, -1], [-2, -1]];
-    for (const [vx, vy] of dirVectors) {
-      let step = 1;
-      while (true) {
-        try {
-          const nx = x + vx * step;
-          const ny = y + vy * step;
-          const cid = engine.encodeCoord(nx, ny);
-          const unit = engine.unitByteToUnit(board[cid]);
-          
-          if (forAttack) {
-            if (unit !== null) {
-              reachable.push(cid);
-              break;
-            }
-          } else {
-            if (unit !== null) break;
-            reachable.push(cid);
-          }
-          step++;
-        } catch {
-          break;
-        }
-      }
-    }
-  } else if (height === 6) {
-    if (forAttack) {
-      // Ray along adjacency directions, first unit blocks.
-      for (const [vx, vy] of NEIGHBOR_VECTORS) {
-        let step = 1;
-        while (true) {
-          try {
-            const nx = x + vx * step;
-            const ny = y + vy * step;
-            const cid = engine.encodeCoord(nx, ny);
-            const unit = engine.unitByteToUnit(board[cid]);
-            if (unit !== null) {
-              reachable.push(cid);
-              break;
-            }
-            step++;
-          } catch {
-            break;
-          }
-        }
-      }
-    } else {
-      // Height 6 move: same as height 4
-      const dirVectors = [[1, 2], [-1, 1], [2, 1], [-1, -2], [1, -1], [-2, -1]];
-      for (const [vx, vy] of dirVectors) {
-        let step = 1;
-        while (true) {
-          try {
-            const nx = x + vx * step;
-            const ny = y + vy * step;
-            const cid = engine.encodeCoord(nx, ny);
-            const unit = engine.unitByteToUnit(board[cid]);
-            if (unit !== null) break;
-            reachable.push(cid);
-            step++;
-          } catch {
-            break;
-          }
-        }
-      }
-    }
-  } else if (height === 8) {
-    // Height 8: t1 adjacency + jump moves
-    for (let dir = 0; dir < 6; dir++) {
-      const cid = getNeighborCid(fromCid, dir);
-      if (cid !== null) reachable.push(cid);
-    }
-    
-    // Jump moves
-    for (let i = 0; i < 6; i++) {
-      const [dx, dy] = NEIGHBOR_VECTORS[i];
-      try {
-        const midCid = engine.encodeCoord(x + dx, y + dy);
-        const midUnit = engine.unitByteToUnit(board[midCid]);
-        if (midUnit === null || midUnit.color === color) {
-          const jumpCid = engine.encodeCoord(x + dx * 2, y + dy * 2);
-          reachable.push(jumpCid);
-        }
-      } catch {}
-    }
-  }
-
-  return reachable;
-}
-
-/**
- * Get attack reachable tiles (height 8 attacks as height 2)
- */
-function getAttackReachableTiles(
-  fromCid: number,
-  height: engine.Height,
-  color: engine.Color,
-  isTribun: boolean,
-  board: Uint8Array
-): number[] {
-  if (height === 8) {
-    const { x, y } = engine.decodeCoord(fromCid);
-    const offsets = [[1, 2], [-1, 1], [2, 1], [-1, -2], [1, -1], [-2, -1]];
-    const reachable = new Set<number>();
-    for (const [dx, dy] of offsets) {
-      try {
-        reachable.add(engine.encodeCoord(x + dx, y + dy));
-      } catch {}
-    }
-    
-    const moveLike = getReachableTiles(fromCid, height, color, isTribun, board, false);
-    for (const cid of moveLike) {
-      reachable.add(cid);
-    }
-    
-    return Array.from(reachable);
-  }
-  return getReachableTiles(fromCid, height, color, isTribun, board, true);
-}
-
-/**
  * Build UI move cache from state and validator
  */
 export function buildCache(
   state: engine.State,
   validator: LegalBloomValidator
 ): UiMoveCache {
+  void validator;
   const legalActions = engine.generateLegalActions(state);
   const legalSet = new Set<number>();
   for (const action of legalActions) {

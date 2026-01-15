@@ -12,6 +12,7 @@ export interface State {
     turn: Color;
     ply: number;
     drawOfferBy: Color | null;
+    drawOfferBlocked: Color | null;
     status?: 'active' | 'ended';
     winner?: Color | null;
 }
@@ -36,7 +37,7 @@ export declare function encodeSymCombine(centerCid: number, config: 0 | 1 | 2, d
 export declare function encodeSplit(actorCid: number, heights: [number, number, number, number, number, number]): number;
 export declare function encodeBackstabb(actorCid: number, dir: number): number;
 export declare function encodeAttackTribun(attackerCid: number, tribunCid: number, winnerColor: Color): number;
-export declare function encodeDraw(drawAction: 0 | 1 | 2, actorColor: Color): number;
+export declare function encodeDraw(drawAction: 0 | 1 | 2 | 3, actorColor: Color): number;
 export declare function encodeEnd(endReason: number, loserColor?: Color): number;
 export declare function decodeAction(action: number): {
     opcode: number;

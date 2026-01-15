@@ -126,12 +126,14 @@ const formatColorName = (color?: number | null): string => {
   return 'Unknown';
 };
 
+const colorToClockKey = (color: engine.Color): keyof ColorClock => (color === 0 ? 'black' : 'white');
+
 const getEndInfoFromAction = (actionWord: number): EndActionInfo | null => {
   const decoded = engine.decodeAction(actionWord);
   switch (decoded.opcode) {
     case 11: {
       const endReason = decoded.fields.endReason;
-      const loserColor = decoded.fields.loserColor;
+      const loserColor = decoded.fields.loserColor as engine.Color;
       if (endReason === 0) {
         return { kind: 'resign', loserColor, winnerColor: (loserColor ^ 1) as engine.Color };
       }
@@ -187,8 +189,9 @@ const resolveEndInfo = (params: {
           winnerLabel = formatColorName(fromAction.winnerColor);
           break;
         case 'timeout-player': {
-          const clockDetail = Number.isFinite(clocksMs[fromAction.loserColor])
-            ? ` (clock ${formatTime(clocksMs[fromAction.loserColor])})`
+          const clockKey = colorToClockKey(fromAction.loserColor);
+          const clockDetail = Number.isFinite(clocksMs[clockKey])
+            ? ` (clock ${formatTime(clocksMs[clockKey])})`
             : '';
           reason = `${formatColorName(fromAction.loserColor)} ran out of time${clockDetail}`;
           winnerLabel = formatColorName(fromAction.winnerColor);
@@ -353,7 +356,7 @@ export default function Game() {
       return;
     }
 
-    const isActive = gameState.status !== 'ended' && gameState.turn === (role === 'black' ? 0 : 1);
+    const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive && uiState.type !== 'idle') {
       setUiState({ type: 'idle' });
       return;
@@ -1053,7 +1056,6 @@ export default function Game() {
         case 'idle': {
           // Check cache to determine which state to enter
           if (cache.enemy.has(cid)) {
-            const enemyCache = cache.enemy.get(cid)!;
             return { type: 'enemy', targetCid: cid, optionIndex: 0 };
           }
           if (cache.empty.has(cid)) {
@@ -1883,7 +1885,6 @@ export default function Game() {
                       fontWeight: 'bold',
                       color: textColor,
                       WebkitTextStroke: `1px ${strokeColor}`,
-                      textStroke: `1px ${strokeColor}`,
                     }}>
                       {unit.p}
                     </div>
@@ -1899,7 +1900,6 @@ export default function Game() {
                     fontWeight: 'bold',
                     color: textColorSecondary,
                     WebkitTextStroke: `1px ${strokeColorSecondary}`,
-                    textStroke: `1px ${strokeColorSecondary}`,
                   }}>
                     {unit.s}
                   </div>
@@ -1914,7 +1914,6 @@ export default function Game() {
                 fontWeight: 'bold',
                 color: textColor,
                 WebkitTextStroke: `1px ${strokeColor}`,
-                textStroke: `1px ${strokeColor}`,
               }}>
                 {unit.p}
               </div>
