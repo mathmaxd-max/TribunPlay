@@ -16,6 +16,7 @@ export interface State {
   turn: Color;
   ply: number;
   drawOfferBy: Color | null;
+  drawOfferBlocked: Color | null;
   status?: 'active' | 'ended';
   winner?: Color | null; // null for tie
 }
@@ -183,8 +184,8 @@ export function encodeAttackTribun(attackerCid: number, tribunCid: number, winne
 }
 
 // DRAW: opcode 10
-export function encodeDraw(drawAction: 0 | 1 | 2, actorColor: Color): number {
-  // drawAction: 0=offer, 1=retract, 2=accept
+export function encodeDraw(drawAction: 0 | 1 | 2 | 3, actorColor: Color): number {
+  // drawAction: 0=offer, 1=retract, 2=accept, 3=decline
   return (10 << 28) | (actorColor << 1) | drawAction;
 }
 
@@ -1089,16 +1090,26 @@ export function generateLegalActions(state: State): Uint32Array {
     }
   }
   
-  // Always allow resign
-  actions.push(encodeEnd(0, state.turn));
-  
-  // Allow draw offer/retract/accept based on state
-  if (state.drawOfferBy === null) {
-    actions.push(encodeDraw(0, state.turn));
-  } else if (state.drawOfferBy === state.turn) {
-    actions.push(encodeDraw(1, state.turn));
+  // Always allow resign for both colors
+  actions.push(encodeEnd(0, 0));
+  actions.push(encodeEnd(0, 1));
+
+  const blocked = state.drawOfferBlocked ?? null;
+  const offerBy = state.drawOfferBy ?? null;
+
+  // Allow draw offer/retract/accept/decline based on state (not turn-bound)
+  if (offerBy === null) {
+    if (blocked !== 0) {
+      actions.push(encodeDraw(0, 0));
+    }
+    if (blocked !== 1) {
+      actions.push(encodeDraw(0, 1));
+    }
   } else {
-    actions.push(encodeDraw(2, state.turn));
+    actions.push(encodeDraw(1, offerBy));
+    const opponent = offerBy === 0 ? 1 : 0;
+    actions.push(encodeDraw(2, opponent));
+    actions.push(encodeDraw(3, opponent));
   }
   
   // Sort for stability
@@ -1118,6 +1129,7 @@ export function applyAction(state: State, action: number): State {
   let newTurn: Color = state.turn === 0 ? 1 : 0;
   let newPly = state.ply + 1;
   let newDrawOfferBy: Color | null = state.drawOfferBy;
+  let newDrawOfferBlocked: Color | null = state.drawOfferBlocked ?? null;
   let newStatus: 'active' | 'ended' = state.status || 'active';
   let newWinner: Color | null | undefined = state.winner;
   
@@ -1704,23 +1716,44 @@ export function applyAction(state: State, action: number): State {
     case 10: { // DRAW
       const drawAction = fields.drawAction;
       const actorColor = fields.actorColor as Color;
+      const currentOfferBy = newDrawOfferBy;
+      newTurn = state.turn;
       
       if (drawAction === 0) {
         // Offer
+        if (newDrawOfferBy !== null) {
+          throw new Error(`Illegal DRAW offer: offer already active`);
+        }
+        if (newDrawOfferBlocked === actorColor) {
+          throw new Error(`Illegal DRAW offer: actor is blocked`);
+        }
+        if (newDrawOfferBlocked !== null && newDrawOfferBlocked !== actorColor) {
+          newDrawOfferBlocked = null;
+        }
         newDrawOfferBy = actorColor;
       } else if (drawAction === 1) {
         // Retract
-        if (newDrawOfferBy === actorColor) {
-          newDrawOfferBy = null;
+        if (newDrawOfferBy !== actorColor) {
+          throw new Error(`Illegal DRAW retract: no active offer from actor`);
         }
+        newDrawOfferBy = null;
       } else if (drawAction === 2) {
         // Accept - game ends as tie
         if (newDrawOfferBy !== null && newDrawOfferBy !== actorColor) {
           newStatus = 'ended';
           newWinner = null; // Tie
           newDrawOfferBy = null;
+          newDrawOfferBlocked = null;
         } else {
           throw new Error(`Illegal DRAW accept: no active offer from opponent`);
+        }
+      } else if (drawAction === 3) {
+        // Decline - remove offer and block rejected player
+        if (currentOfferBy !== null && currentOfferBy !== actorColor) {
+          newDrawOfferBy = null;
+          newDrawOfferBlocked = currentOfferBy;
+        } else {
+          throw new Error(`Illegal DRAW decline: no active offer from opponent`);
         }
       }
       break;
@@ -1729,6 +1762,7 @@ export function applyAction(state: State, action: number): State {
     case 11: { // END
       const endReason = fields.endReason;
       const loserColor = fields.loserColor as Color;
+      newTurn = state.turn;
       
       newStatus = 'ended';
       if (endReason === 3) {
@@ -1738,6 +1772,8 @@ export function applyAction(state: State, action: number): State {
         // Resign, no-legal-moves, or timeout-player
         newWinner = loserColor === 0 ? 1 : 0;
       }
+      newDrawOfferBy = null;
+      newDrawOfferBlocked = null;
       break;
     }
     
@@ -1750,6 +1786,7 @@ export function applyAction(state: State, action: number): State {
     turn: newTurn,
     ply: newPly,
     drawOfferBy: newDrawOfferBy,
+    drawOfferBlocked: newDrawOfferBlocked,
     status: newStatus,
     winner: newWinner,
   };

@@ -54,6 +54,7 @@ interface GameSnapshot {
   turn: engine.Color;
   ply: number;
   drawOfferBy: engine.Color | null;
+  drawOfferBlocked?: engine.Color | null;
   clocksMs?: { black: number; white: number };
   buffersMs?: { black: number; white: number };
   timeControl?: RawTimeControl;
@@ -747,6 +748,7 @@ export default function Game() {
                 turn: snapshot.turn,
                 ply: snapshot.ply,
                 drawOfferBy: snapshot.drawOfferBy,
+                drawOfferBlocked: snapshot.drawOfferBlocked ?? null,
                 status: snapshot.status ?? statusFromAction,
                 winner: snapshot.winner ?? winnerFromAction,
               };
@@ -1980,25 +1982,39 @@ export default function Game() {
 
   const playerColor = role === 'black' ? 0 : role === 'white' ? 1 : null;
   const drawOfferBy = gameState?.drawOfferBy ?? null;
+  const drawOfferBlocked = gameState?.drawOfferBlocked ?? null;
   const hasDrawOffer = drawOfferBy !== null;
   const isOfferer = hasDrawOffer && playerColor !== null && drawOfferBy === playerColor;
   const isReceiver = hasDrawOffer && playerColor !== null && drawOfferBy !== playerColor;
-  const drawButtonLabel = !hasDrawOffer ? 'Offer Draw' : isOfferer ? 'Withdraw Offer' : 'Decline Draw';
+  const isBlocked = playerColor !== null && drawOfferBlocked === playerColor;
+  const drawButtonLabel = hasDrawOffer
+    ? isOfferer
+      ? 'Withdraw Offer'
+      : 'Decline Draw'
+    : isBlocked
+    ? 'Rejected'
+    : 'Offer Draw';
   const surrenderButtonLabel = isReceiver ? 'Accept Draw' : 'Surrender';
 
-  const drawAction = gameState
-    ? !hasDrawOffer
-      ? engine.encodeDraw(0, gameState.turn)
-      : isOfferer
-      ? engine.encodeDraw(1, gameState.turn)
-      : null
-    : null;
+  const drawAction =
+    gameState && playerColor !== null
+      ? hasDrawOffer
+        ? isOfferer
+          ? engine.encodeDraw(1, playerColor)
+          : isReceiver
+          ? engine.encodeDraw(3, playerColor)
+          : null
+        : isBlocked
+        ? null
+        : engine.encodeDraw(0, playerColor)
+      : null;
 
-  const surrenderAction = gameState
-    ? isReceiver
-      ? engine.encodeDraw(2, gameState.turn)
-      : engine.encodeEnd(0, gameState.turn)
-    : null;
+  const surrenderAction =
+    gameState && playerColor !== null
+      ? isReceiver
+        ? engine.encodeDraw(2, playerColor)
+        : engine.encodeEnd(0, playerColor)
+      : null;
 
   const canSendAction = (action: number | null) => {
     if (!action || !cache || !gameState) return false;
@@ -2014,8 +2030,8 @@ export default function Game() {
     const showBuffer = Boolean(isActive && bufferMsRemaining[color] > 0);
     const clockValue = formatTime(clocksMs[color]);
     const bufferValue = formatTime(bufferMsRemaining[color]);
-    const tone = color === 'black' ? '#1c1b19' : '#f4efe6';
-    const surface = color === 'black' ? '#f6eddf' : '#2b2620';
+    const tone = color === 'black' ? '#f4efe6' : '#1c1b19';
+    const surface = color === 'black' ? '#2b2620' : '#f6eddf';
 
     return (
       <div
@@ -2045,8 +2061,8 @@ export default function Game() {
             textTransform: 'uppercase',
             padding: '2px 6px',
             borderRadius: '999px',
-            background: color === 'black' ? '#e8ddcc' : '#17130f',
-            color: color === 'black' ? '#2a241c' : '#f3e8d6',
+            background: color === 'black' ? '#17130f' : '#e8ddcc',
+            color: color === 'black' ? '#f3e8d6' : '#2a241c',
           }}
         >
           {color === 'black' ? 'Black' : 'White'}
@@ -2060,7 +2076,7 @@ export default function Game() {
                 left: '10px',
                 fontSize: '12px',
                 fontWeight: 700,
-                color: color === 'black' ? '#2f6b3f' : '#9fd8b6',
+                color: color === 'black' ? '#9fd8b6' : '#2f6b3f',
               }}
             >
               {bufferValue}
@@ -2084,10 +2100,11 @@ export default function Game() {
     );
   };
 
-  const contentPadding = isWideLayout ? '16px 20px 20px' : '12px 10px 14px';
-  const boardCardPadding = isWideLayout ? '12px' : '8px';
-  const navPadding = isWideLayout ? '12px 20px' : '10px 12px';
-  const errorMargin = isWideLayout ? '12px 20px 0' : '10px 10px 0';
+  const contentPadding = isWideLayout ? '16px 20px 20px' : '8px 6px 10px';
+  const boardCardPadding = isWideLayout ? '12px' : '6px';
+  const navPadding = isWideLayout ? '12px 20px' : '8px 10px';
+  const errorMargin = isWideLayout ? '12px 20px 0' : '8px 8px 0';
+  const contentGap = isWideLayout ? '16px' : '10px';
 
   return (
     <div
@@ -2221,7 +2238,7 @@ export default function Game() {
           minHeight: 0,
           display: 'grid',
           gridTemplateColumns: isWideLayout ? '220px minmax(0, 1fr) 220px' : 'minmax(0, 1fr)',
-          gap: '16px',
+          gap: contentGap,
           padding: contentPadding,
         }}
       >
@@ -2269,25 +2286,6 @@ export default function Game() {
             >
               {surrenderButtonLabel}
             </button>
-            <button
-              onClick={() => {
-                autoFlipRef.current = false;
-                setIsFlipped((prev) => !prev);
-              }}
-              style={{
-                padding: '12px',
-                borderRadius: '12px',
-                border: '2px solid #3c3327',
-                background: '#f2dfc3',
-                color: '#2a2218',
-                fontWeight: 700,
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-                cursor: 'pointer',
-              }}
-            >
-              Flip Board
-            </button>
             <div style={{ marginTop: 'auto' }}>{renderClockBox('black')}</div>
           </div>
         )}
@@ -2317,11 +2315,42 @@ export default function Game() {
               background: 'rgba(255, 250, 242, 0.7)',
               boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
               padding: boardCardPadding,
+              position: 'relative',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
             }}
           >
+            <button
+              onClick={() => {
+                autoFlipRef.current = false;
+                setIsFlipped((prev) => !prev);
+              }}
+              title="Flip board"
+              aria-label="Flip board"
+              style={{
+                position: 'absolute',
+                top: '8px',
+                right: '8px',
+                width: '24px',
+                height: '24px',
+                borderRadius: '6px',
+                border: `2px solid ${isFlipped ? '#111' : '#1c1a16'}`,
+                background: isFlipped ? '#111' : '#f6f0e6',
+                color: isFlipped ? '#f6f0e6' : '#1c1a16',
+                fontSize: '10px',
+                fontWeight: 700,
+                letterSpacing: '0.5px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 6px 12px rgba(20, 15, 10, 0.18)',
+                zIndex: 2,
+              }}
+            >
+              F
+            </button>
             {gameState ? (
               <div style={{ width: '100%', height: '100%', minHeight: 0 }}>{renderBoard()}</div>
             ) : (
@@ -2384,25 +2413,6 @@ export default function Game() {
                   {drawButtonLabel}
                 </button>
               </div>
-              <button
-                onClick={() => {
-                  autoFlipRef.current = false;
-                  setIsFlipped((prev) => !prev);
-                }}
-                style={{
-                  padding: '10px',
-                  borderRadius: '10px',
-                  border: '2px solid #3c3327',
-                  background: '#f2dfc3',
-                  color: '#2a2218',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '1px',
-                  cursor: 'pointer',
-                }}
-              >
-                Flip Board
-              </button>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                 {renderClockBox('black')}
                 {renderClockBox('white')}

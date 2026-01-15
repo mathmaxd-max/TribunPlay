@@ -66,6 +66,7 @@ export class GameRoom implements DurableObject {
 	private gameState: engine.State | null = null;
 	private legalSet: Set<number> = new Set();
 	private actionLog: number[] = [];
+	private supportsDrawOfferBlocked: boolean | null = null;
 	
 	// Clock and buffer state (server-authoritative)
 	private clockBlackMs: number = 0;
@@ -195,8 +196,13 @@ export class GameRoom implements DurableObject {
 		const gameId = this.gameId;
 		
 		// Load game from DB
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
 		const game = await this.env.DB.prepare(
-			`SELECT initial_board, initial_turn, turn, ply, draw_offer_by, 
+			supportsBlocked
+				? `SELECT initial_board, initial_turn, turn, ply, draw_offer_by, draw_offer_blocked,
+			        time_control_json, clock_black_ms, clock_white_ms, created_at, started_at
+			 FROM games WHERE id = ?`
+				: `SELECT initial_board, initial_turn, turn, ply, draw_offer_by,
 			        time_control_json, clock_black_ms, clock_white_ms, created_at, started_at
 			 FROM games WHERE id = ?`
 		).bind(gameId).first<{
@@ -205,6 +211,7 @@ export class GameRoom implements DurableObject {
 			turn: number;
 			ply: number;
 			draw_offer_by: number | null;
+			draw_offer_blocked?: number | null;
 			time_control_json: string | null;
 			clock_black_ms: number | null;
 			clock_white_ms: number | null;
@@ -246,6 +253,7 @@ export class GameRoom implements DurableObject {
 			turn: game.initial_turn as engine.Color,
 			ply: 0,
 			drawOfferBy: game.draw_offer_by as engine.Color | null,
+			drawOfferBlocked: supportsBlocked ? (game.draw_offer_blocked as engine.Color | null) : null,
 		};
 		
 		for (const action of actions) {
@@ -297,6 +305,20 @@ export class GameRoom implements DurableObject {
 		}
 	}
 
+	private async ensureDrawOfferBlockedSupport(): Promise<boolean> {
+		if (this.supportsDrawOfferBlocked !== null) {
+			return this.supportsDrawOfferBlocked;
+		}
+		try {
+			const info = await this.env.DB.prepare("PRAGMA table_info(games)").all<{ name: string }>();
+			this.supportsDrawOfferBlocked =
+				info.results?.some((row) => row.name === "draw_offer_blocked") ?? false;
+		} catch {
+			this.supportsDrawOfferBlocked = false;
+		}
+		return this.supportsDrawOfferBlocked;
+	}
+
 	private async sendSync(ws: WebSocket, role: "black" | "white" | "spectator"): Promise<void> {
 		if (!this.gameState) {
 			return;
@@ -307,6 +329,7 @@ export class GameRoom implements DurableObject {
 			turn: this.gameState.turn,
 			ply: this.gameState.ply,
 			drawOfferBy: this.gameState.drawOfferBy,
+			drawOfferBlocked: this.gameState.drawOfferBlocked,
 			status: this.gameState.status ?? "active",
 			winner: this.gameState.winner ?? null,
 		};
@@ -400,6 +423,20 @@ export class GameRoom implements DurableObject {
 				this.sendError(ws, "Not your turn");
 				return;
 			}
+		} else {
+			if (role === "spectator") {
+				this.sendError(ws, "Spectators cannot play");
+				return;
+			}
+			const expectedColor = role === "black" ? 0 : 1;
+			if (opcode === 10 && fields.actorColor !== expectedColor) {
+				this.sendError(ws, "Draw action color mismatch");
+				return;
+			}
+			if (opcode === 11 && fields.loserColor !== expectedColor) {
+				this.sendError(ws, "Resign action color mismatch");
+				return;
+			}
 		}
 		
 		// Validate legality
@@ -444,17 +481,33 @@ export class GameRoom implements DurableObject {
 		).run();
 		
 		// Update game row with clock values
-		await this.env.DB.prepare(
-			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
-		).bind(
-			newState.ply,
-			newState.turn,
-			newState.drawOfferBy,
-			this.clockBlackMs,
-			this.clockWhiteMs,
-			startedAtIso,
-			gameId
-		).run();
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		if (supportsBlocked) {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
+			).bind(
+				newState.ply,
+				newState.turn,
+				newState.drawOfferBy,
+				newState.drawOfferBlocked,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				startedAtIso,
+				gameId
+			).run();
+		} else {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
+			).bind(
+				newState.ply,
+				newState.turn,
+				newState.drawOfferBy,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				startedAtIso,
+				gameId
+			).run();
+		}
 		
 		// Update local state
 		this.gameState = newState;
@@ -639,21 +692,41 @@ export class GameRoom implements DurableObject {
 			new Date().toISOString()
 		).run();
 		
-		await this.env.DB.prepare(
-			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		if (supportsBlocked) {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
 			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
-		).bind(
-			endedState.ply,
-			endedState.turn,
-			endedState.drawOfferBy,
-			this.clockBlackMs,
-			this.clockWhiteMs,
-			"ended",
-			endedState.winner ?? null,
-			11,
-			1,
-			gameId
-		).run();
+			).bind(
+				endedState.ply,
+				endedState.turn,
+				endedState.drawOfferBy,
+				endedState.drawOfferBlocked,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"ended",
+				endedState.winner ?? null,
+				11,
+				1,
+				gameId
+			).run();
+		} else {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			).bind(
+				endedState.ply,
+				endedState.turn,
+				endedState.drawOfferBy,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"ended",
+				endedState.winner ?? null,
+				11,
+				1,
+				gameId
+			).run();
+		}
 		
 		this.gameState = endedState;
 		const legalActions = engine.generateLegalActions(endedState);
@@ -681,21 +754,41 @@ export class GameRoom implements DurableObject {
 			new Date().toISOString()
 		).run();
 		
-		await this.env.DB.prepare(
-			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		if (supportsBlocked) {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
 			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
-		).bind(
-			endedState.ply,
-			endedState.turn,
-			endedState.drawOfferBy,
-			this.clockBlackMs,
-			this.clockWhiteMs,
-			"ended",
-			endedState.winner ?? null,
-			11,
-			2,
-			gameId
-		).run();
+			).bind(
+				endedState.ply,
+				endedState.turn,
+				endedState.drawOfferBy,
+				endedState.drawOfferBlocked,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"ended",
+				endedState.winner ?? null,
+				11,
+				2,
+				gameId
+			).run();
+		} else {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			).bind(
+				endedState.ply,
+				endedState.turn,
+				endedState.drawOfferBy,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"ended",
+				endedState.winner ?? null,
+				11,
+				2,
+				gameId
+			).run();
+		}
 		
 		this.gameState = endedState;
 		const legalActions = engine.generateLegalActions(endedState);
@@ -782,21 +875,41 @@ export class GameRoom implements DurableObject {
 			new Date().toISOString()
 		).run();
 		
-		await this.env.DB.prepare(
-			`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		if (supportsBlocked) {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
 			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
-		).bind(
-			endedState.ply,
-			endedState.turn,
-			endedState.drawOfferBy,
-			this.clockBlackMs,
-			this.clockWhiteMs,
-			"ended",
-			endedState.winner ?? null,
-			11,
-			3,
-			gameId
-		).run();
+			).bind(
+				endedState.ply,
+				endedState.turn,
+				endedState.drawOfferBy,
+				endedState.drawOfferBlocked,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"ended",
+				endedState.winner ?? null,
+				11,
+				3,
+				gameId
+			).run();
+		} else {
+			await this.env.DB.prepare(
+				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			).bind(
+				endedState.ply,
+				endedState.turn,
+				endedState.drawOfferBy,
+				this.clockBlackMs,
+				this.clockWhiteMs,
+				"ended",
+				endedState.winner ?? null,
+				11,
+				3,
+				gameId
+			).run();
+		}
 		
 		this.gameState = endedState;
 		const legalActions = engine.generateLegalActions(endedState);
