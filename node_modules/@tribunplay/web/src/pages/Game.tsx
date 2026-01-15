@@ -2502,37 +2502,74 @@ export default function Game() {
               gap: '16px',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-              <div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div
+                style={{
+                  padding: '16px 20px',
+                  borderRadius: '12px',
+                  border: '2px solid #b9833b',
+                  background: 'linear-gradient(135deg, #f1ddc2 0%, #e8d0a8 100%)',
+                  textAlign: 'center',
+                }}
+              >
                 <div
                   style={{
-                    fontSize: '11px',
+                    fontSize: '10px',
                     fontWeight: 700,
                     letterSpacing: '2px',
                     textTransform: 'uppercase',
                     color: '#7a6543',
+                    marginBottom: '8px',
                   }}
                 >
-                  Waiting Room
+                  Game Code
                 </div>
-                <div style={{ fontSize: '22px', fontWeight: 700, color: '#2c2318' }}>
-                  {playersReady ? 'Players connected' : 'Waiting for opponent'}
+                <div
+                  style={{
+                    fontSize: '36px',
+                    fontWeight: 900,
+                    letterSpacing: '4px',
+                    color: '#2c2318',
+                    fontFamily: 'monospace',
+                  }}
+                >
+                  {code}
                 </div>
               </div>
-              <div
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: '999px',
-                  border: '2px solid #b9833b',
-                  background: '#f1ddc2',
-                  fontSize: '12px',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '1px',
-                  color: '#4a3720',
-                }}
-              >
-                Players: {roomPresence.players.black + roomPresence.players.white}/2
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <div
+                    style={{
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      letterSpacing: '2px',
+                      textTransform: 'uppercase',
+                      color: '#7a6543',
+                    }}
+                  >
+                    Waiting Room
+                  </div>
+                  <div style={{ fontSize: '22px', fontWeight: 700, color: '#2c2318' }}>
+                    {playersReady ? 'Players connected' : 'Waiting for opponent'}
+                  </div>
+                </div>
+                <div
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: '999px',
+                    border: '2px solid #b9833b',
+                    background: '#f1ddc2',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    color: '#4a3720',
+                    height: 'fit-content',
+                    alignSelf: 'flex-start',
+                  }}
+                >
+                  Players: {roomPresence.players.black + roomPresence.players.white}/2
+                </div>
               </div>
             </div>
 
