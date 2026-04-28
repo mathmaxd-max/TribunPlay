@@ -1434,7 +1434,9 @@ export function applyAction(state: State, action: number): State {
         throw new Error(`Illegal COMBINE: donor remainder invalid`);
       }
       const hasTribun = donorA.tribun || donorB.tribun;
-      if (hasTribun && (donateA !== donorA.p || donateB !== donorB.p)) {
+      // Only the tribun donor must donate its full primary.
+      // The other donor may donate partially as long as remainder rules are satisfied.
+      if ((donorA.tribun && donateA !== donorA.p) || (donorB.tribun && donateB !== donorB.p)) {
         throw new Error(`Illegal COMBINE: tribun must donate entire primary`);
       }
       
