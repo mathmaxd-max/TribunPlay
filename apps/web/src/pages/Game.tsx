@@ -2604,6 +2604,7 @@ export default function Game() {
             margin: errorMargin,
             padding: '10px 14px',
             borderRadius: '10px',
+            border: '2px solid #3c3226',
             background: '#f7d7d5',
             color: '#5c1c16',
             fontWeight: 600,
@@ -2619,6 +2620,7 @@ export default function Game() {
             margin: errorMargin,
             padding: '10px 14px',
             borderRadius: '10px',
+            border: '2px solid #3c3226',
             background: '#f1ddc2',
             color: '#3c2b18',
             fontWeight: 700,
@@ -2628,7 +2630,7 @@ export default function Game() {
             gap: '12px',
           }}
         >
-          <div>Game ended · {gameEndInfo.winnerLabel}</div>
+          <div>Game ended - {gameEndInfo.winnerLabel}</div>
           <button
             onClick={() => setShowEndModal(true)}
             style={{
@@ -2690,7 +2692,7 @@ export default function Game() {
                 cursor: 'pointer',
               }}
             >
-              ×
+              x
             </button>
             <div
               style={{
@@ -2748,16 +2750,16 @@ export default function Game() {
           <div
             style={{
               gridColumn: '1 / -1',
-              padding: isWideLayout ? '24px' : '16px',
+              padding: isWideLayout ? '24px' : '14px',
               borderRadius: '18px',
               border: '2px solid #3c3226',
-              background: 'rgba(255, 250, 242, 0.85)',
+              background: 'rgba(255, 250, 242, 0.84)',
               boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
               display: 'grid',
               gap: '16px',
             }}
           >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div
                 style={{
                   padding: '16px 20px',
@@ -2785,7 +2787,7 @@ export default function Game() {
                     fontWeight: 900,
                     letterSpacing: '4px',
                     color: '#2c2318',
-                    fontFamily: 'monospace',
+                    fontFamily: '"JetBrains Mono", monospace',
                   }}
                 >
                   {code}
@@ -2823,7 +2825,7 @@ export default function Game() {
                     alignSelf: 'flex-start',
                   }}
                 >
-                  Players: {roomPresence.players.black + roomPresence.players.white}/2
+                  Seats Filled: {roomPresence.players.black + roomPresence.players.white}/2
                 </div>
               </div>
             </div>
@@ -2845,7 +2847,18 @@ export default function Game() {
                   gap: '10px',
                 }}
               >
-                <div style={{ fontWeight: 700, color: '#3a2c1b' }}>Players & Spectators</div>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    letterSpacing: '1.2px',
+                    textTransform: 'uppercase',
+                    color: '#7a6543',
+                    fontWeight: 700,
+                  }}
+                >
+                  Presence
+                </div>
+                <div style={{ fontWeight: 700, color: '#3a2c1b', fontSize: '20px' }}>Players & Spectators</div>
                 <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
                   <div>Black: {roomPresence.players.black > 0 ? 'Connected' : 'Waiting'}</div>
                   <div>White: {roomPresence.players.white > 0 ? 'Connected' : 'Waiting'}</div>
@@ -2885,7 +2898,18 @@ export default function Game() {
                   gap: '10px',
                 }}
               >
-                <div style={{ fontWeight: 700, color: '#3a2c1b' }}>Room Settings</div>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    letterSpacing: '1.2px',
+                    textTransform: 'uppercase',
+                    color: '#7a6543',
+                    fontWeight: 700,
+                  }}
+                >
+                  Configuration
+                </div>
+                <div style={{ fontWeight: 700, color: '#3a2c1b', fontSize: '20px' }}>Room Settings</div>
                 <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
                   <div>Host color: {formatOption(roomSettings.hostColor)}</div>
                   <div>Start color: {formatOption(roomSettings.startColor)}</div>

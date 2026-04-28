@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { type Dispatch, type SetStateAction, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE } from '../config';
 import { useHealthCheck } from '../utils/useHealthCheck';
 
@@ -14,13 +14,15 @@ type ClockInput = {
   incrementSeconds: number;
 };
 
-const DEFAULT_CLOCK: ClockInput = { 
-  initialMinutes: 5, 
-  initialSeconds: 0, 
-  bufferMinutes: 0, 
-  bufferSeconds: 20, 
-  incrementMinutes: 0, 
-  incrementSeconds: 0 
+type ClockField = keyof ClockInput;
+
+const DEFAULT_CLOCK: ClockInput = {
+  initialMinutes: 5,
+  initialSeconds: 0,
+  bufferMinutes: 0,
+  bufferSeconds: 20,
+  incrementMinutes: 0,
+  incrementSeconds: 0,
 };
 
 const clampNumber = (value: number, fallback: number) => {
@@ -32,6 +34,112 @@ const toMs = (value: number, unit: 'minutes' | 'seconds') => {
   const factor = unit === 'minutes' ? 60000 : 1000;
   return Math.round(clampNumber(value, 0) * factor);
 };
+
+const sectionLabelStyle = {
+  fontSize: '11px',
+  fontWeight: 700,
+  letterSpacing: '1.3px',
+  textTransform: 'uppercase' as const,
+  color: '#7a6543',
+};
+
+const fieldLabelStyle = {
+  fontSize: '10px',
+  fontWeight: 700,
+  letterSpacing: '1.1px',
+  textTransform: 'uppercase' as const,
+  color: '#6f5a38',
+  marginBottom: '6px',
+};
+
+const inputStyle = {
+  width: '100%',
+  border: '1px solid #ccb89b',
+  borderRadius: '10px',
+  background: '#fff9ef',
+  color: '#1f1a13',
+  padding: '10px 12px',
+  fontSize: '14px',
+  outline: 'none',
+};
+
+const selectStyle = {
+  ...inputStyle,
+  appearance: 'none' as const,
+};
+
+const spinButtonReset = `
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+`;
+
+function ClockEditor(props: {
+  title: string;
+  clock: ClockInput;
+  onChange: (field: ClockField, value: number) => void;
+  tone?: 'light' | 'dark';
+}) {
+  const { title, clock, onChange, tone = 'light' } = props;
+  const panelBg = tone === 'dark' ? '#f7ead6' : '#fffaf0';
+
+  const renderRow = (
+    label: string,
+    minuteField: ClockField,
+    secondField: ClockField,
+    secondMax?: number,
+  ) => (
+    <div style={{ display: 'grid', gap: '7px' }}>
+      <div style={fieldLabelStyle}>{label}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+        <input
+          type="number"
+          inputMode="numeric"
+          min={0}
+          step={1}
+          value={clock[minuteField] || 0}
+          onChange={(event) => onChange(minuteField, event.target.value === '' ? 0 : Number(event.target.value))}
+          placeholder="Min"
+          style={inputStyle}
+        />
+        <input
+          type="number"
+          inputMode="numeric"
+          min={0}
+          max={secondMax}
+          step={1}
+          value={clock[secondField] || 0}
+          onChange={(event) => onChange(secondField, event.target.value === '' ? 0 : Number(event.target.value))}
+          placeholder="Sec"
+          style={inputStyle}
+        />
+      </div>
+    </div>
+  );
+
+  return (
+    <div
+      style={{
+        padding: '14px',
+        borderRadius: '12px',
+        border: '1px solid #d7c5ab',
+        background: panelBg,
+        display: 'grid',
+        gap: '10px',
+      }}
+    >
+      <div style={{ fontWeight: 700, color: '#2f2418' }}>{title}</div>
+      {renderRow('Initial Time', 'initialMinutes', 'initialSeconds', 59)}
+      {renderRow('Buffer', 'bufferMinutes', 'bufferSeconds', 59)}
+      {renderRow('Increment', 'incrementMinutes', 'incrementSeconds', 59)}
+    </div>
+  );
+}
 
 export default function Home() {
   const [code, setCode] = useState('');
@@ -45,15 +153,24 @@ export default function Home() {
   const [maxGameEnabled, setMaxGameEnabled] = useState(false);
   const [maxGameHours, setMaxGameHours] = useState(1);
   const [maxGameMinutes, setMaxGameMinutes] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [loadingAction, setLoadingAction] = useState<'join' | 'create' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
-  
-  // Health check for API and WebSocket
+
   const { result: healthResult, checking: healthChecking } = useHealthCheck({
     autoCheck: true,
     timeout: 3000,
   });
+
+  const isLoading = loadingAction !== null;
+
+  const setClockValue = (
+    setter: Dispatch<SetStateAction<ClockInput>>,
+    field: ClockField,
+    value: number,
+  ) => {
+    setter((prev) => ({ ...prev, [field]: value }));
+  };
 
   const handleSameClockToggle = (nextValue: boolean) => {
     setSameClockSettings(nextValue);
@@ -79,11 +196,13 @@ export default function Home() {
     const normalizedMaxMinutes = clampNumber(maxGameMinutes, 0);
     const totalMaxMinutes = normalizedMaxHours * 60 + normalizedMaxMinutes;
     const maxGameMs = maxGameEnabled && totalMaxMinutes > 0 ? toMs(totalMaxMinutes, 'minutes') : null;
+
     if (sameClockSettings) {
       const normalized = normalizeClockInput(sharedClock);
       const totalInitialMinutes = normalized.initialMinutes + normalized.initialSeconds / 60;
       const totalBufferSeconds = normalized.bufferMinutes * 60 + normalized.bufferSeconds;
       const totalIncrementSeconds = normalized.incrementMinutes * 60 + normalized.incrementSeconds;
+
       return {
         initialMs: toMs(totalInitialMinutes, 'minutes'),
         bufferMs: toMs(totalBufferSeconds, 'seconds'),
@@ -91,6 +210,7 @@ export default function Home() {
         maxGameMs,
       };
     }
+
     const normalizedBlack = normalizeClockInput(blackClock);
     const normalizedWhite = normalizeClockInput(whiteClock);
     const totalBlackInitialMinutes = normalizedBlack.initialMinutes + normalizedBlack.initialSeconds / 60;
@@ -99,6 +219,7 @@ export default function Home() {
     const totalWhiteBufferSeconds = normalizedWhite.bufferMinutes * 60 + normalizedWhite.bufferSeconds;
     const totalBlackIncrementSeconds = normalizedBlack.incrementMinutes * 60 + normalizedBlack.incrementSeconds;
     const totalWhiteIncrementSeconds = normalizedWhite.incrementMinutes * 60 + normalizedWhite.incrementSeconds;
+
     return {
       initialMs: {
         black: toMs(totalBlackInitialMinutes, 'minutes'),
@@ -116,49 +237,23 @@ export default function Home() {
     };
   };
 
-  const fieldLabelStyle = {
-    fontSize: '11px',
-    fontWeight: 700,
-    letterSpacing: '0.8px',
-    textTransform: 'uppercase' as const,
-    color: '#5f564a',
-    marginBottom: '6px',
-  };
-  const inputStyle = {
-    width: '100%',
-    padding: '10px',
-    fontSize: '14px',
-    border: '1px solid #d9d0c2',
-    borderRadius: '6px',
-    background: 'white',
-  };
-  const selectStyle = {
-    ...inputStyle,
-    padding: '10px 12px',
-  };
-
   const handleCreateGame = async () => {
-    setLoading(true);
+    setLoadingAction('create');
     setError(null);
     try {
       const timeControl = buildTimeControl();
-      const roomSettings = {
-        hostColor,
-        startColor,
-        nextStartColor,
-      };
+      const roomSettings = { hostColor, startColor, nextStartColor };
       const response = await fetch(`${API_BASE}/api/game/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ timeControl, roomSettings }),
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to create game');
       }
-      
+
       const data = await response.json();
-      // Store token and gameId for the creator
       localStorage.setItem(`game_token_${data.code}`, data.token);
       localStorage.setItem(`game_id_${data.code}`, data.gameId);
       localStorage.setItem(`game_seat_${data.code}`, 'black');
@@ -166,7 +261,7 @@ export default function Home() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
-      setLoading(false);
+      setLoadingAction(null);
     }
   };
 
@@ -175,8 +270,8 @@ export default function Home() {
       setError('Please enter a game code');
       return;
     }
-    
-    setLoading(true);
+
+    setLoadingAction('join');
     setError(null);
     try {
       const response = await fetch(`${API_BASE}/api/game/join`, {
@@ -184,14 +279,13 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: code.trim().toUpperCase() }),
       });
-      
+
       if (!response.ok) {
         const errData = await response.json().catch(() => ({ error: 'Failed to join game' }));
         throw new Error(errData.error || 'Failed to join game');
       }
-      
+
       const data = await response.json();
-      // Store token and gameId for the joiner
       const gameCode = code.trim().toUpperCase();
       localStorage.setItem(`game_token_${gameCode}`, data.token);
       localStorage.setItem(`game_id_${gameCode}`, data.gameId);
@@ -200,154 +294,242 @@ export default function Home() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
-      setLoading(false);
+      setLoadingAction(null);
     }
   };
 
-  return (
-    <div style={{ maxWidth: '600px', margin: '50px auto', padding: '20px' }}>
-      <style>{`
-        input[type="number"]::-webkit-outer-spin-button,
-        input[type="number"]::-webkit-inner-spin-button {
-          -webkit-appearance: none;
-          margin: 0;
-        }
-        input[type="number"] {
-          -moz-appearance: textfield;
-        }
-      `}</style>
-      <h1 style={{ marginBottom: '30px', textAlign: 'center' }}>Tribun Play</h1>
-      
-      {/* Health Check Status - only show in development */}
-      {import.meta.env.DEV && healthResult && (
-        <div style={{
-          marginBottom: '20px',
-          padding: '12px',
-          background: healthResult.api.reachable && healthResult.websocket.reachable 
-            ? '#d4edda' 
-            : '#f8d7da',
-          color: healthResult.api.reachable && healthResult.websocket.reachable 
-            ? '#155724' 
-            : '#721c24',
-          borderRadius: '4px',
-          fontSize: '14px',
-        }}>
-          <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-            Connection Status:
-          </div>
-          <div>
-            API: {healthResult.api.reachable ? (
-              <span style={{ color: '#28a745' }}>✓ Reachable</span>
-            ) : (
-              <span style={{ color: '#dc3545' }}>✗ Unreachable {healthResult.api.error ? `(${healthResult.api.error})` : ''}</span>
-            )}
-            {healthResult.api.responseTime && ` (${healthResult.api.responseTime}ms)`}
-          </div>
-          <div>
-            WebSocket: {healthResult.websocket.reachable ? (
-              <span style={{ color: '#28a745' }}>✓ Reachable</span>
-            ) : (
-              <span style={{ color: '#dc3545' }}>✗ Unreachable {healthResult.websocket.error ? `(${healthResult.websocket.error})` : ''}</span>
-            )}
-            {healthResult.websocket.responseTime && ` (${healthResult.websocket.responseTime}ms)`}
-          </div>
-        </div>
-      )}
-      
-      {import.meta.env.DEV && healthChecking && !healthResult && (
-        <div style={{
-          marginBottom: '20px',
-          padding: '12px',
-          background: '#fff3cd',
-          color: '#856404',
-          borderRadius: '4px',
-          fontSize: '14px',
-        }}>
-          Checking connection status...
-        </div>
-      )}
-      
-      <div style={{ 
-        background: 'white', 
-        padding: '30px', 
-        borderRadius: '8px', 
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)' 
-      }}>
-        <div style={{ 
-          borderBottom: '1px solid #eee', 
-          paddingBottom: '30px',
-          marginBottom: '30px'
-        }}>
-          <h2 style={{ marginBottom: '15px', fontSize: '18px' }}>Join Game</h2>
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <input
-              type="text"
-              value={code}
-              onChange={(e) => setCode(e.target.value.toUpperCase())}
-              placeholder="Enter game code"
-              maxLength={6}
-              style={{
-                flex: 1,
-                padding: '10px',
-                fontSize: '16px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-              }}
-              onKeyPress={(e) => {
-                if (e.key === 'Enter') {
-                  handleJoinGame();
-                }
-              }}
-            />
-            <button
-              onClick={handleJoinGame}
-              disabled={loading}
-              style={{
-                padding: '10px 20px',
-                fontSize: '16px',
-                background: '#28a745',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: loading ? 'not-allowed' : 'pointer',
-              }}
-            >
-              Join
-            </button>
-          </div>
-        </div>
+  const healthOk = Boolean(healthResult?.api.reachable && healthResult?.websocket.reachable);
 
-        <div style={{ marginBottom: '30px' }}>
-          <h2 style={{ marginBottom: '16px', fontSize: '18px' }}>Create Room</h2>
-          
-          <button
-            onClick={handleCreateGame}
-            disabled={loading}
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        background:
+          'radial-gradient(circle at top, rgba(255, 250, 240, 0.98), rgba(234, 219, 194, 0.98)), linear-gradient(135deg, #f7f0e5 0%, #e7d7ba 45%, #d9c29c 100%)',
+        color: '#1d1a14',
+        fontFamily: '"Space Grotesk", "Trebuchet MS", sans-serif',
+      }}
+    >
+      <style>
+        {`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@500&display=swap');${spinButtonReset}`}
+      </style>
+
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '14px',
+          flexWrap: 'wrap',
+          padding: '12px 20px',
+          background: 'rgba(26, 21, 15, 0.92)',
+          color: '#f8f1e7',
+          borderBottom: '2px solid #3a2f22',
+        }}
+      >
+        <div>
+          <div
             style={{
-              width: '100%',
-              padding: '12px',
-              fontSize: '16px',
-              background: '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              marginBottom: '18px',
+              fontSize: '10px',
+              letterSpacing: '2px',
+              textTransform: 'uppercase',
+              color: '#ccb896',
+              fontWeight: 700,
             }}
           >
-            {loading ? 'Creating...' : 'Create Game'}
-          </button>
-          <div style={{ display: 'grid', gap: '18px' }}>
-            <div style={{
+            Tribun Play
+          </div>
+          <div style={{ fontSize: '20px', fontWeight: 400 }}>Lobby & Match Setup</div>
+        </div>
+
+        <div
+          style={{
+            padding: '6px 12px',
+            borderRadius: '999px',
+            border: '1px solid #5f4a2d',
+            background: healthOk ? '#244d34' : '#4f3720',
+            fontSize: '12px',
+            fontWeight: 700,
+            letterSpacing: '1px',
+            textTransform: 'uppercase',
+          }}
+        >
+          {healthChecking && !healthResult ? 'Checking Connection' : healthOk ? 'Server Reachable' : 'Connection Issues'}
+        </div>
+      </div>
+
+      <div style={{ width: '100%', maxWidth: '1160px', margin: '0 auto', padding: '20px 14px 24px', display: 'grid', gap: '16px' }}>
+        {import.meta.env.DEV && healthResult && (
+          <div
+            style={{
+              borderRadius: '12px',
+              border: `2px solid ${healthOk ? '#2f6b3f' : '#8b3b3b'}`,
+              background: healthOk ? 'rgba(236, 247, 239, 0.85)' : 'rgba(250, 231, 227, 0.85)',
+              padding: '12px 14px',
+              fontSize: '13px',
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-              gap: '12px',
-            }}>
+              gap: '4px',
+            }}
+          >
+            <div style={{ fontWeight: 700 }}>Development Connection Status</div>
+            <div>
+              API: {healthResult.api.reachable ? 'Reachable' : `Unreachable${healthResult.api.error ? ` (${healthResult.api.error})` : ''}`}
+              {healthResult.api.responseTime ? ` (${healthResult.api.responseTime}ms)` : ''}
+            </div>
+            <div>
+              WebSocket:{' '}
+              {healthResult.websocket.reachable
+                ? 'Reachable'
+                : `Unreachable${healthResult.websocket.error ? ` (${healthResult.websocket.error})` : ''}`}
+              {healthResult.websocket.responseTime ? ` (${healthResult.websocket.responseTime}ms)` : ''}
+            </div>
+          </div>
+        )}
+
+        {import.meta.env.DEV && healthChecking && !healthResult && (
+          <div
+            style={{
+              borderRadius: '12px',
+              border: '2px solid #a68043',
+              background: 'rgba(255, 243, 214, 0.9)',
+              color: '#5c441c',
+              padding: '12px 14px',
+              fontWeight: 600,
+            }}
+          >
+            Checking connection status...
+          </div>
+        )}
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr',
+            gap: '16px',
+            alignItems: 'start',
+            maxWidth: '780px',
+            width: '100%',
+            margin: '0 auto',
+          }}
+        >
+          <section
+            style={{
+              borderRadius: '18px',
+              border: '2px solid #3c3226',
+              background: 'rgba(255, 250, 242, 0.84)',
+              boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
+              padding: '18px',
+              display: 'grid',
+              gap: '14px',
+            }}
+          >
+            <div style={{ ...sectionLabelStyle, color: '#7a6543' }}>Quick Join</div>
+            <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Join Game</div>
+
+            <div style={{ display: 'grid', gap: '9px' }}>
+              <div style={fieldLabelStyle}>Game Code</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
+                <input
+                  type="text"
+                  value={code}
+                  onChange={(event) => setCode(event.target.value.toUpperCase())}
+                  placeholder="Enter game code"
+                  maxLength={6}
+                  style={{
+                    ...inputStyle,
+                    fontFamily: '"JetBrains Mono", monospace',
+                    letterSpacing: '2px',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      handleJoinGame();
+                    }
+                  }}
+                />
+                <button
+                  onClick={handleJoinGame}
+                  disabled={isLoading}
+                  style={{
+                    padding: '10px 18px',
+                    borderRadius: '999px',
+                    border: '2px solid #1f4d2f',
+                    background: isLoading ? '#8ea593' : '#2f6b3f',
+                    color: '#f7f3eb',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: isLoading ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {loadingAction === 'join' ? 'Joining...' : 'Join'}
+                </button>
+              </div>
+            </div>
+
+            <div
+              style={{
+                borderRadius: '12px',
+                border: '1px solid #d8cbb8',
+                background: '#fffaf0',
+                padding: '12px',
+                color: '#5a4630',
+                fontSize: '13px',
+                lineHeight: 1.45,
+              }}
+            >
+              Tip: share the 6-character code with your opponent, then both players meet in the same match lobby.
+            </div>
+          </section>
+
+          <section
+            style={{
+              borderRadius: '18px',
+              border: '2px solid #3c3226',
+              background: 'rgba(255, 250, 242, 0.84)',
+              boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
+              padding: '18px',
+              display: 'grid',
+              gap: '14px',
+            }}
+          >
+            <div style={sectionLabelStyle}>Room Configuration</div>
+            <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Create Room</div>
+
+            <button
+              onClick={handleCreateGame}
+              disabled={isLoading}
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                borderRadius: '999px',
+                border: '2px solid #6f5a38',
+                background: isLoading ? '#d8c8ab' : '#f2d9b2',
+                color: '#2a2218',
+                fontWeight: 700,
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                cursor: isLoading ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {loadingAction === 'create' ? 'Creating...' : 'Create Game'}
+            </button>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                gap: '10px',
+              }}
+            >
               <div>
                 <div style={fieldLabelStyle}>Host Color</div>
                 <select
                   value={hostColor}
-                  onChange={(e) => setHostColor(e.target.value as RoomColorOption)}
+                  onChange={(event) => setHostColor(event.target.value as RoomColorOption)}
                   style={selectStyle}
                 >
                   <option value="random">Random</option>
@@ -359,7 +541,7 @@ export default function Home() {
                 <div style={fieldLabelStyle}>Start Color</div>
                 <select
                   value={startColor}
-                  onChange={(e) => setStartColor(e.target.value as RoomColorOption)}
+                  onChange={(event) => setStartColor(event.target.value as RoomColorOption)}
                   style={selectStyle}
                 >
                   <option value="random">Random</option>
@@ -371,7 +553,7 @@ export default function Home() {
                 <div style={fieldLabelStyle}>Next Start</div>
                 <select
                   value={nextStartColor}
-                  onChange={(e) => setNextStartColor(e.target.value as NextStartOption)}
+                  onChange={(event) => setNextStartColor(event.target.value as NextStartOption)}
                   style={selectStyle}
                 >
                   <option value="other">Other</option>
@@ -381,372 +563,71 @@ export default function Home() {
               </div>
             </div>
 
-            <div style={{
-              padding: '14px',
-              border: '1px solid #e7dfd2',
-              borderRadius: '10px',
-              background: '#f8f4ec',
-            }}>
-              <div style={{
-                fontSize: '12px',
-                fontWeight: 700,
-                letterSpacing: '1px',
-                textTransform: 'uppercase',
-                color: '#6b5f4d',
-                marginBottom: '10px',
-              }}>
-                Clock Settings
-              </div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px' }}>
+            <div
+              style={{
+                padding: '14px',
+                borderRadius: '12px',
+                border: '1px solid #d7c5ab',
+                background: '#f8f0e2',
+                display: 'grid',
+                gap: '10px',
+              }}
+            >
+              <div style={sectionLabelStyle}>Clock Settings</div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 600 }}>
                 <input
                   type="checkbox"
                   checked={sameClockSettings}
-                  onChange={(e) => handleSameClockToggle(e.target.checked)}
+                  onChange={(event) => handleSameClockToggle(event.target.checked)}
                 />
                 Same for both colors
               </label>
 
               {sameClockSettings ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '12px' }}>
-                  <div>
-                    <div style={fieldLabelStyle}>Initial Time</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              step={1}
-                              value={sharedClock.initialMinutes || 0}
-                              onChange={(e) =>
-                                setSharedClock((prev) => ({ ...prev, initialMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Min"
-                              style={inputStyle}
-                            />
-                          </div>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              max={59}
-                              step={1}
-                              value={sharedClock.initialSeconds || 0}
-                              onChange={(e) =>
-                                setSharedClock((prev) => ({ ...prev, initialSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Sec"
-                              style={inputStyle}
-                            />
-                          </div>
-                        </div>
-                  </div>
-                  <div>
-                    <div style={fieldLabelStyle}>Buffer</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                      <div>
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          step={1}
-                          value={sharedClock.bufferMinutes || 0}
-                          onChange={(e) =>
-                            setSharedClock((prev) => ({ ...prev, bufferMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                          }
-                          placeholder="Min"
-                          style={inputStyle}
-                        />
-                      </div>
-                      <div>
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          max={59}
-                          step={1}
-                          value={sharedClock.bufferSeconds || 0}
-                          onChange={(e) =>
-                            setSharedClock((prev) => ({ ...prev, bufferSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                          }
-                          placeholder="Sec"
-                          style={inputStyle}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div>
-                    <div style={fieldLabelStyle}>Increment</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                      <div>
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          step={1}
-                          value={sharedClock.incrementMinutes || 0}
-                          onChange={(e) =>
-                            setSharedClock((prev) => ({ ...prev, incrementMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                          }
-                          placeholder="Min"
-                          style={inputStyle}
-                        />
-                      </div>
-                      <div>
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          max={59}
-                          step={1}
-                          value={sharedClock.incrementSeconds || 0}
-                          onChange={(e) =>
-                            setSharedClock((prev) => ({ ...prev, incrementSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                          }
-                          placeholder="Sec"
-                          style={inputStyle}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                <ClockEditor
+                  title="Both Colors"
+                  clock={sharedClock}
+                  onChange={(field, value) => setClockValue(setSharedClock, field, value)}
+                />
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginTop: '12px' }}>
-                  <div style={{ padding: '10px', borderRadius: '8px', border: '1px solid #e2d8c9', background: 'white' }}>
-                    <div style={{ fontWeight: 700, marginBottom: '8px' }}>Black</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                      <div>
-                        <div style={fieldLabelStyle}>Initial Time</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              step={1}
-                              value={blackClock.initialMinutes || 0}
-                              onChange={(e) =>
-                                setBlackClock((prev) => ({ ...prev, initialMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Min"
-                              style={inputStyle}
-                            />
-                          </div>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              max={59}
-                              step={1}
-                              value={blackClock.initialSeconds || 0}
-                              onChange={(e) =>
-                                setBlackClock((prev) => ({ ...prev, initialSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Sec"
-                              style={inputStyle}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <div style={fieldLabelStyle}>Buffer</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              step={1}
-                              value={blackClock.bufferMinutes || 0}
-                              onChange={(e) =>
-                                setBlackClock((prev) => ({ ...prev, bufferMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Min"
-                              style={inputStyle}
-                            />
-                          </div>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              max={59}
-                              step={1}
-                              value={blackClock.bufferSeconds || 0}
-                              onChange={(e) =>
-                                setBlackClock((prev) => ({ ...prev, bufferSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Sec"
-                              style={inputStyle}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <div style={fieldLabelStyle}>Increment</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              step={1}
-                              value={blackClock.incrementMinutes || 0}
-                              onChange={(e) =>
-                                setBlackClock((prev) => ({ ...prev, incrementMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Min"
-                              style={inputStyle}
-                            />
-                          </div>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              max={59}
-                              step={1}
-                              value={blackClock.incrementSeconds || 0}
-                              onChange={(e) =>
-                                setBlackClock((prev) => ({ ...prev, incrementSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Sec"
-                              style={inputStyle}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ padding: '10px', borderRadius: '8px', border: '1px solid #e2d8c9', background: 'white' }}>
-                    <div style={{ fontWeight: 700, marginBottom: '8px' }}>White</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                      <div>
-                        <div style={fieldLabelStyle}>Initial Time</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              step={1}
-                              value={whiteClock.initialMinutes || 0}
-                              onChange={(e) =>
-                                setWhiteClock((prev) => ({ ...prev, initialMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Min"
-                              style={inputStyle}
-                            />
-                          </div>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              max={59}
-                              step={1}
-                              value={whiteClock.initialSeconds || 0}
-                              onChange={(e) =>
-                                setWhiteClock((prev) => ({ ...prev, initialSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Sec"
-                              style={inputStyle}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <div style={fieldLabelStyle}>Buffer</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              step={1}
-                              value={whiteClock.bufferMinutes || 0}
-                              onChange={(e) =>
-                                setWhiteClock((prev) => ({ ...prev, bufferMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Min"
-                              style={inputStyle}
-                            />
-                          </div>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              max={59}
-                              step={1}
-                              value={whiteClock.bufferSeconds || 0}
-                              onChange={(e) =>
-                                setWhiteClock((prev) => ({ ...prev, bufferSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Sec"
-                              style={inputStyle}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <div style={fieldLabelStyle}>Increment</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              step={1}
-                              value={whiteClock.incrementMinutes || 0}
-                              onChange={(e) =>
-                                setWhiteClock((prev) => ({ ...prev, incrementMinutes: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Min"
-                              style={inputStyle}
-                            />
-                          </div>
-                          <div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={0}
-                              max={59}
-                              step={1}
-                              value={whiteClock.incrementSeconds || 0}
-                              onChange={(e) =>
-                                setWhiteClock((prev) => ({ ...prev, incrementSeconds: e.target.value === '' ? 0 : Number(e.target.value) }))
-                              }
-                              placeholder="Sec"
-                              style={inputStyle}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px' }}>
+                  <ClockEditor
+                    title="Black"
+                    clock={blackClock}
+                    onChange={(field, value) => setClockValue(setBlackClock, field, value)}
+                    tone="dark"
+                  />
+                  <ClockEditor
+                    title="White"
+                    clock={whiteClock}
+                    onChange={(field, value) => setClockValue(setWhiteClock, field, value)}
+                    tone="dark"
+                  />
                 </div>
               )}
             </div>
 
-            <div style={{
-              padding: '12px',
-              border: '1px solid #e7dfd2',
-              borderRadius: '10px',
-              background: '#fdfbf7',
-            }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 600, marginBottom: '10px' }}>
+            <div
+              style={{
+                padding: '14px',
+                borderRadius: '12px',
+                border: '1px solid #d7c5ab',
+                background: '#fff7ea',
+                display: 'grid',
+                gap: '10px',
+              }}
+            >
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 700 }}>
                 <input
                   type="checkbox"
                   checked={maxGameEnabled}
-                  onChange={(e) => setMaxGameEnabled(e.target.checked)}
+                  onChange={(event) => setMaxGameEnabled(event.target.checked)}
                 />
-                Max game time
+                Max Game Time
               </label>
+
               {maxGameEnabled && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                   <div>
                     <div style={fieldLabelStyle}>Hours</div>
                     <input
@@ -755,12 +636,8 @@ export default function Home() {
                       min={0}
                       step={1}
                       value={maxGameHours || 0}
-                      onChange={(e) => setMaxGameHours(e.target.value === '' ? 0 : Number(e.target.value))}
-                      placeholder="Hours"
-                      style={{
-                        ...inputStyle,
-                        background: 'white',
-                      }}
+                      onChange={(event) => setMaxGameHours(event.target.value === '' ? 0 : Number(event.target.value))}
+                      style={inputStyle}
                     />
                   </div>
                   <div>
@@ -772,76 +649,56 @@ export default function Home() {
                       max={59}
                       step={1}
                       value={maxGameMinutes || 0}
-                      onChange={(e) => setMaxGameMinutes(e.target.value === '' ? 0 : Number(e.target.value))}
-                      placeholder="Minutes"
-                      style={{
-                        ...inputStyle,
-                        background: 'white',
-                      }}
+                      onChange={(event) => setMaxGameMinutes(event.target.value === '' ? 0 : Number(event.target.value))}
+                      style={inputStyle}
                     />
                   </div>
                 </div>
               )}
             </div>
-          </div>
+          </section>
         </div>
-        
+
         {error && (
-          <div style={{
-            marginTop: '20px',
-            padding: '10px',
-            background: '#f8d7da',
-            color: '#721c24',
-            borderRadius: '4px',
-          }}>
+          <div
+            style={{
+              borderRadius: '12px',
+              border: '2px solid #8b3b3b',
+              background: '#f7d7d5',
+              color: '#5c1c16',
+              padding: '10px 14px',
+              fontWeight: 600,
+            }}
+          >
             {error}
           </div>
         )}
-      </div>
-      
-      <div style={{
-        marginTop: '40px',
-        paddingTop: '20px',
-        borderTop: '1px solid #eee',
-        textAlign: 'center',
-      }}>
-        <div style={{
-          display: 'flex',
-          justifyContent: 'center',
-          gap: '20px',
-          flexWrap: 'wrap',
-          fontSize: '14px',
-        }}>
-          <Link 
-            to="/datenschutz" 
-            style={{ 
-              color: '#666', 
-              textDecoration: 'none',
-            }}
-          >
+
+        <footer
+          style={{
+            borderRadius: '12px',
+            border: '1px solid #d8cbb8',
+            background: 'rgba(255, 250, 242, 0.7)',
+            padding: '12px',
+            display: 'flex',
+            justifyContent: 'center',
+            gap: '12px',
+            flexWrap: 'wrap',
+            fontSize: '13px',
+          }}
+        >
+          <Link to="/datenschutz" style={{ color: '#5a4630', textDecoration: 'none' }}>
             Datenschutz
           </Link>
-          <span style={{ color: '#ccc' }}>|</span>
-          <Link 
-            to="/disclaimer" 
-            style={{ 
-              color: '#666', 
-              textDecoration: 'none',
-            }}
-          >
+          <span style={{ color: '#b59d7c' }}>|</span>
+          <Link to="/disclaimer" style={{ color: '#5a4630', textDecoration: 'none' }}>
             Disclaimer
           </Link>
-          <span style={{ color: '#ccc' }}>|</span>
-          <Link 
-            to="/impressum" 
-            style={{ 
-              color: '#666', 
-              textDecoration: 'none',
-            }}
-          >
+          <span style={{ color: '#b59d7c' }}>|</span>
+          <Link to="/impressum" style={{ color: '#5a4630', textDecoration: 'none' }}>
             Impressum
           </Link>
-        </div>
+        </footer>
       </div>
     </div>
   );
