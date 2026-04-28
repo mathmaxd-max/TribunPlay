@@ -14,7 +14,9 @@
   "scripts": {
     "build": "node ../../node_modules/typescript/bin/tsc --project tsconfig.json",
     "dev": "tsc --watch",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "npm run test:encoding",
+    "test:encoding": "npm run build && node test/run-encoding-regression.mjs"
   },
   "keywords": [],
   "author": "",

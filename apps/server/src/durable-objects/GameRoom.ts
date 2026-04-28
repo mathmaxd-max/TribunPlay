@@ -424,10 +424,10 @@ export class GameRoom implements DurableObject {
 		
 		// Load actions
 		const actionsResult = await this.env.DB.prepare(
-			"SELECT action_u32, created_at FROM game_actions WHERE game_id = ? ORDER BY ply ASC"
-		).bind(gameId).all<{ action_u32: number; created_at: string }>();
+			"SELECT action_u32, actor_color, created_at FROM game_actions WHERE game_id = ? ORDER BY ply ASC"
+		).bind(gameId).all<{ action_u32: number; actor_color: number | null; created_at: string }>();
 		
-		const actions = actionsResult.results?.map(r => r.action_u32) || [];
+		const actions = actionsResult.results || [];
 		const lastActionAt = actionsResult.results?.length
 			? actionsResult.results[actionsResult.results.length - 1].created_at
 			: null;
@@ -444,7 +444,19 @@ export class GameRoom implements DurableObject {
 			drawOfferBlocked: supportsBlocked ? (game.draw_offer_blocked as engine.Color | null) : null,
 		};
 		
-		for (const action of actions) {
+		for (const entry of actions) {
+			const action = entry.action_u32 >>> 0;
+			const decoded = engine.decodeAction(action);
+			if (decoded.opcode === 10) {
+				if (entry.actor_color !== 0 && entry.actor_color !== 1) {
+					throw new Error(`Invalid DRAW replay entry without actor_color at ply ${this.gameState.ply}`);
+				}
+				if (decoded.fields.actorColor !== entry.actor_color) {
+					throw new Error(
+						`Legacy or invalid DRAW encoding in replay at ply ${this.gameState.ply}: encoded actor=${decoded.fields.actorColor}, stored actor=${entry.actor_color}`
+					);
+				}
+			}
 			this.gameState = engine.applyAction(this.gameState, action);
 		}
 
@@ -485,7 +497,7 @@ export class GameRoom implements DurableObject {
 
 		await this.scheduleNextAlarm();
 
-		this.actionLog = actions;
+		this.actionLog = actions.map((entry) => entry.action_u32 >>> 0);
 		
 		// Update legal set and send Bloom filter
 		if (this.gameState) {
@@ -829,15 +841,16 @@ export class GameRoom implements DurableObject {
 			return;
 		}
 		
+		const rawActionWord = actionWord >>> 0;
 		this.logGame("action.recv", {
 			connectionId,
 			role,
 			ply: this.gameState.ply,
-			...this.describeAction(actionWord),
+			...this.describeAction(rawActionWord),
 		});
 
 		// Validate role
-		const { opcode, fields } = engine.decodeAction(actionWord);
+		const { opcode, fields } = engine.decodeAction(rawActionWord);
 		if (opcode !== 10 && opcode !== 11) {
 			// Board actions require player role
 			if (role === "spectator") {
@@ -858,7 +871,7 @@ export class GameRoom implements DurableObject {
 			}
 			const expectedColor = role === "black" ? 0 : 1;
 			if (opcode === 10 && fields.actorColor !== expectedColor) {
-				this.sendError(ws, "Draw action color mismatch");
+				this.sendError(ws, "Draw action color mismatch (legacy encoding not supported)");
 				return;
 			}
 			if (opcode === 11 && fields.loserColor !== expectedColor) {
@@ -868,13 +881,13 @@ export class GameRoom implements DurableObject {
 		}
 		
 		// Validate legality
-		if (!this.legalSet.has(actionWord)) {
+		if (!this.legalSet.has(rawActionWord)) {
 			this.logGame("action.reject", {
 				connectionId,
 				role,
 				reason: "Illegal action",
 				legalSetSize: this.legalSet.size,
-				...this.describeAction(actionWord),
+				...this.describeAction(rawActionWord),
 			});
 			this.sendError(ws, "Illegal action");
 			return;
@@ -883,7 +896,7 @@ export class GameRoom implements DurableObject {
 			connectionId,
 			role,
 			legalSetSize: this.legalSet.size,
-			...this.describeAction(actionWord),
+			...this.describeAction(rawActionWord),
 		});
 		
 		const shouldStartGame = this.gameStartTime === null && opcode !== 10 && opcode !== 11;
@@ -894,7 +907,7 @@ export class GameRoom implements DurableObject {
 
 		// Apply action
 		const previousState = this.gameState;
-		const newState = engine.applyAction(this.gameState, actionWord);
+		const newState = engine.applyAction(this.gameState, rawActionWord);
 		
 		// Update clocks if turn changed
 		const timeoutLoser =
@@ -908,7 +921,7 @@ export class GameRoom implements DurableObject {
 			this.gameId = (this.state.id as any).name || this.state.id.toString();
 		}
 		const gameId = this.gameId;
-		const actorColor = role === "spectator" ? null : (role === "black" ? 0 : 1);
+		const actorColor = role === "black" ? 0 : 1;
 		const actionPly = newState.ply - 1; // ply before this action
 		
 		// Update game row with clock values
@@ -927,7 +940,7 @@ export class GameRoom implements DurableObject {
 		).bind(
 			gameId,
 			actionPly,
-			actionWord,
+			rawActionWord,
 			actorColor,
 			new Date().toISOString()
 		).run();
@@ -982,18 +995,18 @@ export class GameRoom implements DurableObject {
 		const legalActions = engine.generateLegalActions(this.gameState);
 		const legalList = Array.from(legalActions);
 		this.legalSet = new Set(legalList);
-		this.actionLog.push(actionWord);
+		this.actionLog.push(rawActionWord);
 		this.logGame("action.apply.ok", {
 			connectionId,
 			role,
 			plyBefore: previousState.ply,
 			plyAfter: newState.ply,
 			legalCount: legalList.length,
-			...this.describeAction(actionWord),
+			...this.describeAction(rawActionWord),
 		});
 		
 		// Broadcast action and Bloom filter
-		this.broadcastAction(actionWord);
+		this.broadcastAction(rawActionWord);
 		if (gameEnded) {
 			this.roomStatus = "ended";
 			this.turnStartTime = null;

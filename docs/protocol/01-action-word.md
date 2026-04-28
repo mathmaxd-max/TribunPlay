@@ -151,30 +151,30 @@ Tribun attack selection MUST NOT toggle between primary/secondary variants; it i
 
 ---
 
-## Opcode 10: DRAW (offer/retract/accept)
+## Opcode 10: DRAW (offer/retract/accept/decline)
 Payload bits:
 - `0..1`   `drawAction`:
   - `0` offer
   - `1` retract
   - `2` accept
-  - `3` reserved
+  - `3` decline
 - `2`      `actorColor` (0 black, 1 white)
 
 Rules:
 - Draw actions MAY occur at any time (not only on turn).
 - Accept ends the game immediately as a tie.
+- Legacy DRAW encodings are invalid and MUST be rejected.
 
 ---
 
 ## Opcode 11: END (terminal)
 Payload bits:
-- `0..2`   `endReason`:
+- `0..1`   `endReason`:
   - `0` resign
   - `1` no-legal-moves
   - `2` timeout-player (loss)
   - `3` timeout-game-tie (max total game time reached)
-  - `4..7` reserved
-- `3`      `loserColor` (meaningful for reasons 0..2; ignored for reason 3)
+- `2`      `loserColor` (meaningful for reasons 0..2; ignored for reason 3)
 
 ---
 

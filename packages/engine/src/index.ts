@@ -101,7 +101,7 @@ export function opcode(word: number): number {
 }
 
 export function payload(word: number): number {
-  return word & 0x0ffffff;
+  return word & 0x0fffffff;
 }
 
 // MOVE: opcode 0
@@ -186,7 +186,7 @@ export function encodeAttackTribun(attackerCid: number, tribunCid: number, winne
 // DRAW: opcode 10
 export function encodeDraw(drawAction: 0 | 1 | 2 | 3, actorColor: Color): number {
   // drawAction: 0=offer, 1=retract, 2=accept, 3=decline
-  return (10 << 28) | (actorColor << 1) | drawAction;
+  return (10 << 28) | (actorColor << 2) | drawAction;
 }
 
 // END: opcode 11
@@ -258,7 +258,7 @@ export function decodeAction(action: number): { opcode: number; fields: Record<s
       break;
     case 10: // DRAW
       fields.drawAction = pay & 0x3;
-      fields.actorColor = (pay >>> 1) & 0x1;
+      fields.actorColor = (pay >>> 2) & 0x1;
       break;
     case 11: // END
       fields.endReason = pay & 0x3;

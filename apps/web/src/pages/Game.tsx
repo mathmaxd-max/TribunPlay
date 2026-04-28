@@ -289,6 +289,7 @@ export default function Game() {
     spectators: 0,
   });
   const [showEndModal, setShowEndModal] = useState(false);
+  const [showSurrenderConfirm, setShowSurrenderConfirm] = useState(false);
   const [gameState, setGameState] = useState<engine.State | null>(null);
   const gameStateRef = useRef<engine.State | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2332,31 +2333,40 @@ export default function Game() {
   const drawButtonLabel = hasDrawOffer
     ? isOfferer
       ? 'Withdraw Offer'
-      : 'Decline Draw'
+      : 'Accept Draw'
     : isBlocked
     ? 'Rejected'
     : 'Offer Draw';
-  const surrenderButtonLabel = isReceiver ? 'Accept Draw' : 'Surrender';
+  const surrenderButtonLabel = isReceiver ? 'Decline Draw' : 'Surrender';
 
   const drawAction =
     gameState && playerColor !== null
       ? hasDrawOffer
         ? isOfferer
-          ? engine.encodeDraw(1, playerColor)
+          ? engine.encodeDraw(1, playerColor) // withdraw
           : isReceiver
-          ? engine.encodeDraw(3, playerColor)
+          ? engine.encodeDraw(2, playerColor) // accept (repurposes offer button)
           : null
         : isBlocked
         ? null
-        : engine.encodeDraw(0, playerColor)
+        : engine.encodeDraw(0, playerColor) // offer
       : null;
 
   const surrenderAction =
     gameState && playerColor !== null
       ? isReceiver
-        ? engine.encodeDraw(2, playerColor)
+        ? engine.encodeDraw(3, playerColor) // decline (repurposes surrender button)
         : engine.encodeEnd(0, playerColor)
       : null;
+
+  const handleSurrenderClick = () => {
+    if (!surrenderAction) return;
+    if (isReceiver) {
+      sendAction(surrenderAction);
+      return;
+    }
+    setShowSurrenderConfirm(true);
+  };
 
   const canSendAction = (action: number | null) => {
     if (!action || !cache || !gameState) return false;
@@ -2662,6 +2672,7 @@ export default function Game() {
             padding: '20px',
             zIndex: 50,
           }}
+          onClick={() => setShowEndModal(false)}
         >
           <div
             style={{
@@ -2674,6 +2685,7 @@ export default function Game() {
               textAlign: 'center',
               position: 'relative',
             }}
+            onClick={(event) => event.stopPropagation()}
           >
             <button
               onClick={() => setShowEndModal(false)}
@@ -2732,6 +2744,109 @@ export default function Game() {
             {nextGameHint && (
               <div style={{ marginTop: '12px', fontSize: '12px', color: '#7a6543' }}>{nextGameHint}</div>
             )}
+          </div>
+        </div>
+      )}
+
+      {showSurrenderConfirm && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(20, 15, 10, 0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+            zIndex: 55,
+          }}
+          onClick={() => setShowSurrenderConfirm(false)}
+        >
+          <div
+            style={{
+              width: 'min(520px, 92vw)',
+              background: '#fff7ea',
+              borderRadius: '18px',
+              border: '2px solid #b9833b',
+              padding: '24px',
+              boxShadow: '0 24px 40px rgba(39, 30, 20, 0.25)',
+              textAlign: 'center',
+              position: 'relative',
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              onClick={() => setShowSurrenderConfirm(false)}
+              aria-label="Close"
+              style={{
+                position: 'absolute',
+                top: '12px',
+                right: '12px',
+                width: '28px',
+                height: '28px',
+                borderRadius: '50%',
+                border: '1px solid #d4c3a5',
+                background: '#f7ecd8',
+                color: '#5a4630',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              x
+            </button>
+            <div
+              style={{
+                fontSize: '12px',
+                fontWeight: 700,
+                letterSpacing: '2px',
+                textTransform: 'uppercase',
+                color: '#7a6543',
+                marginBottom: '12px',
+              }}
+            >
+              Confirm surrender
+            </div>
+            <div style={{ fontSize: '16px', marginBottom: '18px', color: '#5a4630' }}>
+              This will end the game immediately.
+            </div>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => setShowSurrenderConfirm(false)}
+                style={{
+                  padding: '12px 18px',
+                  borderRadius: '999px',
+                  border: '2px solid #6f5a38',
+                  background: '#f2d9b2',
+                  color: '#2a2218',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (!surrenderAction) return;
+                  setShowSurrenderConfirm(false);
+                  sendAction(surrenderAction);
+                }}
+                style={{
+                  padding: '12px 18px',
+                  borderRadius: '999px',
+                  border: '2px solid #5b2a2a',
+                  background: '#8b3b3b',
+                  color: '#f8f1e7',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  cursor: 'pointer',
+                }}
+              >
+                Surrender
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2952,7 +3067,7 @@ export default function Game() {
               Submit Move
             </button>
             <button
-              onClick={() => surrenderAction && sendAction(surrenderAction)}
+              onClick={handleSurrenderClick}
               disabled={!canSendAction(surrenderAction)}
               style={{
                 padding: '12px',
@@ -3044,7 +3159,7 @@ export default function Game() {
               </button>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                 <button
-                  onClick={() => surrenderAction && sendAction(surrenderAction)}
+                  onClick={handleSurrenderClick}
                   disabled={!canSendAction(surrenderAction)}
                   style={{
                     padding: '10px',

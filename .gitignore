@@ -13,6 +13,8 @@ node_modules/
 
 # Build outputs
 dist/
+!packages/engine/dist/
+!packages/engine/dist/**
 build/
 *.tsbuildinfo
 *.js.map
