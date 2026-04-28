@@ -240,32 +240,43 @@ export class GameRoom implements DurableObject {
 		// Handle incoming messages
 		ws.addEventListener("message", async (event) => {
 			try {
-				this.logGame("ws.message.inbound", {
-					connectionId,
-					role,
-					dataType: typeof event.data,
-					ctor: (event.data as any)?.constructor?.name ?? null,
-					byteLength:
-						event.data instanceof ArrayBuffer
-							? event.data.byteLength
-							: event.data instanceof Blob
-							? event.data.size
-							: null,
-				});
 				if (typeof event.data === "string") {
 					// JSON control message
 					const message = JSON.parse(event.data);
-					this.logGame("ws.message.json", {
-						connectionId,
-						role,
-						type: message?.t ?? null,
-					});
+					// `time_sync` is expected to be frequent; logging it spams server logs.
+					const messageType = message?.t ?? null;
+					if (messageType !== "time_sync") {
+						this.logGame("ws.message.inbound", {
+							connectionId,
+							role,
+							dataType: typeof event.data,
+							ctor: (event.data as any)?.constructor?.name ?? null,
+							byteLength: null,
+						});
+						this.logGame("ws.message.json", {
+							connectionId,
+							role,
+							type: messageType,
+						});
+					}
 					await this.handleControlMessage(connectionId, message, ws);
 				} else if (
 					event.data instanceof ArrayBuffer ||
 					ArrayBuffer.isView(event.data) ||
 					event.data instanceof Blob
 				) {
+					this.logGame("ws.message.inbound", {
+						connectionId,
+						role,
+						dataType: typeof event.data,
+						ctor: (event.data as any)?.constructor?.name ?? null,
+						byteLength:
+							event.data instanceof ArrayBuffer
+								? event.data.byteLength
+								: event.data instanceof Blob
+								? event.data.size
+								: null,
+					});
 					let binaryData: ArrayBuffer | null = null;
 					if (event.data instanceof ArrayBuffer) {
 						binaryData = event.data;
@@ -301,6 +312,13 @@ export class GameRoom implements DurableObject {
 						});
 					}
 				} else {
+					this.logGame("ws.message.inbound", {
+						connectionId,
+						role,
+						dataType: typeof event.data,
+						ctor: (event.data as any)?.constructor?.name ?? null,
+						byteLength: null,
+					});
 					this.logGame("ws.message.ignored", {
 						connectionId,
 						role,
