@@ -92,6 +92,18 @@ export async function checkWebSocketHealth(
   timeout: number = 5000
 ): Promise<{ reachable: boolean; error?: string; responseTime?: number }> {
   const startTime = Date.now();
+  const logHealth = (event: string, payload: Record<string, unknown> = {}) => {
+    const record = {
+      ts: new Date().toISOString(),
+      tag: 'WS-HEALTH',
+      event,
+      wsBase,
+      timeout,
+      ...payload,
+    };
+    console.info('[WS-HEALTH]', JSON.stringify(record));
+  };
+  logHealth('check.start');
   
   return new Promise((resolve) => {
     let resolved = false;
@@ -105,6 +117,7 @@ export async function checkWebSocketHealth(
           ws.close();
         }
         const responseTime = Date.now() - startTime;
+        logHealth('check.timeout', { responseTime });
         resolve({
           reachable: false,
           error: `Timeout after ${timeout}ms`,
@@ -117,6 +130,7 @@ export async function checkWebSocketHealth(
       // Connect to the dedicated health endpoint (accepts handshake, then closes)
       const base = wsBase.endsWith("/") ? wsBase.slice(0, -1) : wsBase;
       const testUrl = base ? `${base}/ws/health` : "/ws/health";
+      logHealth('ws.open.start', { testUrl });
       ws = new WebSocket(testUrl);
       
       ws.onopen = () => {
@@ -124,6 +138,7 @@ export async function checkWebSocketHealth(
           resolved = true;
           clearTimeout(timeoutId);
           const responseTime = Date.now() - startTime;
+          logHealth('ws.open.ok', { responseTime });
           ws?.close();
           resolve({
             reachable: true,
@@ -133,6 +148,7 @@ export async function checkWebSocketHealth(
       };
       
       ws.onerror = () => {
+        logHealth('ws.error');
         // If close doesn't fire within a short time after error, it's likely unreachable
         setTimeout(() => {
           if (!resolved && !closeReceived) {
@@ -144,6 +160,7 @@ export async function checkWebSocketHealth(
             if (ws) {
               ws.close();
             }
+            logHealth('ws.error.unreachable', { responseTime });
             resolve({
               reachable: false,
               error: 'Connection failed (no response from server)',
@@ -159,6 +176,12 @@ export async function checkWebSocketHealth(
           closeReceived = true;
           clearTimeout(timeoutId);
           const responseTime = Date.now() - startTime;
+          logHealth('ws.close', {
+            code: event.code,
+            reason: event.reason,
+            wasClean: event.wasClean,
+            responseTime,
+          });
           
           // Close code 1006 usually means connection failed before handshake (network error)
           // This happens when the connection can't be established at all
@@ -189,6 +212,10 @@ export async function checkWebSocketHealth(
         resolved = true;
         clearTimeout(timeoutId);
         const responseTime = Date.now() - startTime;
+        logHealth('check.exception', {
+          responseTime,
+          error: error instanceof Error ? error.message : String(error),
+        });
         resolve({
           reachable: false,
           error: error instanceof Error ? error.message : 'Unknown error',

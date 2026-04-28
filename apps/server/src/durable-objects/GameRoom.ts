@@ -131,6 +131,40 @@ export class GameRoom implements DurableObject {
 		this.env = env;
 	}
 
+	private logGame(event: string, payload: Record<string, unknown> = {}): void {
+		const record = {
+			ts: new Date().toISOString(),
+			side: "server",
+			tag: "WS-GAME",
+			event,
+			gameId: this.gameId,
+			connections: this.connections.size,
+			...payload,
+		};
+		console.info("[WS-GAME]", JSON.stringify(record));
+	}
+
+	private describeAction(actionWord: number): {
+		signed: number;
+		unsigned: number;
+		hex: string;
+		opcode: number | null;
+	} {
+		const unsigned = actionWord >>> 0;
+		let opcode: number | null = null;
+		try {
+			opcode = engine.decodeAction(unsigned).opcode;
+		} catch {
+			opcode = null;
+		}
+		return {
+			signed: actionWord | 0,
+			unsigned,
+			hex: `0x${unsigned.toString(16).padStart(8, "0")}`,
+			opcode,
+		};
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		// Handle WebSocket upgrade
 		const upgradeHeader = request.headers.get("Upgrade");
@@ -192,6 +226,11 @@ export class GameRoom implements DurableObject {
 		
 		this.connections.set(connectionId, { ws, role, token });
 		ws.accept();
+		this.logGame("ws.accept", {
+			connectionId,
+			role,
+			gameId,
+		});
 
 		// Load game state and send initial sync
 		await this.loadGameState();
@@ -201,25 +240,93 @@ export class GameRoom implements DurableObject {
 		// Handle incoming messages
 		ws.addEventListener("message", async (event) => {
 			try {
+				this.logGame("ws.message.inbound", {
+					connectionId,
+					role,
+					dataType: typeof event.data,
+					ctor: (event.data as any)?.constructor?.name ?? null,
+					byteLength:
+						event.data instanceof ArrayBuffer
+							? event.data.byteLength
+							: event.data instanceof Blob
+							? event.data.size
+							: null,
+				});
 				if (typeof event.data === "string") {
 					// JSON control message
 					const message = JSON.parse(event.data);
+					this.logGame("ws.message.json", {
+						connectionId,
+						role,
+						type: message?.t ?? null,
+					});
 					await this.handleControlMessage(connectionId, message, ws);
-				} else if (event.data instanceof ArrayBuffer) {
-					// Binary action word (4 bytes)
-					if (event.data.byteLength === 4) {
-						const view = new DataView(event.data);
-						const actionWord = view.getUint32(0, true); // little-endian
-						await this.handleActionWord(connectionId, actionWord, ws, role);
+				} else if (
+					event.data instanceof ArrayBuffer ||
+					ArrayBuffer.isView(event.data) ||
+					event.data instanceof Blob
+				) {
+					let binaryData: ArrayBuffer | null = null;
+					if (event.data instanceof ArrayBuffer) {
+						binaryData = event.data;
+					} else if (ArrayBuffer.isView(event.data)) {
+						const bytes = new Uint8Array(
+							event.data.buffer,
+							event.data.byteOffset,
+							event.data.byteLength
+						);
+						binaryData = bytes.slice().buffer;
+					} else if (event.data instanceof Blob) {
+						binaryData = await event.data.arrayBuffer();
 					}
+
+					// Binary action word (4 bytes)
+					if (binaryData && binaryData.byteLength === 4) {
+						const view = new DataView(binaryData);
+						const actionWord = view.getUint32(0, true); // little-endian
+						this.logGame("ws.message.action", {
+							connectionId,
+							role,
+							...this.describeAction(actionWord),
+							ply: this.gameState?.ply ?? null,
+						});
+						await this.handleActionWord(connectionId, actionWord, ws, role);
+					} else {
+						this.logGame("ws.message.ignored", {
+							connectionId,
+							role,
+							dataType: typeof event.data,
+							ctor: (event.data as any)?.constructor?.name ?? null,
+							reason: "binary_length_not_4",
+						});
+					}
+				} else {
+					this.logGame("ws.message.ignored", {
+						connectionId,
+						role,
+						dataType: typeof event.data,
+						ctor: (event.data as any)?.constructor?.name ?? null,
+					});
 				}
 			} catch (error) {
+				this.logGame("ws.message.error", {
+					connectionId,
+					role,
+					error: error instanceof Error ? error.message : String(error),
+				});
 				this.sendError(ws, error instanceof Error ? error.message : "Unknown error");
 			}
 		});
 
-		ws.addEventListener("close", () => {
+		ws.addEventListener("close", (event) => {
 			this.connections.delete(connectionId);
+			this.logGame("ws.close", {
+				connectionId,
+				role,
+				code: event.code,
+				reason: event.reason,
+				wasClean: event.wasClean,
+			});
 			this.broadcastRoomUpdate();
 		});
 	}
@@ -674,18 +781,43 @@ export class GameRoom implements DurableObject {
 		role: "black" | "white" | "spectator"
 	): Promise<void> {
 		if (!this.gameState) {
+			this.logGame("action.reject", {
+				connectionId,
+				role,
+				reason: "Game state not loaded",
+				...this.describeAction(actionWord),
+			});
 			this.sendError(ws, "Game state not loaded");
 			return;
 		}
 		if (this.roomStatus !== "active") {
+			this.logGame("action.reject", {
+				connectionId,
+				role,
+				reason: "Game has not started",
+				...this.describeAction(actionWord),
+			});
 			this.sendError(ws, "Game has not started");
 			return;
 		}
 		if (this.gameState.status === "ended") {
+			this.logGame("action.reject", {
+				connectionId,
+				role,
+				reason: "Game has ended",
+				...this.describeAction(actionWord),
+			});
 			this.sendError(ws, "Game has ended");
 			return;
 		}
 		
+		this.logGame("action.recv", {
+			connectionId,
+			role,
+			ply: this.gameState.ply,
+			...this.describeAction(actionWord),
+		});
+
 		// Validate role
 		const { opcode, fields } = engine.decodeAction(actionWord);
 		if (opcode !== 10 && opcode !== 11) {
@@ -719,9 +851,22 @@ export class GameRoom implements DurableObject {
 		
 		// Validate legality
 		if (!this.legalSet.has(actionWord)) {
+			this.logGame("action.reject", {
+				connectionId,
+				role,
+				reason: "Illegal action",
+				legalSetSize: this.legalSet.size,
+				...this.describeAction(actionWord),
+			});
 			this.sendError(ws, "Illegal action");
 			return;
 		}
+		this.logGame("action.legal", {
+			connectionId,
+			role,
+			legalSetSize: this.legalSet.size,
+			...this.describeAction(actionWord),
+		});
 		
 		const shouldStartGame = this.gameStartTime === null && opcode !== 10 && opcode !== 11;
 		const startedAtIso = shouldStartGame ? new Date().toISOString() : null;
@@ -820,6 +965,14 @@ export class GameRoom implements DurableObject {
 		const legalList = Array.from(legalActions);
 		this.legalSet = new Set(legalList);
 		this.actionLog.push(actionWord);
+		this.logGame("action.apply.ok", {
+			connectionId,
+			role,
+			plyBefore: previousState.ply,
+			plyAfter: newState.ply,
+			legalCount: legalList.length,
+			...this.describeAction(actionWord),
+		});
 		
 		// Broadcast action and Bloom filter
 		this.broadcastAction(actionWord);
@@ -848,12 +1001,17 @@ export class GameRoom implements DurableObject {
 	}
 
 	private broadcastAction(actionWord: number): void {
-		const buffer = new ArrayBuffer(4);
-		const view = new DataView(buffer);
-		view.setUint32(0, actionWord, true); // little-endian
+		this.logGame("broadcast.action", {
+			targets: this.connections.size,
+			...this.describeAction(actionWord),
+			ply: this.gameState?.ply ?? null,
+		});
 
 		for (const { ws } of this.connections.values()) {
 			if (ws.readyState === 1) { // WebSocket.OPEN
+				const buffer = new ArrayBuffer(4);
+				const view = new DataView(buffer);
+				view.setUint32(0, actionWord, true); // little-endian
 				ws.send(buffer);
 			}
 		}
@@ -951,6 +1109,14 @@ export class GameRoom implements DurableObject {
 		if (!this.gameState) return;
 		
 		const bloom = this.createBloomFilter(legalActions);
+		this.logGame("broadcast.legal", {
+			targets: this.connections.size,
+			ply: this.gameState.ply,
+			legalCount: legalActions.length,
+			bloomM: bloom.m,
+			bloomK: bloom.k,
+			bloomBitsLength: bloom.bitsB64.length,
+		});
 		const message = JSON.stringify({
 			t: "legal",
 			ply: this.gameState.ply,

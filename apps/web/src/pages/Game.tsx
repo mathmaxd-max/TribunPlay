@@ -260,10 +260,26 @@ const advanceClockSnapshot = (
   };
 };
 
+const digestBoard = (board: Uint8Array): { sum: number; xor: number; len: number } => {
+  let sum = 0 >>> 0;
+  let xor = 0 >>> 0;
+  for (let i = 0; i < board.length; i++) {
+    const value = board[i] >>> 0;
+    sum = (sum + value) >>> 0;
+    xor = (xor ^ ((value << (i % 8)) >>> 0)) >>> 0;
+  }
+  return { sum, xor, len: board.length };
+};
+
+const toHex32 = (value: number): string => `0x${(value >>> 0).toString(16).padStart(8, '0')}`;
+
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
   const wsRef = useRef<WebSocket | null>(null);
+  const sessionIdRef = useRef(`sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+  const wsConnIdRef = useRef(0);
+  const msgSeqRef = useRef(0);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [role, setRole] = useState<Role | null>(null);
   const [roomStatus, setRoomStatus] = useState<RoomStatus>('lobby');
@@ -274,6 +290,7 @@ export default function Game() {
   });
   const [showEndModal, setShowEndModal] = useState(false);
   const [gameState, setGameState] = useState<engine.State | null>(null);
+  const gameStateRef = useRef<engine.State | null>(null);
   const [error, setError] = useState<string | null>(null);
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
@@ -312,6 +329,37 @@ export default function Game() {
     if (!gameState || !validator) return null;
     return buildCache(gameState, validator);
   }, [gameState, validator]);
+
+  const logGame = (event: string, payload: Record<string, unknown> = {}) => {
+    const record = {
+      ts: new Date().toISOString(),
+      side: 'client',
+      tag: 'WS-GAME',
+      event,
+      code: code ?? null,
+      sessionId: sessionIdRef.current,
+      connId: wsConnIdRef.current,
+      seq: msgSeqRef.current,
+      ...payload,
+    };
+    console.info('[WS-GAME]', JSON.stringify(record));
+  };
+
+  const describeAction = (action: number) => {
+    const unsigned = action >>> 0;
+    let opcode: number | null = null;
+    try {
+      opcode = engine.decodeAction(unsigned).opcode;
+    } catch {
+      opcode = null;
+    }
+    return {
+      signed: action | 0,
+      unsigned,
+      hex: toHex32(unsigned),
+      opcode,
+    };
+  };
 
   const getServerNowMs = () => {
     const offset = serverOffsetMsRef.current;
@@ -559,6 +607,10 @@ export default function Game() {
   }, [timeControl]);
 
   useEffect(() => {
+    gameStateRef.current = gameState;
+  }, [gameState]);
+
+  useEffect(() => {
     const info = resolveEndInfo({
       state: gameState,
       lastActionWord,
@@ -703,15 +755,66 @@ export default function Game() {
 
     let mounted = true;
     let timeSyncInterval: ReturnType<typeof setInterval> | null = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempts = 0;
 
     const requestSync = () => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        logGame('sync_req.send', {
+          readyState: wsRef.current.readyState,
+          localPly: gameStateRef.current?.ply ?? null,
+        });
         wsRef.current.send(JSON.stringify({ t: 'sync_req' }));
+      } else {
+        logGame('sync_req.skip', {
+          hasSocket: Boolean(wsRef.current),
+          readyState: wsRef.current?.readyState ?? null,
+          localPly: gameStateRef.current?.ply ?? null,
+        });
       }
+    };
+
+    const scheduleReconnect = (reason: string) => {
+      if (!mounted) return;
+      if (reconnectTimeout) return;
+      const delayMs = Math.min(1000 * (2 ** reconnectAttempts), 8000);
+      reconnectAttempts += 1;
+      logGame('ws.reconnect.schedule', {
+        reason,
+        attempt: reconnectAttempts,
+        delayMs,
+      });
+      reconnectTimeout = setTimeout(() => {
+        reconnectTimeout = null;
+        if (!mounted) return;
+        setConnectionState('connecting');
+        connect();
+      }, delayMs);
+    };
+
+    const decodeActionWord = async (data: unknown): Promise<number | null> => {
+      if (data instanceof ArrayBuffer) {
+        if (data.byteLength !== 4) return null;
+        return new DataView(data).getUint32(0, true);
+      }
+      if (ArrayBuffer.isView(data)) {
+        if (data.byteLength !== 4) return null;
+        return new DataView(data.buffer, data.byteOffset, 4).getUint32(0, true);
+      }
+      if (data instanceof Blob) {
+        const buffer = await data.arrayBuffer();
+        if (buffer.byteLength !== 4) return null;
+        return new DataView(buffer).getUint32(0, true);
+      }
+      return null;
     };
 
     const connect = async () => {
       try {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.close();
+        }
+
         // Check if we already have a token for this game (from create or previous join)
         const storedToken = localStorage.getItem(`game_token_${code}`);
         const storedGameId = localStorage.getItem(`game_id_${code}`);
@@ -753,6 +856,13 @@ export default function Game() {
 
         // Connect WebSocket
         const wsUrl = `${WS_BASE}/ws/game/${gameId}?token=${token}`;
+        wsConnIdRef.current += 1;
+        msgSeqRef.current = 0;
+        logGame('ws.connect.start', {
+          wsUrl,
+          role: seat,
+          gameId,
+        });
         serverOffsetMsRef.current = null;
         bestRttMsRef.current = null;
         const ws = new WebSocket(wsUrl);
@@ -762,6 +872,7 @@ export default function Game() {
         const sendTimeSync = () => {
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
           const clientTimeMs = Date.now();
+          logGame('time_sync.send', { clientTimeMs });
           ws.send(JSON.stringify({ t: 'time_sync', clientTimeMs }));
         };
 
@@ -769,19 +880,44 @@ export default function Game() {
           if (mounted) {
             setConnectionState('connected');
           }
+          reconnectAttempts = 0;
+          logGame('ws.open', { readyState: ws.readyState });
           sendTimeSync();
           timeSyncInterval = setInterval(sendTimeSync, 15000);
         };
 
-        ws.onmessage = (event) => {
+        ws.onmessage = async (event) => {
           if (!mounted) return;
+          msgSeqRef.current += 1;
+
+          logGame('ws.message.inbound', {
+            dataType: typeof event.data,
+            ctor: (event.data as any)?.constructor?.name ?? null,
+            byteLength:
+              event.data instanceof ArrayBuffer
+                ? event.data.byteLength
+                : ArrayBuffer.isView(event.data)
+                ? event.data.byteLength
+                : event.data instanceof Blob
+                ? event.data.size
+                : null,
+          });
 
           if (typeof event.data === 'string') {
             // JSON message
             const message = JSON.parse(event.data);
             if (message.t === 'time_sync') {
+              logGame('time_sync.recv', {
+                clientTimeMs: message.clientTimeMs ?? null,
+                serverTimeMs: message.serverTimeMs ?? null,
+              });
               updateServerOffsetFromSync(message.clientTimeMs, message.serverTimeMs);
             } else if (message.t === 'room') {
+              logGame('room.recv', {
+                roomStatus: message.roomStatus ?? null,
+                players: message.players ?? null,
+                spectators: message.spectators ?? null,
+              });
               const players = message.players ?? { black: 0, white: 0 };
               const spectators = Number.isFinite(message.spectators) ? message.spectators : 0;
               setRoomPresence({
@@ -800,6 +936,14 @@ export default function Game() {
               const nextRoomStatus = snapshot.roomStatus ?? 'active';
               const nextRoomSettings = snapshot.roomSettings ?? DEFAULT_ROOM_SETTINGS;
               const board = engine.unpackBoard(snapshot.boardB64);
+              const boardDigest = digestBoard(board);
+              logGame('start.recv', {
+                snapshotPly: snapshot.ply,
+                snapshotTurn: snapshot.turn,
+                snapshotStatus: snapshot.status ?? null,
+                boardDigest,
+                actionsCount: Array.isArray(message.actions) ? message.actions.length : null,
+              });
               const lastAction =
                 Array.isArray(message.actions) && message.actions.length > 0
                   ? (message.actions[message.actions.length - 1] as number)
@@ -822,6 +966,7 @@ export default function Game() {
                 winner: snapshot.winner ?? winnerFromAction,
               };
 
+              gameStateRef.current = state;
               setGameState(state);
               setUiState({ type: 'idle' });
               lastTurnRef.current = snapshot.turn;
@@ -864,6 +1009,12 @@ export default function Game() {
                 setTotalGameTimeMs(0);
               }
             } else if (message.t === 'clock') {
+              logGame('clock.recv', {
+                turn: message.turn ?? null,
+                serverTimeMs: message.serverTimeMs ?? null,
+                clocksMs: message.clocksMs ?? null,
+                buffersMs: message.buffersMs ?? null,
+              });
               // Clock update from server - this is authoritative
               // Server sends this after each move with the correct clock and buffer values
               const baseClocks: ColorClock | null = message.clocksMs ?? null;
@@ -890,31 +1041,64 @@ export default function Game() {
             } else if (message.t === 'legal') {
               // Bloom filter validator update
               const legalMsg = message as LegalValidatorMessage;
+              logGame('legal.recv', {
+                legalPly: legalMsg.ply,
+                localPly: gameState?.ply ?? null,
+                bloomM: legalMsg.bloom?.m ?? null,
+                bloomK: legalMsg.bloom?.k ?? null,
+                bloomBitsLength: legalMsg.bloom?.bitsB64?.length ?? null,
+              });
               const newValidator = new LegalBloomValidator(legalMsg.bloom, legalMsg.ply);
               setValidator(newValidator);
             } else if (message.t === 'error') {
+              logGame('error.recv', {
+                message: message.message ?? null,
+                localPly: gameStateRef.current?.ply ?? null,
+              });
               setError(message.message);
               setUiState({ type: 'idle' });
+              requestSync();
+            } else {
+              logGame('json.recv.unhandled', { type: message.t ?? null });
             }
-          } else if (event.data instanceof ArrayBuffer && event.data.byteLength === 4) {
+          } else {
+            const actionWord = await decodeActionWord(event.data);
+            if (actionWord === null) {
+              logGame('ws.message.ignored', {
+                dataType: typeof event.data,
+                ctor: (event.data as any)?.constructor?.name ?? null,
+              });
+              return;
+            }
+
             // Binary action word
-            const view = new DataView(event.data);
-            const actionWord = view.getUint32(0, true);
+            const actionInfo = describeAction(actionWord);
+            logGame('action.recv', {
+              ...actionInfo,
+              localPlyBefore: gameStateRef.current?.ply ?? null,
+            });
             setLastActionWord(actionWord);
 
             try {
-              setGameState((prevState) => {
-                if (!prevState) return prevState;
-                const newState = engine.applyAction(prevState, actionWord);
-                
-                // Don't update clocks locally - wait for server clock update
-                // The server will send a clock update message with the correct values
-                // after applying buffer/increment logic
-                
-                return newState;
-              });
+              const previousState = gameStateRef.current;
+              if (previousState) {
+                const newState = engine.applyAction(previousState, actionWord);
+                gameStateRef.current = newState;
+                setGameState(newState);
+                logGame('action.apply.ok', {
+                  ...actionInfo,
+                  localPlyBefore: previousState.ply,
+                  localPlyAfter: newState.ply,
+                });
+              } else {
+                logGame('action.apply.skip.no_state', actionInfo);
+              }
               setUiState({ type: 'idle' });
             } catch (err) {
+              logGame('action.apply.fail', {
+                ...actionInfo,
+                error: err instanceof Error ? err.message : String(err),
+              });
               setError(err instanceof Error ? err.message : 'Failed to apply action');
               setUiState({ type: 'idle' });
               requestSync();
@@ -923,15 +1107,27 @@ export default function Game() {
         };
 
         ws.onerror = () => {
+          logGame('ws.error', { readyState: ws.readyState });
           if (mounted) {
             setConnectionState('error');
             setError('WebSocket error');
           }
+          scheduleReconnect('error');
         };
 
-        ws.onclose = () => {
+        ws.onclose = (closeEvent) => {
+          logGame('ws.close', {
+            code: closeEvent.code,
+            reason: closeEvent.reason,
+            wasClean: closeEvent.wasClean,
+            readyState: ws.readyState,
+          });
+          if (wsRef.current === ws) {
+            wsRef.current = null;
+          }
           if (mounted) {
             setConnectionState('disconnected');
+            scheduleReconnect('close');
           }
           if (timeSyncInterval) {
             clearInterval(timeSyncInterval);
@@ -941,6 +1137,9 @@ export default function Game() {
 
         wsRef.current = ws;
       } catch (err) {
+        logGame('ws.connect.fail', {
+          error: err instanceof Error ? err.message : String(err),
+        });
         if (mounted) {
           setConnectionState('error');
           setError(err instanceof Error ? err.message : 'Unknown error');
@@ -951,7 +1150,12 @@ export default function Game() {
     connect();
 
     return () => {
+      logGame('ws.effect.cleanup');
       mounted = false;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
       if (timeSyncInterval) {
         clearInterval(timeSyncInterval);
         timeSyncInterval = null;
@@ -963,25 +1167,40 @@ export default function Game() {
   }, [code, navigate]);
 
   const sendAction = (action: number) => {
+    const actionInfo = describeAction(action);
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      logGame('action.send.skip.not_connected', {
+        ...actionInfo,
+        readyState: wsRef.current?.readyState ?? null,
+      });
       setError('Not connected');
       return;
     }
     if (roomStatus !== 'active') {
+      logGame('action.send.skip.room_inactive', {
+        ...actionInfo,
+        roomStatus,
+      });
       setError('Game has not started');
       return;
     }
     if (gameState?.status === 'ended') {
+      logGame('action.send.skip.game_ended', actionInfo);
       setError('Game has ended');
       return;
     }
 
     if (role === 'spectator') {
+      logGame('action.send.skip.spectator', actionInfo);
       setError('Spectators cannot play');
       return;
     }
 
     if (!cache || !cache.legalSet.has(action >>> 0)) {
+      logGame('action.send.skip.local_illegal', {
+        ...actionInfo,
+        hasCache: Boolean(cache),
+      });
       setError('Action is not legal');
       return;
     }
@@ -989,6 +1208,11 @@ export default function Game() {
     const buffer = new ArrayBuffer(4);
     const view = new DataView(buffer);
     view.setUint32(0, action, true);
+    logGame('action.send', {
+      ...actionInfo,
+      localPly: gameState?.ply ?? null,
+      legalSetSize: cache.legalSet.size,
+    });
     wsRef.current.send(buffer);
     
     // UI state will be reset when action is applied via WebSocket
