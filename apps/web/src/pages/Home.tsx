@@ -1,27 +1,22 @@
 import { type Dispatch, type SetStateAction, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE } from '../config';
+import { formatDurationHms } from '../utils/formatDuration';
 import { useHealthCheck } from '../utils/useHealthCheck';
 
 type RoomColorOption = 'black' | 'white' | 'random';
 type NextStartOption = 'same' | 'other' | 'random';
 type ClockInput = {
-  initialMinutes: number;
-  initialSeconds: number;
-  bufferMinutes: number;
-  bufferSeconds: number;
-  incrementMinutes: number;
-  incrementSeconds: number;
+  initialSeconds: number | '';
+  bufferSeconds: number | '';
+  incrementSeconds: number | '';
 };
 
 type ClockField = keyof ClockInput;
 
 const DEFAULT_CLOCK: ClockInput = {
-  initialMinutes: 5,
-  initialSeconds: 0,
-  bufferMinutes: 0,
+  initialSeconds: 300,
   bufferSeconds: 20,
-  incrementMinutes: 0,
   incrementSeconds: 0,
 };
 
@@ -30,10 +25,12 @@ const clampNumber = (value: number, fallback: number) => {
   return Math.max(0, value);
 };
 
-const toMs = (value: number, unit: 'minutes' | 'seconds') => {
-  const factor = unit === 'minutes' ? 60000 : 1000;
-  return Math.round(clampNumber(value, 0) * factor);
-};
+const secondsToMs = (seconds: number) => Math.round(clampNumber(seconds, 0) * 1000);
+const minutesToMs = (minutes: number) => Math.round(clampNumber(minutes, 0) * 60000);
+
+const coerceSeconds = (value: number | ''): number => (value === '' ? 0 : clampNumber(value, 0));
+const isClockNonZero = (clock: { initialSeconds: number | ''; bufferSeconds: number | '' }): boolean =>
+  coerceSeconds(clock.initialSeconds) > 0 || coerceSeconds(clock.bufferSeconds) > 0;
 
 const sectionLabelStyle = {
   fontSize: '11px',
@@ -82,42 +79,54 @@ const spinButtonReset = `
 function ClockEditor(props: {
   title: string;
   clock: ClockInput;
-  onChange: (field: ClockField, value: number) => void;
+  onChange: (field: ClockField, value: number | '') => void;
   tone?: 'light' | 'dark';
 }) {
   const { title, clock, onChange, tone = 'light' } = props;
   const panelBg = tone === 'dark' ? '#f7ead6' : '#fffaf0';
 
-  const renderRow = (
-    label: string,
-    minuteField: ClockField,
-    secondField: ClockField,
-    secondMax?: number,
-  ) => (
+  const renderRow = (label: string, field: ClockField) => (
     <div style={{ display: 'grid', gap: '7px' }}>
       <div style={fieldLabelStyle}>{label}</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-        <input
-          type="number"
-          inputMode="numeric"
-          min={0}
-          step={1}
-          value={clock[minuteField] || 0}
-          onChange={(event) => onChange(minuteField, event.target.value === '' ? 0 : Number(event.target.value))}
-          placeholder="Min"
-          style={inputStyle}
-        />
-        <input
-          type="number"
-          inputMode="numeric"
-          min={0}
-          max={secondMax}
-          step={1}
-          value={clock[secondField] || 0}
-          onChange={(event) => onChange(secondField, event.target.value === '' ? 0 : Number(event.target.value))}
-          placeholder="Sec"
-          style={inputStyle}
-        />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'center' }}>
+        <div>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            step={1}
+            value={clock[field]}
+            onChange={(event) => {
+              if (event.target.value === '') {
+                onChange(field, '');
+                return;
+              }
+              onChange(field, clampNumber(Number(event.target.value), 0));
+            }}
+            placeholder="0 Seconds"
+            style={inputStyle}
+          />
+        </div>
+        <div
+          style={{
+            ...inputStyle,
+            width: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontFamily: '"JetBrains Mono", monospace',
+            fontSize: '14px',
+            fontWeight: 700,
+            letterSpacing: '0.2px',
+            color: '#2f2418',
+            background: 'rgba(255, 255, 255, 0.6)',
+            whiteSpace: 'nowrap',
+          }}
+          aria-label={`${label} preview`}
+          title="Preview"
+        >
+          {formatDurationHms(coerceSeconds(clock[field]))}
+        </div>
       </div>
     </div>
   );
@@ -134,9 +143,9 @@ function ClockEditor(props: {
       }}
     >
       <div style={{ fontWeight: 700, color: '#2f2418' }}>{title}</div>
-      {renderRow('Initial Time', 'initialMinutes', 'initialSeconds', 59)}
-      {renderRow('Buffer', 'bufferMinutes', 'bufferSeconds', 59)}
-      {renderRow('Increment', 'incrementMinutes', 'incrementSeconds', 59)}
+      {renderRow('Initial Time', 'initialSeconds')}
+      {renderRow('Buffer', 'bufferSeconds')}
+      {renderRow('Increment', 'incrementSeconds')}
     </div>
   );
 }
@@ -151,8 +160,7 @@ export default function Home() {
   const [blackClock, setBlackClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
   const [whiteClock, setWhiteClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
   const [maxGameEnabled, setMaxGameEnabled] = useState(false);
-  const [maxGameHours, setMaxGameHours] = useState(1);
-  const [maxGameMinutes, setMaxGameMinutes] = useState(0);
+  const [maxGameMinutesTotal, setMaxGameMinutesTotal] = useState<number | ''>(60);
   const [loadingAction, setLoadingAction] = useState<'join' | 'create' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -167,7 +175,7 @@ export default function Home() {
   const setClockValue = (
     setter: Dispatch<SetStateAction<ClockInput>>,
     field: ClockField,
-    value: number,
+    value: number | '',
   ) => {
     setter((prev) => ({ ...prev, [field]: value }));
   };
@@ -182,62 +190,61 @@ export default function Home() {
     }
   };
 
-  const normalizeClockInput = (clock: ClockInput): ClockInput => ({
-    initialMinutes: clampNumber(clock.initialMinutes, DEFAULT_CLOCK.initialMinutes),
-    initialSeconds: clampNumber(clock.initialSeconds, DEFAULT_CLOCK.initialSeconds),
-    bufferMinutes: clampNumber(clock.bufferMinutes, DEFAULT_CLOCK.bufferMinutes),
-    bufferSeconds: clampNumber(clock.bufferSeconds, DEFAULT_CLOCK.bufferSeconds),
-    incrementMinutes: clampNumber(clock.incrementMinutes, DEFAULT_CLOCK.incrementMinutes),
-    incrementSeconds: clampNumber(clock.incrementSeconds, DEFAULT_CLOCK.incrementSeconds),
+  const normalizeClockInput = (clock: ClockInput) => ({
+    initialSeconds: coerceSeconds(clock.initialSeconds),
+    bufferSeconds: coerceSeconds(clock.bufferSeconds),
+    incrementSeconds: coerceSeconds(clock.incrementSeconds),
   });
 
   const buildTimeControl = () => {
-    const normalizedMaxHours = clampNumber(maxGameHours, 0);
-    const normalizedMaxMinutes = clampNumber(maxGameMinutes, 0);
-    const totalMaxMinutes = normalizedMaxHours * 60 + normalizedMaxMinutes;
-    const maxGameMs = maxGameEnabled && totalMaxMinutes > 0 ? toMs(totalMaxMinutes, 'minutes') : null;
+    const normalizedMaxMinutesTotal =
+      maxGameMinutesTotal === '' ? 0 : clampNumber(maxGameMinutesTotal, 0);
+    const maxGameMs =
+      maxGameEnabled && normalizedMaxMinutesTotal > 0 ? minutesToMs(normalizedMaxMinutesTotal) : null;
 
     if (sameClockSettings) {
       const normalized = normalizeClockInput(sharedClock);
-      const totalInitialMinutes = normalized.initialMinutes + normalized.initialSeconds / 60;
-      const totalBufferSeconds = normalized.bufferMinutes * 60 + normalized.bufferSeconds;
-      const totalIncrementSeconds = normalized.incrementMinutes * 60 + normalized.incrementSeconds;
-
       return {
-        initialMs: toMs(totalInitialMinutes, 'minutes'),
-        bufferMs: toMs(totalBufferSeconds, 'seconds'),
-        incrementMs: toMs(totalIncrementSeconds, 'seconds'),
+        initialMs: secondsToMs(normalized.initialSeconds),
+        bufferMs: secondsToMs(normalized.bufferSeconds),
+        incrementMs: secondsToMs(normalized.incrementSeconds),
         maxGameMs,
       };
     }
 
     const normalizedBlack = normalizeClockInput(blackClock);
     const normalizedWhite = normalizeClockInput(whiteClock);
-    const totalBlackInitialMinutes = normalizedBlack.initialMinutes + normalizedBlack.initialSeconds / 60;
-    const totalWhiteInitialMinutes = normalizedWhite.initialMinutes + normalizedWhite.initialSeconds / 60;
-    const totalBlackBufferSeconds = normalizedBlack.bufferMinutes * 60 + normalizedBlack.bufferSeconds;
-    const totalWhiteBufferSeconds = normalizedWhite.bufferMinutes * 60 + normalizedWhite.bufferSeconds;
-    const totalBlackIncrementSeconds = normalizedBlack.incrementMinutes * 60 + normalizedBlack.incrementSeconds;
-    const totalWhiteIncrementSeconds = normalizedWhite.incrementMinutes * 60 + normalizedWhite.incrementSeconds;
 
     return {
       initialMs: {
-        black: toMs(totalBlackInitialMinutes, 'minutes'),
-        white: toMs(totalWhiteInitialMinutes, 'minutes'),
+        black: secondsToMs(normalizedBlack.initialSeconds),
+        white: secondsToMs(normalizedWhite.initialSeconds),
       },
       bufferMs: {
-        black: toMs(totalBlackBufferSeconds, 'seconds'),
-        white: toMs(totalWhiteBufferSeconds, 'seconds'),
+        black: secondsToMs(normalizedBlack.bufferSeconds),
+        white: secondsToMs(normalizedWhite.bufferSeconds),
       },
       incrementMs: {
-        black: toMs(totalBlackIncrementSeconds, 'seconds'),
-        white: toMs(totalWhiteIncrementSeconds, 'seconds'),
+        black: secondsToMs(normalizedBlack.incrementSeconds),
+        white: secondsToMs(normalizedWhite.incrementSeconds),
       },
       maxGameMs,
     };
   };
 
   const handleCreateGame = async () => {
+    const canStartGame = sameClockSettings
+      ? isClockNonZero(sharedClock)
+      : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
+    if (!canStartGame) {
+      setError(
+        sameClockSettings
+          ? 'Clock invalid: initial time and buffer cannot both be 0.'
+          : 'Clock invalid: both players must have either initial time or buffer greater than 0.'
+      );
+      return;
+    }
+
     setLoadingAction('create');
     setError(null);
     try {
@@ -299,6 +306,17 @@ export default function Home() {
   };
 
   const healthOk = Boolean(healthResult?.api.reachable && healthResult?.websocket.reachable);
+  const canStartGame = sameClockSettings
+    ? isClockNonZero(sharedClock)
+    : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
+  const clockInvalid = !canStartGame;
+  const createDisabled = isLoading || clockInvalid;
+  const createButtonLabel =
+    loadingAction === 'create'
+      ? 'Creating...'
+      : clockInvalid
+        ? 'Create Game (Invalid clock time)'
+        : 'Create Game';
 
   return (
     <div
@@ -501,21 +519,21 @@ export default function Home() {
 
             <button
               onClick={handleCreateGame}
-              disabled={isLoading}
+              disabled={createDisabled}
               style={{
                 width: '100%',
                 padding: '12px 16px',
                 borderRadius: '999px',
                 border: '2px solid #6f5a38',
-                background: isLoading ? '#d8c8ab' : '#f2d9b2',
+                background: createDisabled ? '#d8c8ab' : '#f2d9b2',
                 color: '#2a2218',
                 fontWeight: 700,
                 textTransform: 'uppercase',
                 letterSpacing: '1px',
-                cursor: isLoading ? 'not-allowed' : 'pointer',
+                cursor: createDisabled ? 'not-allowed' : 'pointer',
               }}
             >
-              {loadingAction === 'create' ? 'Creating...' : 'Create Game'}
+              {createButtonLabel}
             </button>
 
             <div
@@ -627,31 +645,51 @@ export default function Home() {
               </label>
 
               {maxGameEnabled && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                  <div>
-                    <div style={fieldLabelStyle}>Hours</div>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      step={1}
-                      value={maxGameHours || 0}
-                      onChange={(event) => setMaxGameHours(event.target.value === '' ? 0 : Number(event.target.value))}
-                      style={inputStyle}
-                    />
-                  </div>
-                  <div>
-                    <div style={fieldLabelStyle}>Minutes</div>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={59}
-                      step={1}
-                      value={maxGameMinutes || 0}
-                      onChange={(event) => setMaxGameMinutes(event.target.value === '' ? 0 : Number(event.target.value))}
-                      style={inputStyle}
-                    />
+                <div style={{ display: 'grid', gap: '7px' }}>
+                  <div style={fieldLabelStyle}>Minutes</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'center' }}>
+                    <div>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        step={1}
+                        value={maxGameMinutesTotal}
+                        onChange={(event) => {
+                          if (event.target.value === '') {
+                            setMaxGameMinutesTotal('');
+                            return;
+                          }
+                          setMaxGameMinutesTotal(clampNumber(Number(event.target.value), 0));
+                        }}
+                        placeholder="0 Minutes"
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        ...inputStyle,
+                        width: 'auto',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontFamily: '"JetBrains Mono", monospace',
+                        fontSize: '14px',
+                        fontWeight: 700,
+                        letterSpacing: '0.2px',
+                        color: '#2f2418',
+                        background: 'rgba(255, 255, 255, 0.6)',
+                        whiteSpace: 'nowrap',
+                      }}
+                      aria-label="Max Game Time preview"
+                      title="Preview"
+                    >
+                      {(() => {
+                        const minutes = maxGameMinutesTotal === '' ? 0 : maxGameMinutesTotal || 0;
+                        if (minutes === 0) return '0m';
+                        return formatDurationHms(minutes * 60);
+                      })()}
+                    </div>
                   </div>
                 </div>
               )}
