@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
@@ -29,6 +29,51 @@ type ValidationProblem = {
 };
 
 const EMPTY_CELL: TileCell = { height: 0, tribun: false };
+const TRASH_ICON_URL = new URL("../assets/game/units/icons/Trash.webp", import.meta.url).href;
+const TRASH_OUTLINE_URL = new URL("../assets/game/units/icons/_Trash.webp", import.meta.url).href;
+
+function TrashGlyph(props: { sizePx: number; fillColor: string }) {
+  const { sizePx, fillColor } = props;
+
+  // Similar to `ui/UnitGlyph.tsx`: we tint by masking the filled glyph, while keeping a dedicated outline asset on top.
+  return (
+    <span
+      aria-label="Eraser"
+      style={{
+        position: "relative",
+        display: "inline-block",
+        width: `${sizePx}px`,
+        height: `${sizePx}px`,
+        userSelect: "none",
+        pointerEvents: "none",
+      }}
+    >
+      <img
+        src={TRASH_OUTLINE_URL}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+      />
+      <span
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundColor: fillColor,
+          WebkitMaskImage: `url(${TRASH_ICON_URL})`,
+          WebkitMaskRepeat: "no-repeat",
+          WebkitMaskPosition: "center",
+          WebkitMaskSize: "contain",
+          maskImage: `url(${TRASH_ICON_URL})`,
+          maskRepeat: "no-repeat",
+          maskPosition: "center",
+          maskSize: "contain",
+        }}
+      />
+    </span>
+  );
+}
 
 // Canonical setup mapping for own side (red indices in the reference image).
 // Index 0..36 order: bottom tip -> top rows.
@@ -278,9 +323,11 @@ export default function SetupExplorer() {
   const [rotate180, setRotate180] = useState(false);
   const [playerColor, setPlayerColor] = useState<PlayerCosmetic>("black");
   const [unitViewMode, setUnitViewMode] = useState<UnitViewMode>("icon");
-  const [showIndexOverlay, setShowIndexOverlay] = useState(true);
-  const [showNeighborRingDebug, setShowNeighborRingDebug] = useState(false);
-  const [debugCenterCid, setDebugCenterCid] = useState<number>(OWN_SETUP_CIDS[18]);
+  const paintRef = useRef<{ active: boolean; button: 0 | 2; lastCid: number | null }>({
+    active: false,
+    button: 0,
+    lastCid: null,
+  });
 
   const [ownCells, setOwnCells] = useState<TileCell[]>(makeEmptyCells);
   const [ownHashInput, setOwnHashInput] = useState("");
@@ -290,21 +337,6 @@ export default function SetupExplorer() {
   const [enemyCells, setEnemyCells] = useState<TileCell[]>(makeEmptyCells);
   const [enemyHashInput, setEnemyHashInput] = useState("");
   const [enemyHashStatus, setEnemyHashStatus] = useState<HashStatus>("idle");
-
-  const mappingStats = useMemo(() => {
-    const overlap = OWN_SETUP_CIDS.filter((cid) => ENEMY_CID_TO_INDEX.has(cid)).length;
-    return { ownCount: OWN_SETUP_CIDS.length, enemyCount: ENEMY_SETUP_CIDS.length, overlap };
-  }, []);
-
-  const neighborDebug = useMemo(() => {
-    const neighbors6 = getBrushableNeighbors6(debugCenterCid, BRUSHABLE_CID_SET);
-    const slotByCid = new Map<number, number>();
-    for (let slot = 0; slot < neighbors6.length; slot++) {
-      const cid = neighbors6[slot];
-      if (cid !== null) slotByCid.set(cid, slot);
-    }
-    return { neighbors6, slotByCid };
-  }, [debugCenterCid]);
 
   const ownValidation = useMemo(() => {
     const counts = emptyCounts();
@@ -549,6 +581,19 @@ export default function SetupExplorer() {
     return set;
   }, [brush, tribunBrush, onlyEmpty, ownCells]);
 
+  useEffect(() => {
+    const stop = () => {
+      paintRef.current.active = false;
+      paintRef.current.lastCid = null;
+    };
+    window.addEventListener("mouseup", stop);
+    window.addEventListener("blur", stop);
+    return () => {
+      window.removeEventListener("mouseup", stop);
+      window.removeEventListener("blur", stop);
+    };
+  }, []);
+
   const onOwnHashChange = (raw: string) => {
     const value = normalizeHashInput(raw);
     setOwnHashInput(value);
@@ -572,6 +617,43 @@ export default function SetupExplorer() {
       setEnemyCells(makeEmptyCells());
     }
   };
+
+  const applyPaint = (cid: number, button: 0 | 2) => {
+    if (button === 2) applyRightErase(cid);
+    else applyLeftClick(cid);
+  };
+
+  const startPaint = (cid: number, button: 0 | 2) => {
+    paintRef.current.active = true;
+    paintRef.current.button = button;
+    paintRef.current.lastCid = cid;
+    applyPaint(cid, button);
+  };
+
+  const continuePaint = (cid: number) => {
+    if (!paintRef.current.active) return;
+    if (paintRef.current.lastCid === cid) return;
+    paintRef.current.lastCid = cid;
+    applyPaint(cid, paintRef.current.button);
+  };
+
+  const segmentedWrapStyle = {
+    display: "inline-flex",
+    borderRadius: "999px",
+    border: "2px solid #6f5a38",
+    overflow: "hidden",
+    background: "#fff6e8",
+  } as const;
+  const segmentedBtnStyle = (active: boolean) =>
+    ({
+      padding: "6px 10px",
+      border: "none",
+      background: active ? "#f2d9b2" : "transparent",
+      fontWeight: 700,
+      cursor: "pointer",
+      fontSize: "12px",
+      letterSpacing: "0.5px",
+    }) as const;
 
   return (
     <div
@@ -626,265 +708,299 @@ export default function SetupExplorer() {
       </header>
 
       <main style={{ width: "100%", maxWidth: "1180px", margin: "0 auto", padding: "16px 12px 20px", display: "grid", gap: "12px" }}>
-        <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "10px" }}>
-          <div style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
-            <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Own Setup Hash</div>
-            <input
-              value={ownHashInput}
-              onChange={(e) => onOwnHashChange(e.target.value)}
-              placeholder="12-char base36 hash"
-              maxLength={12}
-              style={{
-                border: ownHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
-                borderRadius: "10px",
-                padding: "10px 12px",
-                fontFamily: '"JetBrains Mono", monospace',
-                letterSpacing: "1px",
-                fontWeight: 700,
-                background: "#fff9ef",
-              }}
-            />
-            <div style={{ fontSize: "12px", color: ownHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
-              {ownHashStatus === "invalid" ? "Invalid hash (board unchanged)." : ownHashStatus === "valid" ? "Hash applied." : "Enter a hash to load."}
-            </div>
-            <div style={{ fontSize: "12px", color: "#5a4630" }}>
-              Current board hash: <span style={{ fontFamily: '"JetBrains Mono", monospace', fontWeight: 700 }}>{ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : "------------"}</span>
-            </div>
-            <div style={{ fontSize: "12px", color: ownValidation.problems.length === 0 ? "#2f6b3f" : "#7a6543" }}>
-              Status: <b>{ownValidation.problems.length === 0 ? "Hashable" : "Has problems"}</b>
-            </div>
-          </div>
+        <section style={{ display: "grid", gap: "10px" }}>
+          <div style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "10px" }}>
+            <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Setup</div>
 
-          <div style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
-              <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Other Player Preview</div>
-              <select
-                value={previewMode}
-                onChange={(e) => setPreviewMode(e.target.value as PreviewMode)}
-                style={{ border: "1px solid #bda98b", borderRadius: "8px", padding: "6px 8px", background: "#fff9ef" }}
-              >
-                <option value="empty">Empty</option>
-                <option value="hash">Hash input</option>
-              </select>
-            </div>
-            {previewMode === "hash" && (
-              <>
-                <input
-                  value={enemyHashInput}
-                  onChange={(e) => onEnemyHashChange(e.target.value)}
-                  placeholder="12-char base36 hash"
-                  maxLength={12}
-                  style={{
-                    border: enemyHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
-                    borderRadius: "10px",
-                    padding: "10px 12px",
-                    fontFamily: '"JetBrains Mono", monospace',
-                    letterSpacing: "1px",
-                    fontWeight: 700,
-                    background: "#fff9ef",
-                  }}
-                />
-                <div style={{ fontSize: "12px", color: enemyHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
-                  {enemyHashStatus === "invalid" ? "Invalid hash (preview hidden)." : enemyHashStatus === "valid" ? "Preview hash applied." : "Enter a hash to preview."}
-                </div>
-              </>
-            )}
-            {previewMode === "empty" && <div style={{ fontSize: "12px", color: "#5a4630" }}>Enemy preview disabled.</div>}
-          </div>
-
-          <div style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
-            <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Brush & Board</div>
-            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-              {(["1", "2", "3", "eraser"] as Brush[]).map((b) => {
-                const isSelected = brush === b;
-                const brushCell: TileCell =
-                  b === "eraser"
-                    ? EMPTY_CELL
-                    : { height: Number(b) as 1 | 2 | 3, tribun: tribunBrush };
-                return (
-                  <button
-                    key={b}
-                    onClick={() => setBrush(b)}
-                    style={{
-                      padding: "6px 10px",
-                      borderRadius: "10px",
-                      border: "2px solid #6f5a38",
-                      background: isSelected ? "#f2d9b2" : "#fff6e8",
-                      fontWeight: 700,
-                      cursor: "pointer",
-                      minWidth: "56px",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      height: "40px",
-                    }}
-                  >
-                    {b === "eraser" ? "E" : <SetupUnitGlyph cell={brushCell} viewMode={unitViewMode} side="own" playerColor={playerColor} size="small" />}
-                  </button>
-                );
-              })}
-            </div>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-              <input type="checkbox" checked={tribunBrush} onChange={(e) => setTribunBrush(e.target.checked)} disabled={brush === "eraser"} />
-              Tribun brush
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-              <input type="checkbox" checked={onlyEmpty} onChange={(e) => setOnlyEmpty(e.target.checked)} />
-              Only write on empty tiles
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-              <input type="checkbox" checked={rotate180} onChange={(e) => setRotate180(e.target.checked)} />
-              Rotate board 180°
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-              Player color
-              <select value={playerColor} onChange={(e) => setPlayerColor(e.target.value as PlayerCosmetic)} style={{ borderRadius: "8px", padding: "4px 8px", border: "1px solid #bda98b" }}>
-                <option value="black">Black</option>
-                <option value="white">White</option>
-              </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-              Unit render
-              <select value={unitViewMode} onChange={(e) => setUnitViewMode(e.target.value as UnitViewMode)} style={{ borderRadius: "8px", padding: "4px 8px", border: "1px solid #bda98b" }}>
-                <option value="icon">Icon view</option>
-                <option value="number">Number view</option>
-              </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-              <input type="checkbox" checked={showIndexOverlay} onChange={(e) => setShowIndexOverlay(e.target.checked)} />
-              Show setup index overlay
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-              <input type="checkbox" checked={showNeighborRingDebug} onChange={(e) => setShowNeighborRingDebug(e.target.checked)} />
-              Show neighbor ring debug
-            </label>
-            {showNeighborRingDebug && (
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
-                Debug center
-                <select
-                  value={debugCenterCid}
-                  onChange={(e) => setDebugCenterCid(Number(e.target.value))}
-                  style={{ borderRadius: "8px", padding: "4px 8px", border: "1px solid #bda98b" }}
-                >
-                  {OWN_SETUP_CIDS.map((cid, idx) => (
-                    <option key={cid} value={cid}>
-                      idx {idx} (cid {cid})
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <div style={{ fontSize: "12px", color: "#5a4630" }}>Left-click draws (or erases with eraser). Right-click always erases.</div>
-            <div style={{ fontSize: "12px", color: "#5a4630" }}>
-              Mapping check: own={mappingStats.ownCount}, enemy={mappingStats.enemyCount}, overlap={mappingStats.overlap}
-            </div>
-            {showNeighborRingDebug && (
-              <div style={{ fontSize: "12px", color: "#5a4630" }}>
-                Ring slots for center cid {debugCenterCid}: [{neighborDebug.neighbors6.map((cid, slot) => `${slot}:${cid ?? "x"}`).join(", ")}]
+            <div style={{ display: "grid", gap: "6px" }}>
+              <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Own hash</div>
+              <input
+                value={ownHashInput}
+                onChange={(e) => onOwnHashChange(e.target.value)}
+                placeholder="12-char base36 hash"
+                maxLength={12}
+                style={{
+                  border: ownHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
+                  borderRadius: "10px",
+                  padding: "10px 12px",
+                  fontFamily: '"JetBrains Mono", monospace',
+                  letterSpacing: "1px",
+                  fontWeight: 700,
+                  background: "#fff9ef",
+                }}
+              />
+              <div style={{ fontSize: "12px", color: ownHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
+                {ownHashStatus === "invalid" ? "Invalid hash." : ownHashStatus === "valid" ? "Loaded." : "Paste a hash to load."}
               </div>
-            )}
+            </div>
+
+            <div style={{ display: "grid", gap: "6px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" }}>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Enemy preview</div>
+                <div style={segmentedWrapStyle}>
+                  <button type="button" onClick={() => setPreviewMode("empty")} style={segmentedBtnStyle(previewMode === "empty")}>
+                    Off
+                  </button>
+                  <button type="button" onClick={() => setPreviewMode("hash")} style={segmentedBtnStyle(previewMode === "hash")}>
+                    Hash
+                  </button>
+                </div>
+              </div>
+              {previewMode === "hash" && (
+                <>
+                  <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Enemy hash</div>
+                  <input
+                    value={enemyHashInput}
+                    onChange={(e) => onEnemyHashChange(e.target.value)}
+                    placeholder="12-char base36 hash"
+                    maxLength={12}
+                    style={{
+                      border: enemyHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
+                      borderRadius: "10px",
+                      padding: "10px 12px",
+                      fontFamily: '"JetBrains Mono", monospace',
+                      letterSpacing: "1px",
+                      fontWeight: 700,
+                      background: "#fff9ef",
+                    }}
+                  />
+                  <div style={{ fontSize: "12px", color: enemyHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
+                    {enemyHashStatus === "invalid" ? "Invalid hash." : enemyHashStatus === "valid" ? "Preview on." : "Paste a hash."}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+              <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Player</div>
+              <div style={segmentedWrapStyle}>
+                <button type="button" onClick={() => setPlayerColor("black")} style={segmentedBtnStyle(playerColor === "black")}>
+                  Black
+                </button>
+                <button type="button" onClick={() => setPlayerColor("white")} style={segmentedBtnStyle(playerColor === "white")}>
+                  White
+                </button>
+              </div>
+
+              <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Units</div>
+              <div style={segmentedWrapStyle}>
+                <button type="button" onClick={() => setUnitViewMode("icon")} style={segmentedBtnStyle(unitViewMode === "icon")}>
+                  Icons
+                </button>
+                <button type="button" onClick={() => setUnitViewMode("number")} style={segmentedBtnStyle(unitViewMode === "number")}>
+                  Numbers
+                </button>
+              </div>
+            </div>
           </div>
         </section>
 
-        <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "10px", overflow: "auto" }}>
-          <div style={{ position: "relative", minWidth: `${boardMetrics.width}px`, height: `${boardMetrics.height}px` }}>
-            {boardMetrics.tiles.map((tile) => {
-              const ownIdx = OWN_CID_TO_INDEX.get(tile.cid);
-              const enemyIdx = ENEMY_CID_TO_INDEX.get(tile.cid);
-              const isOwnSetupTile = ownIdx !== undefined;
-              const isEnemySetupTile = enemyIdx !== undefined;
-              const own = isOwnSetupTile ? ownCells[ownIdx] : EMPTY_CELL;
-              const enemy = isEnemySetupTile && previewMode === "hash" ? enemyCells[enemyIdx] : EMPTY_CELL;
-              const isBrushable = isOwnSetupTile ? brushableSet.has(ownIdx) : false;
-              const isDebugCenter = showNeighborRingDebug && tile.cid === debugCenterCid;
-              const debugRingOrder = showNeighborRingDebug ? neighborDebug.slotByCid.get(tile.cid) : undefined;
-              const isDebugNeighbor = debugRingOrder !== undefined;
-              const hexX = tile.centerX - boardMetrics.outerHexWidth / 2 - boardMetrics.minX;
-              const hexY = tile.centerY - boardMetrics.outerHexHeight / 2 - boardMetrics.minY;
-              const baseColor = getBaseColor(tile.x, tile.y);
-              const hexState: HexagonState = isOwnSetupTile && isBrushable ? "selectable" : "default";
-              const bg = getHexagonColor(baseColor, hexState);
-              const clip = "polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)";
-
+        <section style={{ display: "grid", gap: "10px" }}>
+          <div style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "10px", display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
+            {(["1", "2", "3", "eraser"] as Brush[]).map((b) => {
+              const isSelected = brush === b;
+              const brushCell: TileCell = b === "eraser" ? EMPTY_CELL : { height: Number(b) as 1 | 2 | 3, tribun: tribunBrush };
+              const ownIsBlack = playerColor === "black";
+              const fillColor = tribunBrush ? (ownIsBlack ? "#AE0000" : "#00B4FF") : ownIsBlack ? "#000" : "#fff";
               return (
-                <div
-                  key={tile.cid}
+                <button
+                  key={b}
+                  type="button"
+                  onClick={() => setBrush(b)}
                   style={{
-                    position: "absolute",
-                    left: `${hexX}px`,
-                    top: `${hexY}px`,
-                    width: `${boardMetrics.outerHexWidth}px`,
-                    height: `${boardMetrics.outerHexHeight}px`,
-                    clipPath: clip,
-                    background: isDebugCenter ? "#00a8ff" : isDebugNeighbor ? "#0c6f90" : "#2d2922",
-                    cursor: isOwnSetupTile ? "pointer" : "default",
-                  }}
-                  onClick={() => applyLeftClick(tile.cid)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    applyRightErase(tile.cid);
+                    padding: "6px 10px",
+                    borderRadius: "10px",
+                    border: "2px solid #6f5a38",
+                    // Neutral brush background so the unit/trash tint stays readable regardless of color.
+                    background: isSelected ? "#4B4B4B" : "#636363",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    minWidth: "56px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    height: "40px",
+                    gap: "8px",
                   }}
                 >
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: "2px",
-                      clipPath: clip,
-                      background: bg,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      userSelect: "none",
-                    }}
-                  >
-                    {own.height > 0 && <SetupUnitGlyph cell={own} viewMode={unitViewMode} side="own" playerColor={playerColor} />}
-                    {enemy.height > 0 && <SetupUnitGlyph cell={enemy} viewMode={unitViewMode} side="enemy" playerColor={playerColor} />}
-                    {showIndexOverlay && ownIdx !== undefined && (
-                      <div style={{ position: "absolute", bottom: "4px", left: "5px", fontSize: "10px", color: "#d51414", fontWeight: 700 }}>
-                        {ownIdx}
-                      </div>
-                    )}
-                    {showIndexOverlay && enemyIdx !== undefined && (
-                      <div style={{ position: "absolute", top: "4px", right: "5px", fontSize: "10px", color: "#3bbd19", fontWeight: 700 }}>
-                        {enemyIdx}
-                      </div>
-                    )}
-                    {showNeighborRingDebug && isDebugCenter && (
-                      <div style={{ position: "absolute", top: "4px", left: "5px", fontSize: "10px", color: "#083a55", fontWeight: 800 }}>
-                        C
-                      </div>
-                    )}
-                    {showNeighborRingDebug && isDebugNeighbor && (
-                      <div style={{ position: "absolute", top: "4px", right: "5px", fontSize: "10px", color: "#4fd8ff", fontWeight: 800 }}>
-                        {debugRingOrder}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                  {b === "eraser" ? (
+                    <TrashGlyph sizePx={18} fillColor={fillColor} />
+                  ) : (
+                    <SetupUnitGlyph cell={brushCell} viewMode={unitViewMode} side="own" playerColor={playerColor} size="small" />
+                  )}
+                </button>
               );
             })}
+            <button
+              type="button"
+              onClick={() => setTribunBrush((v) => !v)}
+              disabled={brush === "eraser"}
+              style={{
+                padding: "6px 10px",
+                borderRadius: "10px",
+                border: "2px solid #6f5a38",
+                background: tribunBrush ? "#f2d9b2" : "#fff6e8",
+                fontWeight: 700,
+                cursor: brush === "eraser" ? "not-allowed" : "pointer",
+                height: "40px",
+                opacity: brush === "eraser" ? 0.55 : 1,
+              }}
+              title={brush === "eraser" ? "Tribun brush disabled while erasing" : "Toggle Tribun brush"}
+            >
+              Tribun
+            </button>
+            <button
+              type="button"
+              onClick={() => setOnlyEmpty((v) => !v)}
+              style={{
+                padding: "6px 10px",
+                borderRadius: "10px",
+                border: "2px solid #6f5a38",
+                background: onlyEmpty ? "#f2d9b2" : "#fff6e8",
+                fontWeight: 700,
+                cursor: "pointer",
+                height: "40px",
+              }}
+              title="Toggle: only write on empty tiles"
+            >
+              Empty-only
+            </button>
+          </div>
+
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              borderRadius: "18px",
+              border: "2px solid #3c3226",
+              background: "rgba(255, 250, 242, 0.7)",
+              boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
+              padding: "10px",
+              position: "relative",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setRotate180((prev) => !prev)}
+              title="Flip board"
+              aria-label="Flip board"
+              style={{
+                position: "absolute",
+                top: "8px",
+                right: "8px",
+                width: "24px",
+                height: "24px",
+                borderRadius: "6px",
+                border: `2px solid ${rotate180 ? "#111" : "#1c1a16"}`,
+                background: rotate180 ? "#111" : "#f6f0e6",
+                color: rotate180 ? "#f6f0e6" : "#1c1a16",
+                fontSize: "10px",
+                fontWeight: 700,
+                letterSpacing: "0.5px",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                boxShadow: "0 6px 12px rgba(20, 15, 10, 0.18)",
+                zIndex: 2,
+              }}
+            >
+              180
+            </button>
+
+            <div style={{ width: "100%", display: "flex", justifyContent: "center", overflow: "auto" }}>
+              <div style={{ position: "relative", minWidth: `${boardMetrics.width}px`, height: `${boardMetrics.height}px` }}>
+                {boardMetrics.tiles.map((tile) => {
+                  const ownIdx = OWN_CID_TO_INDEX.get(tile.cid);
+                  const enemyIdx = ENEMY_CID_TO_INDEX.get(tile.cid);
+                  const isOwnSetupTile = ownIdx !== undefined;
+                  const isEnemySetupTile = enemyIdx !== undefined;
+                  const own = isOwnSetupTile ? ownCells[ownIdx] : EMPTY_CELL;
+                  const enemy = isEnemySetupTile && previewMode === "hash" ? enemyCells[enemyIdx] : EMPTY_CELL;
+                  const isBrushable = isOwnSetupTile ? brushableSet.has(ownIdx) : false;
+                  const hexX = tile.centerX - boardMetrics.outerHexWidth / 2 - boardMetrics.minX;
+                  const hexY = tile.centerY - boardMetrics.outerHexHeight / 2 - boardMetrics.minY;
+                  const baseColor = getBaseColor(tile.x, tile.y);
+                  const hexState: HexagonState = isOwnSetupTile && isBrushable ? "selectable" : "default";
+                  const bg = getHexagonColor(baseColor, hexState);
+                  const clip = "polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)";
+
+                  return (
+                    <div
+                      key={tile.cid}
+                      style={{
+                        position: "absolute",
+                        left: `${hexX}px`,
+                        top: `${hexY}px`,
+                        width: `${boardMetrics.outerHexWidth}px`,
+                        height: `${boardMetrics.outerHexHeight}px`,
+                        clipPath: clip,
+                        background: "#2d2922",
+                        cursor: isOwnSetupTile ? "pointer" : "default",
+                      }}
+                      onMouseDown={(e) => {
+                        if (!isOwnSetupTile) return;
+                        if (e.button !== 0 && e.button !== 2) return;
+                        if (e.button === 2) e.preventDefault();
+                        startPaint(tile.cid, e.button as 0 | 2);
+                      }}
+                      onMouseEnter={() => {
+                        if (!isOwnSetupTile) return;
+                        continuePaint(tile.cid);
+                      }}
+                      onContextMenu={(e) => e.preventDefault()}
+                    >
+                      <div
+                        style={{
+                          position: "absolute",
+                          inset: "2px",
+                          clipPath: clip,
+                          background: bg,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          userSelect: "none",
+                        }}
+                      >
+                        {own.height > 0 && <SetupUnitGlyph cell={own} viewMode={unitViewMode} side="own" playerColor={playerColor} />}
+                        {enemy.height > 0 && <SetupUnitGlyph cell={enemy} viewMode={unitViewMode} side="enemy" playerColor={playerColor} />}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </section>
 
-        <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
-          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Problems</div>
-          <div style={{ fontSize: "13px", color: "#5a4630" }}>
-            Counts: #1s={ownValidation.counts.ones}, #2s={ownValidation.counts.twos}, #3s={ownValidation.counts.threes}, Tribuns={ownValidation.counts.tribun}
-          </div>
-          <div style={{ fontSize: "13px", color: "#5a4630" }}>
-            Budget: used={ownValidation.used}, expected={ownValidation.expected}
-          </div>
-          {ownValidation.problems.length > 0 ? (
+        {ownValidation.problems.length > 0 && (
+          <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
+            <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Problems</div>
             <ul style={{ margin: 0, paddingLeft: "18px", color: "#7a2020", display: "grid", gap: "6px" }}>
               {ownValidation.problems.map((p, idx) => (
                 <li key={`${p.kind}-${idx}`}>{p.message}</li>
               ))}
             </ul>
-          ) : (
-            <div style={{ fontSize: "14px", color: "#2f6b3f", fontWeight: 700 }}>
-              Hash: <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>{ownValidation.hash}</span>
+          </section>
+        )}
+
+        <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
+          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Stats</div>
+          <div style={{ display: "grid", gap: "6px", fontSize: "13px", color: "#5a4630" }}>
+            <div>
+              Hash:{" "}
+              <span style={{ fontFamily: '"JetBrains Mono", monospace', fontWeight: 700 }}>
+                {ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : "—"}
+              </span>
             </div>
-          )}
+            <div>
+              Used: #1={ownValidation.counts.ones} · #2={ownValidation.counts.twos} · #3={ownValidation.counts.threes}
+            </div>
+            <div>Tribun height: {ownValidation.tribunHeight > 0 ? ownValidation.tribunHeight : "—"}</div>
+          </div>
         </section>
       </main>
     </div>
