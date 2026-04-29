@@ -5,6 +5,7 @@ import { getHexagonColor, getBaseColor, type HexagonState } from '../hexagonColo
 import { LegalBloomValidator, type LegalValidatorMessage } from '../net/LegalBloom';
 import { buildCache } from '../ui/cache/buildCache';
 import type { UiMoveCache } from '../ui/cache/UiMoveCache';
+import { SplitUnitGlyph, UnitGlyph } from '../ui/UnitGlyph';
 import {
   buildIdentityPayload,
   getStoredIdentity,
@@ -2092,6 +2093,23 @@ export default function Game() {
 
     const splitOffsetX = 12;
     const splitOffsetY = 15;
+    const myColor: engine.Color | null = role === 'black' ? 0 : role === 'white' ? 1 : null;
+
+    const shouldShowNumbersForOwnUnit = (cid: number, unitColor: engine.Color): boolean => {
+      // Enemy units always render as icons. Spectators never have "own units".
+      if (myColor === null || unitColor !== myColor) return false;
+
+      if (uiState.type === 'own_secondary') return true;
+
+      if (uiState.type === 'empty') {
+        // In empty-combine/donation context, height is decision-relevant for donor/participating tiles
+        // and for any preview overlay units created by the pending decision.
+        if (previewOverlay?.units.has(cid)) return true;
+        return interactableSet.has(cid);
+      }
+
+      return false;
+    };
 
     const tiles: JSX.Element[] = validTiles.map(({ cid, x, y, displayX, displayY }) => {
       const overlayUnit = previewOverlay?.units.get(cid);
@@ -2194,67 +2212,45 @@ export default function Game() {
             fontSize: '10px',
           }}>
           {unit && (() => {
+            const showNumbers = shouldShowNumbersForOwnUnit(cid, unit.color);
+            const mode = showNumbers ? 'number' : 'icon';
+
             const textColor = unit.tribun
               ? (unit.color === 0 ? '#AE0000' : '#00B4FF')
               : (unit.color === 0 ? '#000' : '#fff');
             const textColorSecondary = unit.color === 0 ? '#fff' : '#000';
             const strokeColor = unit.tribun
-            ? (unit.color === 0 ? '#000' : '#fff')
-            : (unit.color === 0 ? '#fff' : '#000');
+              ? (unit.color === 0 ? '#000' : '#fff')
+              : (unit.color === 0 ? '#fff' : '#000');
             const strokeColorSecondary = unit.color === 0 ? '#000' : '#fff';
-            const mainFontSize = unit.tribun ? 65 : 55;
-            const splitFontSize = unit.tribun ? 50 : 45;
+
+            const sizePx = unit.tribun ? 72 : 64;
 
             if (unit.s > 0) {
-              const primaryOffset = { x: -splitOffsetX, y: splitOffsetY };
-              const secondaryOffset = { x: splitOffsetX, y: -splitOffsetY };
-              const centerTransform = 'translate(-50%, -50%)';
               return (
-                <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-                  {unit.p > 0 && (
-                    <div style={{
-                      position: 'absolute',
-                      left: '50%',
-                      top: '50%',
-                      transform: `${centerTransform} translate(${primaryOffset.x}px, ${-primaryOffset.y}px)`,
-                      transformOrigin: 'center',
-                      fontSize: `${splitFontSize}px`,
-                      fontFamily: '"Segoe UI", "Arial", sans-serif',
-                      fontWeight: 'bold',
-                      color: textColor,
-                      WebkitTextStroke: `1px ${strokeColor}`,
-                    }}>
-                      {unit.p}
-                    </div>
-                  )}
-                  <div style={{
-                    position: 'absolute',
-                    left: '50%',
-                    top: '50%',
-                    transform: `${centerTransform} translate(${secondaryOffset.x}px, ${-secondaryOffset.y}px)`,
-                    transformOrigin: 'center',
-                    fontSize: `${splitFontSize}px`,
-                    fontFamily: '"Segoe UI", "Arial", sans-serif',
-                    fontWeight: 'bold',
-                    color: textColorSecondary,
-                    WebkitTextStroke: `1px ${strokeColorSecondary}`,
-                  }}>
-                    {unit.s}
-                  </div>
-                </div>
+                <SplitUnitGlyph
+                  mode={mode}
+                  // For enslaved/slave units, the "secondary" (opponent-colored) part should render bottom-left,
+                  // and the primary (owner-colored) part top-right.
+                  primary={{ height: unit.s, tribun: false }}
+                  secondary={{ height: unit.p, tribun: unit.tribun }}
+                  sizePx={sizePx}
+                  offsetPx={{ x: splitOffsetX, y: splitOffsetY }}
+                  numberColors={{
+                    primary: { fill: textColorSecondary, stroke: strokeColorSecondary },
+                    secondary: { fill: textColor, stroke: strokeColor },
+                  }}
+                />
               );
             }
 
             return (
-              <div style={{
-                fontSize: `${mainFontSize}px`,
-                fontFamily: '"Segoe UI", "Arial", sans-serif',
-                fontWeight: 'bold',
-                color: textColor,
-                WebkitTextStroke: `1px ${strokeColor}`,
-              }}>
-                {unit.p}
-              </div>
+              <UnitGlyph
+                mode={mode}
+                unit={{ height: unit.p, tribun: unit.tribun }}
+                sizePx={sizePx}
+                numberColor={{ fill: textColor, stroke: strokeColor }}
+              />
             );
           })()}
           <div style={{

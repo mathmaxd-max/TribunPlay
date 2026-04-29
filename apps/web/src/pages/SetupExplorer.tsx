@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
+import { UnitGlyph as SharedUnitGlyph } from "../ui/UnitGlyph";
 import {
   decodeCodeDetailed,
   encodePositionDetailed,
@@ -248,69 +249,25 @@ function deriveHashStatus(value: string): HashStatus {
   return decoded.ok ? "valid" : "invalid";
 }
 
-function UnitGlyph(props: { cell: TileCell; viewMode: UnitViewMode; side: UnitSide; playerColor: PlayerCosmetic; size?: "board" | "small" }) {
+function SetupUnitGlyph(props: { cell: TileCell; viewMode: UnitViewMode; side: UnitSide; playerColor: PlayerCosmetic; size?: "board" | "small" }) {
   const { cell, viewMode, side, playerColor, size = "board" } = props;
   if (cell.height === 0) return null;
 
   const ownIsBlack = playerColor === "black";
   const sideIsBlack = side === "own" ? ownIsBlack : !ownIsBlack;
-  const tokenBg = sideIsBlack ? "#1c1a16" : "#f0f4ff";
-  const tokenText = sideIsBlack ? "#f8f1e7" : "#1d2e4f";
-  const tribunRing = side === "own" ? "#cc3535" : "#2e8f4d";
 
-  if (viewMode === "icon") {
-    const dim = size === "small" ? 20 : 30;
-    const fontSize = size === "small" ? 12 : 16;
-    return (
-      <div
-        style={{
-          width: `${dim}px`,
-          height: `${dim}px`,
-          borderRadius: "50%",
-          background: tokenBg,
-          color: tokenText,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          border: cell.tribun ? `2px solid ${tribunRing}` : "1px solid rgba(0,0,0,0.35)",
-          position: "relative",
-          fontSize: `${fontSize}px`,
-          fontWeight: 700,
-        }}
-      >
-        {cell.height}
-        {cell.tribun && (
-          <span style={{ position: "absolute", bottom: size === "small" ? "-9px" : "-10px", fontSize: size === "small" ? "9px" : "10px", color: tribunRing }}>
-            T
-          </span>
-        )}
-      </div>
-    );
-  }
+  const mode = viewMode === "icon" ? "icon" : "number";
+  const sizePx = size === "small" ? 22 : 36;
+  const fill = cell.tribun ? (sideIsBlack ? "#AE0000" : "#00B4FF") : sideIsBlack ? "#000" : "#fff";
+  const stroke = sideIsBlack ? "#fff" : "#000";
 
-  const mainFontSize = size === "small" ? 20 : 32;
-  const textColor = cell.tribun ? (sideIsBlack ? "#AE0000" : "#00B4FF") : (sideIsBlack ? "#000" : "#fff");
-  const strokeColor = sideIsBlack ? "#fff" : "#000";
   return (
-    <div style={{ position: "relative", lineHeight: 1 }}>
-      <div
-        style={{
-          fontSize: `${mainFontSize}px`,
-          fontFamily: '"Segoe UI", "Arial", sans-serif',
-          fontWeight: "bold",
-          color: textColor,
-          WebkitTextStroke: `1px ${strokeColor}`,
-          textShadow: "0 0 1px rgba(0,0,0,0.25)",
-        }}
-      >
-        {cell.height}
-      </div>
-      {cell.tribun && (
-        <div style={{ position: "absolute", right: "-8px", bottom: "-6px", fontSize: "10px", color: tribunRing, fontWeight: 700 }}>
-          T
-        </div>
-      )}
-    </div>
+    <SharedUnitGlyph
+      mode={mode}
+      unit={{ height: cell.height, tribun: cell.tribun }}
+      sizePx={sizePx}
+      numberColor={{ fill, stroke }}
+    />
   );
 }
 
@@ -762,7 +719,7 @@ export default function SetupExplorer() {
                       height: "40px",
                     }}
                   >
-                    {b === "eraser" ? "E" : <UnitGlyph cell={brushCell} viewMode={unitViewMode} side="own" playerColor={playerColor} size="small" />}
+                    {b === "eraser" ? "E" : <SetupUnitGlyph cell={brushCell} viewMode={unitViewMode} side="own" playerColor={playerColor} size="small" />}
                   </button>
                 );
               })}
@@ -880,8 +837,8 @@ export default function SetupExplorer() {
                       userSelect: "none",
                     }}
                   >
-                    {own.height > 0 && <UnitGlyph cell={own} viewMode={unitViewMode} side="own" playerColor={playerColor} />}
-                    {enemy.height > 0 && <UnitGlyph cell={enemy} viewMode={unitViewMode} side="enemy" playerColor={playerColor} />}
+                    {own.height > 0 && <SetupUnitGlyph cell={own} viewMode={unitViewMode} side="own" playerColor={playerColor} />}
+                    {enemy.height > 0 && <SetupUnitGlyph cell={enemy} viewMode={unitViewMode} side="enemy" playerColor={playerColor} />}
                     {showIndexOverlay && ownIdx !== undefined && (
                       <div style={{ position: "absolute", bottom: "4px", left: "5px", fontSize: "10px", color: "#d51414", fontWeight: 700 }}>
                         {ownIdx}
