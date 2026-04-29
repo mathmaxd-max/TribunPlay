@@ -160,7 +160,6 @@ function ClockEditor(props: {
 export default function Home() {
   const initialIdentity = getStoredIdentity();
   const [code, setCode] = useState('');
-  const [identityName, setIdentityName] = useState(initialIdentity?.name ?? '');
   const [identity, setIdentity] = useState<StoredIdentity | null>(initialIdentity);
   const [hostColor, setHostColor] = useState<RoomColorOption>('random');
   const [startColor, setStartColor] = useState<RoomColorOption>('random');
@@ -245,7 +244,7 @@ export default function Home() {
   const requireIdentityPayload = () => {
     const current = getStoredIdentity();
     if (!current) {
-      throw new Error('Set your identity first: continue as guest or sign in on /login.');
+      throw new Error('Identity missing. Return to the landing page and choose an identity.');
     }
     return {
       current,
@@ -263,26 +262,6 @@ export default function Home() {
     const merged = mergeIdentityFromParticipant(current, participant);
     setStoredIdentity(merged);
     setIdentity(merged);
-    setIdentityName(merged.name);
-  };
-
-  const handleContinueGuest = () => {
-    const normalizedName = identityName.trim().replace(/\s+/g, ' ');
-    if (!normalizedName) {
-      setError('Please enter a name to continue as guest.');
-      return;
-    }
-
-    const nextIdentity: StoredIdentity = {
-      mode: 'guest',
-      name: normalizedName,
-      email: null,
-      accountId: identity?.mode === 'guest' ? identity.accountId : undefined,
-    };
-    setStoredIdentity(nextIdentity);
-    setIdentity(nextIdentity);
-    setIdentityName(normalizedName);
-    setError(null);
   };
 
   const handleCreateGame = async () => {
@@ -379,8 +358,6 @@ export default function Home() {
       ? 'Creating...'
       : clockInvalid
         ? 'Create Game (Invalid clock time)'
-        : !hasIdentity
-          ? 'Create Game (Set identity first)'
         : 'Create Game';
 
   return (
@@ -404,15 +381,15 @@ export default function Home() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: '14px',
-          flexWrap: 'wrap',
           padding: '12px 20px',
+          gap: '16px',
           background: 'rgba(26, 21, 15, 0.92)',
           color: '#f8f1e7',
           borderBottom: '2px solid #3a2f22',
+          flexWrap: 'wrap',
         }}
       >
-        <div>
+        <div style={{ minWidth: '140px' }}>
           <div
             style={{
               fontSize: '10px',
@@ -424,22 +401,41 @@ export default function Home() {
           >
             Tribun Play
           </div>
-          <div style={{ fontSize: '20px', fontWeight: 400 }}>Lobby & Match Setup</div>
+          <div style={{ fontSize: '20px', fontWeight: 400 }}>Play with a Friend</div>
         </div>
 
-        <div
-          style={{
-            padding: '6px 12px',
-            borderRadius: '999px',
-            border: '1px solid #5f4a2d',
-            background: healthOk ? '#244d34' : '#4f3720',
-            fontSize: '12px',
-            fontWeight: 700,
-            letterSpacing: '1px',
-            textTransform: 'uppercase',
-          }}
-        >
-          {healthChecking && !healthResult ? 'Checking Connection' : healthOk ? 'Server Reachable' : 'Connection Issues'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginLeft: 'auto' }}>
+          <div
+            style={{
+              padding: '6px 12px',
+              borderRadius: '999px',
+              border: '1px solid #5f4a2d',
+              background: healthOk ? '#244d34' : '#4f3720',
+              fontSize: '12px',
+              fontWeight: 700,
+              letterSpacing: '1px',
+              textTransform: 'uppercase',
+            }}
+          >
+            {healthChecking && !healthResult ? 'Checking Connection' : healthOk ? 'Server Reachable' : 'Connection Issues'}
+          </div>
+          <button
+            type="button"
+            onClick={() => navigate('/hub')}
+            style={{
+              padding: '8px 14px',
+              borderRadius: '999px',
+              background: '#f2d9b2',
+              border: '2px solid #6f5a38',
+              color: '#2a2218',
+              fontWeight: 700,
+              letterSpacing: '1px',
+              textTransform: 'uppercase',
+              cursor: 'pointer',
+            }}
+          >
+            Home
+          </button>
         </div>
       </div>
 
@@ -497,96 +493,6 @@ export default function Home() {
             margin: '0 auto',
           }}
         >
-          <section
-            style={{
-              borderRadius: '18px',
-              border: '2px solid #3c3226',
-              background: 'rgba(255, 250, 242, 0.84)',
-              boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
-              padding: '18px',
-              display: 'grid',
-              gap: '14px',
-            }}
-          >
-            <div style={{ ...sectionLabelStyle, color: '#7a6543' }}>Account</div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Account / Guest</div>
-
-            <div style={{ display: 'grid', gap: '8px' }}>
-              <label htmlFor="identity-name" style={fieldLabelStyle}>
-                Name
-              </label>
-              <input
-                id="identity-name"
-                type="text"
-                value={identityName}
-                onChange={(event) => setIdentityName(event.target.value)}
-                placeholder="Enter your player name"
-                style={inputStyle}
-                aria-describedby="identity-helper"
-                aria-invalid={Boolean(error && !identityName.trim())}
-              />
-              <div id="identity-helper" style={{ fontSize: '12px', color: '#6f5a38', lineHeight: 1.45 }}>
-                Continue as guest to play instantly, or use authenticated sign-in on the dedicated login page.
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-              <button
-                onClick={handleContinueGuest}
-                disabled={isLoading || !identityName.trim()}
-                style={{
-                  padding: '10px 18px',
-                  borderRadius: '999px',
-                  border: '2px solid #6f5a38',
-                  background: isLoading || !identityName.trim() ? '#d8c8ab' : '#f2d9b2',
-                  color: '#2a2218',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '1px',
-                  cursor: isLoading || !identityName.trim() ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Continue as Guest
-              </button>
-
-              <Link
-                to="/login"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: '10px 18px',
-                  borderRadius: '999px',
-                  border: '2px solid #1f4d2f',
-                  background: '#2f6b3f',
-                  color: '#f7f3eb',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '1px',
-                  textDecoration: 'none',
-                }}
-              >
-                Login
-              </Link>
-            </div>
-
-            <div
-              style={{
-                borderRadius: '12px',
-                border: '1px solid #d8cbb8',
-                background: '#fffaf0',
-                padding: '12px',
-                color: '#5a4630',
-                fontSize: '13px',
-                lineHeight: 1.45,
-              }}
-            >
-              {identity
-                ? `Active identity: ${identity.name}${identity.email ? ` (${identity.email})` : ' (Guest)'}.`
-                : 'No identity selected yet.'}
-            </div>
-          </section>
-
           <section
             style={{
               borderRadius: '18px',

@@ -6,11 +6,14 @@ const isSafeRelativePath = (value: string): boolean => {
   return true;
 };
 
-export const resolveNextPath = (rawNext: string | null | undefined): string => {
+export const resolveNextPath = (
+  rawNext: string | null | undefined,
+  fallback: string = "/",
+): string => {
   if (!rawNext) {
-    return "/";
+    return fallback;
   }
 
   const decoded = decodeURIComponent(rawNext);
-  return isSafeRelativePath(decoded) ? decoded : "/";
+  return isSafeRelativePath(decoded) ? decoded : fallback;
 };

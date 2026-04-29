@@ -756,7 +756,7 @@ export default function Game() {
 
   useEffect(() => {
     if (!code) {
-      navigate('/');
+      navigate('/hub');
       return;
     }
 
@@ -840,7 +840,7 @@ export default function Game() {
         } else {
           const currentIdentity = getStoredIdentity();
           if (!currentIdentity) {
-            navigate(`/login?next=${encodeURIComponent(`/game/${code}`)}`, { replace: true });
+            navigate(`/?next=${encodeURIComponent(`/game/${code}`)}`, { replace: true });
             return;
           }
 
@@ -2610,7 +2610,7 @@ export default function Game() {
             {connectionState}
           </div>
           <button
-            onClick={() => navigate('/')}
+            onClick={() => navigate('/hub')}
             style={{
               padding: '8px 14px',
               borderRadius: '999px',
@@ -2875,6 +2875,10 @@ export default function Game() {
         style={{
           flex: 1,
           minHeight: 0,
+          // Lobby content can exceed the viewport; scroll inside this region while keeping the shell fixed.
+          overflowY: roomStatus === 'lobby' ? 'auto' : undefined,
+          overflowX: roomStatus === 'lobby' ? 'hidden' : undefined,
+          WebkitOverflowScrolling: roomStatus === 'lobby' ? 'touch' : undefined,
           display: 'grid',
           gridTemplateColumns: isWideLayout ? '220px minmax(0, 1fr) 220px' : 'minmax(0, 1fr)',
           gap: contentGap,
