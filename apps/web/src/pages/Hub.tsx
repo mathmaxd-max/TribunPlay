@@ -111,6 +111,43 @@ export default function Hub() {
           </Link>
         </section>
 
+        <section
+          style={{
+            borderRadius: "18px",
+            border: "2px solid #3c3226",
+            background: "rgba(255, 250, 242, 0.84)",
+            boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
+            padding: "18px",
+            display: "grid",
+            gap: "12px",
+          }}
+        >
+          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.3px", textTransform: "uppercase", color: "#7a6543" }}>
+            Tools
+          </div>
+          <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Setup Explorer</div>
+          <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
+            Explore and validate unit setups with hash import, brush editing, and rule checks.
+          </div>
+          <Link
+            to="/setup-explorer"
+            style={{
+              width: "fit-content",
+              padding: "12px 18px",
+              borderRadius: "999px",
+              border: "2px solid #6f5a38",
+              background: "#f2d9b2",
+              color: "#2a2218",
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: "1px",
+              textDecoration: "none",
+            }}
+          >
+            Open Setup Explorer
+          </Link>
+        </section>
+
         <section style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
           <button
             onClick={handleSignOut}

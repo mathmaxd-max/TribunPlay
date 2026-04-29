@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -8,8 +8,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '..', 'dist');
 const distIndexPath = join(distDir, 'index.js');
 const distPositionPath = join(distDir, 'default-position.json');
+const distSetupDirPath = join(distDir, 'setup');
 const importLine = "import defaultPosition from './default-position.json';";
 const uiBackendExportLine = "export * from './ui-backend';";
+const setupExportLine = "export * from \"./setup/TribunSetupCodec\";";
 
 async function loadEngineForTest() {
   const [indexSource, defaultPositionSource] = await Promise.all([
@@ -28,6 +30,9 @@ async function loadEngineForTest() {
     importLine,
     `const defaultPosition = ${defaultPositionSource.trim()};`
   ).replace(
+    setupExportLine,
+    "export * from \"./setup/TribunSetupCodec.js\";"
+  ).replace(
     uiBackendExportLine,
     '// UI backend export removed for isolated encoding regression test execution.'
   );
@@ -35,6 +40,7 @@ async function loadEngineForTest() {
   const tempDir = await mkdtemp(join(tmpdir(), 'tribun-engine-test-'));
   const tempModulePath = join(tempDir, 'index.testable.mjs');
   await writeFile(tempModulePath, patchedSource, 'utf8');
+  await cp(distSetupDirPath, join(tempDir, 'setup'), { recursive: true });
 
   try {
     return await import(pathToFileURL(tempModulePath).href);
@@ -113,6 +119,15 @@ async function run() {
     },
     { drawAction: 3, actorColor: 0 }
   );
+
+  const defaultDecoded = engine.decodeCodeDetailed("DEFAULTSETUP");
+  assert.equal(defaultDecoded.ok, true);
+  assert.ok(defaultDecoded.position);
+  assert.equal(engine.encodePosition(defaultDecoded.position), "DEFAULTSETUP");
+
+  const invalidDecoded = engine.decodeCodeDetailed("!!!!!!!!!!!!");
+  assert.equal(invalidDecoded.ok, false);
+  assert.equal(invalidDecoded.error?.kind, "INVALID_CODE");
 
   console.log('Encoding regression checks passed.');
 }

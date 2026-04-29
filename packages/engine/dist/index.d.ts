@@ -58,5 +58,6 @@ export interface DefaultPosition {
 export declare function createInitialBoard(customInput?: DefaultPosition | Uint8Array | string): Uint8Array;
 export { defaultPosition };
 export declare function createInitialBoardFromCids(units: Record<string, number[]>): Uint8Array;
+export * from "./setup/TribunSetupCodec";
 export * from './ui-backend';
 //# sourceMappingURL=index.d.ts.map

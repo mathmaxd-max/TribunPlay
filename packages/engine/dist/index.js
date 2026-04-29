@@ -1715,6 +1715,7 @@ export function createInitialBoardFromCids(units) {
     }
     return board;
 }
+export * from "./setup/TribunSetupCodec";
 // Export UI backend functions
 export * from './ui-backend';
 //# sourceMappingURL=index.js.map
