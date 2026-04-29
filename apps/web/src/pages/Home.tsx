@@ -1,5 +1,12 @@
 import { type Dispatch, type SetStateAction, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import {
+  buildIdentityPayload,
+  getStoredIdentity,
+  mergeIdentityFromParticipant,
+  setStoredIdentity,
+  type StoredIdentity,
+} from '../auth/identityStore';
 import { API_BASE } from '../config';
 import { formatDurationHms } from '../utils/formatDuration';
 import { useHealthCheck } from '../utils/useHealthCheck';
@@ -151,7 +158,10 @@ function ClockEditor(props: {
 }
 
 export default function Home() {
+  const initialIdentity = getStoredIdentity();
   const [code, setCode] = useState('');
+  const [identityName, setIdentityName] = useState(initialIdentity?.name ?? '');
+  const [identity, setIdentity] = useState<StoredIdentity | null>(initialIdentity);
   const [hostColor, setHostColor] = useState<RoomColorOption>('random');
   const [startColor, setStartColor] = useState<RoomColorOption>('random');
   const [nextStartColor, setNextStartColor] = useState<NextStartOption>('other');
@@ -232,6 +242,49 @@ export default function Home() {
     };
   };
 
+  const requireIdentityPayload = () => {
+    const current = getStoredIdentity();
+    if (!current) {
+      throw new Error('Set your identity first: continue as guest or sign in on /login.');
+    }
+    return {
+      current,
+      payload: buildIdentityPayload(current),
+    };
+  };
+
+  const syncIdentityFromParticipant = (participant: {
+    accountId: string;
+    name: string;
+    email: string | null;
+    mode: 'guest' | 'token';
+  }) => {
+    const current = getStoredIdentity();
+    const merged = mergeIdentityFromParticipant(current, participant);
+    setStoredIdentity(merged);
+    setIdentity(merged);
+    setIdentityName(merged.name);
+  };
+
+  const handleContinueGuest = () => {
+    const normalizedName = identityName.trim().replace(/\s+/g, ' ');
+    if (!normalizedName) {
+      setError('Please enter a name to continue as guest.');
+      return;
+    }
+
+    const nextIdentity: StoredIdentity = {
+      mode: 'guest',
+      name: normalizedName,
+      email: null,
+      accountId: identity?.mode === 'guest' ? identity.accountId : undefined,
+    };
+    setStoredIdentity(nextIdentity);
+    setIdentity(nextIdentity);
+    setIdentityName(normalizedName);
+    setError(null);
+  };
+
   const handleCreateGame = async () => {
     const canStartGame = sameClockSettings
       ? isClockNonZero(sharedClock)
@@ -248,19 +301,24 @@ export default function Home() {
     setLoadingAction('create');
     setError(null);
     try {
+      const { payload: identityPayload } = requireIdentityPayload();
       const timeControl = buildTimeControl();
       const roomSettings = { hostColor, startColor, nextStartColor };
       const response = await fetch(`${API_BASE}/api/game/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ timeControl, roomSettings }),
+        body: JSON.stringify({ timeControl, roomSettings, identity: identityPayload }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to create game');
+        const errData = await response.json().catch(() => ({ error: 'Failed to create game' }));
+        throw new Error(errData.error || 'Failed to create game');
       }
 
       const data = await response.json();
+      if (data.participant) {
+        syncIdentityFromParticipant(data.participant);
+      }
       localStorage.setItem(`game_token_${data.code}`, data.token);
       localStorage.setItem(`game_id_${data.code}`, data.gameId);
       localStorage.setItem(`game_seat_${data.code}`, 'black');
@@ -281,10 +339,11 @@ export default function Home() {
     setLoadingAction('join');
     setError(null);
     try {
+      const { payload: identityPayload } = requireIdentityPayload();
       const response = await fetch(`${API_BASE}/api/game/join`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: code.trim().toUpperCase() }),
+        body: JSON.stringify({ code: code.trim().toUpperCase(), identity: identityPayload }),
       });
 
       if (!response.ok) {
@@ -293,6 +352,9 @@ export default function Home() {
       }
 
       const data = await response.json();
+      if (data.participant) {
+        syncIdentityFromParticipant(data.participant);
+      }
       const gameCode = code.trim().toUpperCase();
       localStorage.setItem(`game_token_${gameCode}`, data.token);
       localStorage.setItem(`game_id_${gameCode}`, data.gameId);
@@ -306,16 +368,19 @@ export default function Home() {
   };
 
   const healthOk = Boolean(healthResult?.api.reachable && healthResult?.websocket.reachable);
+  const hasIdentity = Boolean(identity);
   const canStartGame = sameClockSettings
     ? isClockNonZero(sharedClock)
     : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
   const clockInvalid = !canStartGame;
-  const createDisabled = isLoading || clockInvalid;
+  const createDisabled = isLoading || clockInvalid || !hasIdentity;
   const createButtonLabel =
     loadingAction === 'create'
       ? 'Creating...'
       : clockInvalid
         ? 'Create Game (Invalid clock time)'
+        : !hasIdentity
+          ? 'Create Game (Set identity first)'
         : 'Create Game';
 
   return (
@@ -443,6 +508,96 @@ export default function Home() {
               gap: '14px',
             }}
           >
+            <div style={{ ...sectionLabelStyle, color: '#7a6543' }}>Account</div>
+            <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Account / Guest</div>
+
+            <div style={{ display: 'grid', gap: '8px' }}>
+              <label htmlFor="identity-name" style={fieldLabelStyle}>
+                Name
+              </label>
+              <input
+                id="identity-name"
+                type="text"
+                value={identityName}
+                onChange={(event) => setIdentityName(event.target.value)}
+                placeholder="Enter your player name"
+                style={inputStyle}
+                aria-describedby="identity-helper"
+                aria-invalid={Boolean(error && !identityName.trim())}
+              />
+              <div id="identity-helper" style={{ fontSize: '12px', color: '#6f5a38', lineHeight: 1.45 }}>
+                Continue as guest to play instantly, or use authenticated sign-in on the dedicated login page.
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <button
+                onClick={handleContinueGuest}
+                disabled={isLoading || !identityName.trim()}
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: '999px',
+                  border: '2px solid #6f5a38',
+                  background: isLoading || !identityName.trim() ? '#d8c8ab' : '#f2d9b2',
+                  color: '#2a2218',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  cursor: isLoading || !identityName.trim() ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Continue as Guest
+              </button>
+
+              <Link
+                to="/login"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '10px 18px',
+                  borderRadius: '999px',
+                  border: '2px solid #1f4d2f',
+                  background: '#2f6b3f',
+                  color: '#f7f3eb',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  textDecoration: 'none',
+                }}
+              >
+                Login
+              </Link>
+            </div>
+
+            <div
+              style={{
+                borderRadius: '12px',
+                border: '1px solid #d8cbb8',
+                background: '#fffaf0',
+                padding: '12px',
+                color: '#5a4630',
+                fontSize: '13px',
+                lineHeight: 1.45,
+              }}
+            >
+              {identity
+                ? `Active identity: ${identity.name}${identity.email ? ` (${identity.email})` : ' (Guest)'}.`
+                : 'No identity selected yet.'}
+            </div>
+          </section>
+
+          <section
+            style={{
+              borderRadius: '18px',
+              border: '2px solid #3c3226',
+              background: 'rgba(255, 250, 242, 0.84)',
+              boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
+              padding: '18px',
+              display: 'grid',
+              gap: '14px',
+            }}
+          >
             <div style={{ ...sectionLabelStyle, color: '#7a6543' }}>Quick Join</div>
             <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Join Game</div>
 
@@ -470,17 +625,17 @@ export default function Home() {
                 />
                 <button
                   onClick={handleJoinGame}
-                  disabled={isLoading}
+                  disabled={isLoading || !hasIdentity}
                   style={{
                     padding: '10px 18px',
                     borderRadius: '999px',
                     border: '2px solid #1f4d2f',
-                    background: isLoading ? '#8ea593' : '#2f6b3f',
+                    background: isLoading || !hasIdentity ? '#8ea593' : '#2f6b3f',
                     color: '#f7f3eb',
                     fontWeight: 700,
                     textTransform: 'uppercase',
                     letterSpacing: '1px',
-                    cursor: isLoading ? 'not-allowed' : 'pointer',
+                    cursor: isLoading || !hasIdentity ? 'not-allowed' : 'pointer',
                   }}
                 >
                   {loadingAction === 'join' ? 'Joining...' : 'Join'}

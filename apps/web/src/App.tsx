@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Home from './pages/Home';
 import Game from './pages/Game';
+import Login from './pages/Login';
 import Datenschutz from './pages/Datenschutz';
 import Disclaimer from './pages/Disclaimer';
 import Impressum from './pages/Impressum';
@@ -10,6 +11,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Home />} />
+        <Route path="/login" element={<Login />} />
         <Route path="/game/:code" element={<Game />} />
         <Route path="/datenschutz" element={<Datenschutz />} />
         <Route path="/disclaimer" element={<Disclaimer />} />

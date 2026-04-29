@@ -3,4 +3,6 @@
 interface Env {
 	GAME_ROOM: DurableObjectNamespace<GameRoom>;
 	DB: D1Database;
+	GOOGLE_CLIENT_ID?: string;
+	AUTH_TOKEN_SECRET?: string;
 }

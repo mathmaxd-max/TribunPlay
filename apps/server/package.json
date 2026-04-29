@@ -12,6 +12,7 @@
 	},
 	"dependencies": {
 		"@tribunplay/engine": "*",
+		"bcryptjs": "^3.0.3",
 		"chanfana": "^2.6.3",
 		"hono": "^4.12.14",
 		"zod": "^3.24.1"

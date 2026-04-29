@@ -5,6 +5,12 @@ import { getHexagonColor, getBaseColor, type HexagonState } from '../hexagonColo
 import { LegalBloomValidator, type LegalValidatorMessage } from '../net/LegalBloom';
 import { buildCache } from '../ui/cache/buildCache';
 import type { UiMoveCache } from '../ui/cache/UiMoveCache';
+import {
+  buildIdentityPayload,
+  getStoredIdentity,
+  mergeIdentityFromParticipant,
+  setStoredIdentity,
+} from '../auth/identityStore';
 import { API_BASE, WS_BASE } from '../config';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -832,15 +838,24 @@ export default function Game() {
           seat = storedSeat;
           setRole(seat);
         } else {
+          const currentIdentity = getStoredIdentity();
+          if (!currentIdentity) {
+            navigate(`/login?next=${encodeURIComponent(`/game/${code}`)}`, { replace: true });
+            return;
+          }
+
+          const identityPayload = buildIdentityPayload(currentIdentity);
+
           // First time joining this game - call join API
           const joinResponse = await fetch(`${API_BASE}/api/game/join`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code }),
+            body: JSON.stringify({ code, identity: identityPayload }),
           });
 
           if (!joinResponse.ok) {
-            throw new Error('Failed to join game');
+            const errData = await joinResponse.json().catch(() => ({ error: 'Failed to join game' }));
+            throw new Error(errData.error || 'Failed to join game');
           }
 
           const joinData = await joinResponse.json();
@@ -848,6 +863,11 @@ export default function Game() {
           token = joinData.token;
           seat = joinData.seat;
           setRole(seat);
+
+          if (joinData.participant) {
+            const mergedIdentity = mergeIdentityFromParticipant(currentIdentity, joinData.participant);
+            setStoredIdentity(mergedIdentity);
+          }
 
           // Store for future use
           localStorage.setItem(`game_token_${code}`, token);

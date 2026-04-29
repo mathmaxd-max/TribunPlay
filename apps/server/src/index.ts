@@ -4,6 +4,11 @@ import { cors } from "hono/cors";
 import { GameCreate } from "./endpoints/gameCreate";
 import { GameJoin } from "./endpoints/gameJoin";
 import { GameGet } from "./endpoints/gameGet";
+import { AuthLogin } from "./endpoints/authLogin";
+import { AuthSignup } from "./endpoints/authSignup";
+import { AuthGoogle } from "./endpoints/authGoogle";
+import { AuthRefresh } from "./endpoints/authRefresh";
+import { AuthLogout } from "./endpoints/authLogout";
 import { GameRoom } from "./durable-objects/GameRoom";
 
 // Start a Hono app
@@ -20,6 +25,13 @@ const openapi = fromHono(app, {
 openapi.post("/api/game/create", GameCreate);
 openapi.post("/api/game/join", GameJoin);
 openapi.get("/api/game/:code", GameGet);
+
+// Register auth API endpoints
+openapi.post("/api/auth/login", AuthLogin);
+openapi.post("/api/auth/signup", AuthSignup);
+openapi.post("/api/auth/google", AuthGoogle);
+openapi.post("/api/auth/refresh", AuthRefresh);
+openapi.post("/api/auth/logout", AuthLogout);
 
 // WebSocket health endpoint (accepts handshake, then closes)
 app.get("/ws/health", (c) => {
