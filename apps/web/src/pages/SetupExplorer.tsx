@@ -32,8 +32,8 @@ const EMPTY_CELL: TileCell = { height: 0, tribun: false };
 const TRASH_ICON_URL = new URL("../assets/game/units/icons/Trash.webp", import.meta.url).href;
 const TRASH_OUTLINE_URL = new URL("../assets/game/units/icons/_Trash.webp", import.meta.url).href;
 
-function TrashGlyph(props: { sizePx: number; fillColor: string }) {
-  const { sizePx, fillColor } = props;
+function TrashGlyph(props: { sizePx: number; fillColor: string; outlineColor: string }) {
+  const { sizePx, fillColor, outlineColor } = props;
 
   // Similar to `ui/UnitGlyph.tsx`: we tint by masking the filled glyph, while keeping a dedicated outline asset on top.
   return (
@@ -48,12 +48,21 @@ function TrashGlyph(props: { sizePx: number; fillColor: string }) {
         pointerEvents: "none",
       }}
     >
-      <img
-        src={TRASH_OUTLINE_URL}
-        alt=""
+      <span
         aria-hidden="true"
-        draggable={false}
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundColor: outlineColor,
+          WebkitMaskImage: `url(${TRASH_OUTLINE_URL})`,
+          WebkitMaskRepeat: "no-repeat",
+          WebkitMaskPosition: "center",
+          WebkitMaskSize: "contain",
+          maskImage: `url(${TRASH_OUTLINE_URL})`,
+          maskRepeat: "no-repeat",
+          maskPosition: "center",
+          maskSize: "contain",
+        }}
       />
       <span
         aria-hidden="true"
@@ -328,6 +337,7 @@ export default function SetupExplorer() {
     button: 0,
     lastCid: null,
   });
+  const userFlippedRef = useRef(false);
 
   const [ownCells, setOwnCells] = useState<TileCell[]>(makeEmptyCells);
   const [ownHashInput, setOwnHashInput] = useState("");
@@ -337,6 +347,12 @@ export default function SetupExplorer() {
   const [enemyCells, setEnemyCells] = useState<TileCell[]>(makeEmptyCells);
   const [enemyHashInput, setEnemyHashInput] = useState("");
   const [enemyHashStatus, setEnemyHashStatus] = useState<HashStatus>("idle");
+
+  // Mapping between setup-index space and board CIDs depends on which player perspective we are displaying.
+  // Important: we keep the underlying `ownCells[]` indexing/hash encoding stable; only which CID each index
+  // is rendered onto (and painted via) changes with `playerColor`.
+  const ownCidToIndex = playerColor === "white" ? OWN_CID_TO_INDEX : ENEMY_CID_TO_INDEX;
+  const enemyCidToIndex = playerColor === "white" ? ENEMY_CID_TO_INDEX : OWN_CID_TO_INDEX;
 
   const ownValidation = useMemo(() => {
     const counts = emptyCounts();
@@ -536,7 +552,7 @@ export default function SetupExplorer() {
   }, [rotate180]);
 
   const applyLeftClick = (cid: number) => {
-    const setupIndex = OWN_CID_TO_INDEX.get(cid);
+    const setupIndex = ownCidToIndex.get(cid);
     if (setupIndex === undefined) return;
     setOwnCells((prev) => {
       const next = prev.map((cell) => ({ ...cell }));
@@ -557,7 +573,7 @@ export default function SetupExplorer() {
   };
 
   const applyRightErase = (cid: number) => {
-    const setupIndex = OWN_CID_TO_INDEX.get(cid);
+    const setupIndex = ownCidToIndex.get(cid);
     if (setupIndex === undefined) return;
     setOwnCells((prev) => {
       if (!cellOccupied(prev[setupIndex])) return prev;
@@ -580,6 +596,37 @@ export default function SetupExplorer() {
     }
     return set;
   }, [brush, tribunBrush, onlyEmpty, ownCells]);
+
+  const computeRotateForPlayerKeepingSide = (nextPlayerColor: PlayerCosmetic) => {
+    const BLACK_CORNER_CID = 0;
+    let whiteCornerCid: number;
+    try {
+      const blackCorner = engine.decodeCoord(BLACK_CORNER_CID);
+      whiteCornerCid = engine.encodeCoord(-blackCorner.x, -blackCorner.y);
+    } catch {
+      return rotate180;
+    }
+
+    // Larger values are lower on the screen (more "bottom").
+    const bottomMetric = (cid: number, rotated: boolean) => {
+      const { x, y } = engine.decodeCoord(cid);
+      const dx = rotated ? -x : x;
+      const dy = rotated ? -y : y;
+      return dx + dy;
+    };
+
+    const wantedCurrent = playerColor === "black" ? BLACK_CORNER_CID : whiteCornerCid;
+    const otherCurrent = wantedCurrent === BLACK_CORNER_CID ? whiteCornerCid : BLACK_CORNER_CID;
+    const currentIsBottom = bottomMetric(wantedCurrent, rotate180) > bottomMetric(otherCurrent, rotate180);
+
+    const wantedNext = nextPlayerColor === "black" ? BLACK_CORNER_CID : whiteCornerCid;
+    const otherNext = wantedNext === BLACK_CORNER_CID ? whiteCornerCid : BLACK_CORNER_CID;
+
+    const nextNoFlipIsBottom = bottomMetric(wantedNext, false) > bottomMetric(otherNext, false);
+    const nextRotateToBottom = !nextNoFlipIsBottom;
+
+    return currentIsBottom ? nextRotateToBottom : !nextRotateToBottom;
+  };
 
   useEffect(() => {
     const stop = () => {
@@ -774,10 +821,26 @@ export default function SetupExplorer() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
               <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Player</div>
               <div style={segmentedWrapStyle}>
-                <button type="button" onClick={() => setPlayerColor("black")} style={segmentedBtnStyle(playerColor === "black")}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = "black";
+                    setRotate180(computeRotateForPlayerKeepingSide(next));
+                    setPlayerColor(next);
+                  }}
+                  style={segmentedBtnStyle(playerColor === "black")}
+                >
                   Black
                 </button>
-                <button type="button" onClick={() => setPlayerColor("white")} style={segmentedBtnStyle(playerColor === "white")}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = "white";
+                    setRotate180(computeRotateForPlayerKeepingSide(next));
+                    setPlayerColor(next);
+                  }}
+                  style={segmentedBtnStyle(playerColor === "white")}
+                >
                   White
                 </button>
               </div>
@@ -802,6 +865,7 @@ export default function SetupExplorer() {
               const brushCell: TileCell = b === "eraser" ? EMPTY_CELL : { height: Number(b) as 1 | 2 | 3, tribun: tribunBrush };
               const ownIsBlack = playerColor === "black";
               const fillColor = tribunBrush ? (ownIsBlack ? "#AE0000" : "#00B4FF") : ownIsBlack ? "#000" : "#fff";
+              const outlineColor = ownIsBlack ? "#fff" : "#000";
               return (
                 <button
                   key={b}
@@ -811,8 +875,8 @@ export default function SetupExplorer() {
                     padding: "6px 10px",
                     borderRadius: "10px",
                     border: "2px solid #6f5a38",
-                    // Neutral brush background so the unit/trash tint stays readable regardless of color.
-                    background: isSelected ? "#4B4B4B" : "#636363",
+                    // Match the UI's cream + gold highlight palette.
+                    background: isSelected ? "#f2d9b2" : "#f6f0e6",
                     fontWeight: 700,
                     cursor: "pointer",
                     minWidth: "56px",
@@ -824,7 +888,7 @@ export default function SetupExplorer() {
                   }}
                 >
                   {b === "eraser" ? (
-                    <TrashGlyph sizePx={18} fillColor={fillColor} />
+                    <TrashGlyph sizePx={18} fillColor={fillColor} outlineColor={outlineColor} />
                   ) : (
                     <SetupUnitGlyph cell={brushCell} viewMode={unitViewMode} side="own" playerColor={playerColor} size="small" />
                   )}
@@ -884,7 +948,10 @@ export default function SetupExplorer() {
           >
             <button
               type="button"
-              onClick={() => setRotate180((prev) => !prev)}
+              onClick={() => {
+                userFlippedRef.current = true;
+                setRotate180((prev) => !prev);
+              }}
               title="Flip board"
               aria-label="Flip board"
               style={{
@@ -907,15 +974,13 @@ export default function SetupExplorer() {
                 boxShadow: "0 6px 12px rgba(20, 15, 10, 0.18)",
                 zIndex: 2,
               }}
-            >
-              180
-            </button>
+            />
 
             <div style={{ width: "100%", display: "flex", justifyContent: "center", overflow: "auto" }}>
               <div style={{ position: "relative", minWidth: `${boardMetrics.width}px`, height: `${boardMetrics.height}px` }}>
                 {boardMetrics.tiles.map((tile) => {
-                  const ownIdx = OWN_CID_TO_INDEX.get(tile.cid);
-                  const enemyIdx = ENEMY_CID_TO_INDEX.get(tile.cid);
+                  const ownIdx = ownCidToIndex.get(tile.cid);
+                  const enemyIdx = enemyCidToIndex.get(tile.cid);
                   const isOwnSetupTile = ownIdx !== undefined;
                   const isEnemySetupTile = enemyIdx !== undefined;
                   const own = isOwnSetupTile ? ownCells[ownIdx] : EMPTY_CELL;
@@ -996,8 +1061,11 @@ export default function SetupExplorer() {
                 {ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : "—"}
               </span>
             </div>
-            <div>
-              Used: #1={ownValidation.counts.ones} · #2={ownValidation.counts.twos} · #3={ownValidation.counts.threes}
+            <div style={{ display: "grid", gap: "2px" }}>
+              <div style={{ fontWeight: 700 }}>Used heights</div>
+              <div>#1: {ownValidation.counts.ones}</div>
+              <div>#2: {ownValidation.counts.twos}</div>
+              <div>#3: {ownValidation.counts.threes}</div>
             </div>
             <div>Tribun height: {ownValidation.tribunHeight > 0 ? ownValidation.tribunHeight : "—"}</div>
           </div>

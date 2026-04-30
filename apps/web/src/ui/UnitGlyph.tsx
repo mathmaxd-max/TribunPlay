@@ -17,8 +17,8 @@ type SplitColorStyle = {
   secondary: ColorStyle;
 };
 
-function TintedIconGlyph(props: { unit: UnitGlyphUnit; sizePx: number; alt: string; fillColor: string }) {
-  const { unit, sizePx, alt, fillColor } = props;
+function TintedIconGlyph(props: { unit: UnitGlyphUnit; sizePx: number; alt: string; fillColor: string; outlineColor: string }) {
+  const { unit, sizePx, alt, fillColor, outlineColor } = props;
   const outlineUrl = resolveUnitIconUrl({ height: unit.height, tribun: unit.tribun, outline: true });
   const fillUrl = resolveUnitIconUrl({ height: unit.height, tribun: unit.tribun, outline: false });
 
@@ -35,20 +35,26 @@ function TintedIconGlyph(props: { unit: UnitGlyphUnit; sizePx: number; alt: stri
         display: "inline-block",
         width: `${sizePx}px`,
         height: `${sizePx}px`,
+        isolation: "isolate",
         userSelect: "none",
         pointerEvents: "none",
       }}
     >
-      <img
-        src={outlineUrl}
-        alt=""
+      <span
         aria-hidden="true"
-        draggable={false}
         style={{
           position: "absolute",
           inset: 0,
-          width: "100%",
-          height: "100%",
+          zIndex: 0,
+          backgroundColor: outlineColor,
+          WebkitMaskImage: `url(${outlineUrl})`,
+          WebkitMaskRepeat: "no-repeat",
+          WebkitMaskPosition: "center",
+          WebkitMaskSize: "contain",
+          maskImage: `url(${outlineUrl})`,
+          maskRepeat: "no-repeat",
+          maskPosition: "center",
+          maskSize: "contain",
         }}
       />
       <span
@@ -56,6 +62,7 @@ function TintedIconGlyph(props: { unit: UnitGlyphUnit; sizePx: number; alt: stri
         style={{
           position: "absolute",
           inset: 0,
+          zIndex: 1,
           backgroundColor: fillColor,
           WebkitMaskImage: `url(${fillUrl})`,
           WebkitMaskRepeat: "no-repeat",
@@ -113,12 +120,14 @@ export function UnitGlyph(props: {
 
   if (mode === "icon" && canRenderAsIcon(unit)) {
     const fillColor = numberColor?.fill ?? "#fff";
+    const outlineColor = numberColor?.stroke ?? "#000";
     return (
       <TintedIconGlyph
         unit={unit}
         sizePx={sizePx}
         alt={unit.tribun ? `Tribun ${unit.height}` : `Unit ${unit.height}`}
         fillColor={fillColor}
+        outlineColor={outlineColor}
       />
     );
   }
