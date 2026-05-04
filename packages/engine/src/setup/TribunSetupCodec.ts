@@ -1,51 +1,63 @@
-export type Scenario = 0 | 1 | 2 | 3;
+/* TribunSetupCodec.ts
+ *
+ * Base-37 setup codec for (tribTile + 3 fixed bitmaps), with triangle-rule validation
+ * and mnemonic defaults via a tiny swap-permutation.
+ *
+ * Alphabet: 0-9 A-Z #
+ * Code length: 16 digits (optionally grouped as 4×4 for display).
+ *
+ * This replaces the legacy rank/unrank-based base36(12) codec.
+ */
 
-export type UnitKind = "_" | "1" | "1T" | "2" | "2T" | "3" | "3T";
+export type UnitKind = "_" | "1" | "2" | "3" | "1T" | "2T" | "3T";
+export type Orientation = "UP" | "DOWN";
 
-export interface Position {
-  scenario: Scenario;
-  tribTile: number;
-  threes: number[];
-  twos: number[];
-  ones: number[];
+export interface SetupMasks {
+  tribTile: number; // 0..31
+  mask3: bigint; // 15 bits (tiles 0..14)
+  mask2: bigint; // 26 bits (tiles 0..25)
+  mask1: bigint; // 37 bits (tiles 0..36)
+}
+
+export interface SetupDecoded extends SetupMasks {
+  tribunHeight: 1 | 2 | 3;
+  freeN: number;
+  costArmy: number;
+  armySize: number;
 }
 
 export type EncodeError =
-  | { kind: "NO_TRIBUN" }
-  | { kind: "MULTIPLE_TRIBUNS" }
-  | { kind: "OUT_OF_RANGE_TILE"; tile: number }
+  | { kind: "OUT_OF_RANGE_TRIB_TILE"; tribTile: number }
+  | { kind: "MASK_OUT_OF_RANGE"; which: "mask1" | "mask2" | "mask3" }
   | { kind: "OVERLAP"; tile: number }
-  | { kind: "AREA_VIOLATION"; unit: UnitKind; tile: number }
+  | { kind: "TRIB_TILE_NOT_OCCUPIED"; tribTile: number }
+  | { kind: "TRIB_TILE_MULTIPLE_HEIGHTS"; tribTile: number }
+  | { kind: "BUDGET_FAIL"; usedBudget: number; expectedBudget: number }
   | { kind: "PAYMENT_2_FOR_3_FAIL"; n2: number; n3: number }
-  | { kind: "PAYMENT_1_FOR_2_FAIL"; n1: number; n2: number; scenario: Scenario }
-  | { kind: "N_BUDGET_FAIL"; usedN: number; expectedN: number }
+  | { kind: "PAYMENT_1_FOR_2_FAIL"; n1: number; n2: number }
   | {
       kind: "TRIANGLE_EQUAL_UNITS";
       center: number;
-      orientation: "UP" | "DOWN";
+      orientation: Orientation;
       vertices: [number, number, number];
       unit: UnitKind;
-    }
-  | { kind: "UNKNOWN_CASE_COUNTS"; n1: number; n2: number; n3: number; scenario: Scenario };
+    };
 
 export interface EncodeResult {
-  code: string;
+  code: string; // 16 chars, or "----------------"
   ok: boolean;
   error?: EncodeError;
+  characteristics?: { tribunHeight: 1 | 2 | 3; armySize: number };
 }
 
 export interface DecodeResult {
   ok: boolean;
-  position?: Position;
-  error?: {
-    kind: "INVALID_CODE" | "OUT_OF_RANGE_RANK" | "DECODED_POSITION_INVALID";
-    details?: EncodeError;
-  };
+  setup?: SetupDecoded;
+  error?: { kind: "INVALID_CODE" | "OUT_OF_RANGE_PAYLOAD" | "DECODED_SETUP_INVALID"; details?: EncodeError };
 }
 
-const CODE_LEN = 12;
-export const INVALID_SETUP_CODE = "------------";
-const TOTAL_N = 33;
+const CODE_LEN = 16;
+export const INVALID_SETUP_CODE = "-".repeat(CODE_LEN);
 
 export const SETUP_REGION_RED = 15;
 export const SETUP_REGION_ORANGE = 26;
@@ -54,116 +66,80 @@ export const SETUP_REGION_LIME = 37;
 export const SETUP_TILE_COUNT = SETUP_REGION_LIME;
 export const SETUP_ROW_LENGTHS = [1, 2, 3, 4, 5, 6, 5, 6, 5];
 
-const DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const N3 = SETUP_REGION_RED; // 15 tiles: 0..14
+const N2 = SETUP_REGION_ORANGE; // 26 tiles: 0..25
+const N1 = SETUP_REGION_LIME; // 37 tiles: 0..36
+const TRIB_RANGE = SETUP_REGION_YELLOW; // tribTile is 0..31
+
+const SETUP_BUDGET = 36;
+
+export const ALPHABET37 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
 const DIGIT_MAP: Record<string, number> = (() => {
   const m: Record<string, number> = {};
-  for (let i = 0; i < 36; i++) m[DIGITS[i]] = i;
+  for (let i = 0; i < ALPHABET37.length; i++) m[ALPHABET37[i]] = i;
   return m;
 })();
 
-const MOD_M: bigint = 36n ** BigInt(CODE_LEN);
+const BASE = 37n;
+const BASE_POW_16 = BASE ** 16n; // 37^16
+const BASE_POW_8 = BASE ** 8n; // Feistel half modulus
+const PAYLOAD_BITS = 83n;
+const PAYLOAD_MAX = 1n << PAYLOAD_BITS; // 2^83
 
-type ScenarioDef = {
-  scenario: Scenario;
-  tribKind: UnitKind;
-  tribHeight: 1 | 2 | 3;
-  free1: number;
-  free2: number;
-  relaxOneVsTwoBy: number;
-  tribAreaMaxExclusive: number;
-};
+/* ---------------- Geometry for triangle rule ----------------
+ *
+ * We need: for each center tile, the two "symmetric triangles":
+ *  UP triangle vertices = three alternating neighbors around center
+ *  DOWN triangle vertices = the other alternating triple
+ *
+ * Tile indexing: bottom->top rows, left->right within row.
+ * Row lengths sum to 37 and match the color bands:
+ *  1+2+3+4+5 = 15 (red)
+ *  +6+5 = 26 (orange)
+ *  +6 = 32 (yellow)
+ *  +5 = 37 (lime)
+ */
 
-const SCENARIOS: Record<Scenario, ScenarioDef> = {
-  0: { scenario: 0, tribKind: "3T", tribHeight: 3, free1: 0, free2: 0, relaxOneVsTwoBy: 0, tribAreaMaxExclusive: SETUP_REGION_RED },
-  1: { scenario: 1, tribKind: "2T", tribHeight: 2, free1: 1, free2: 0, relaxOneVsTwoBy: 0, tribAreaMaxExclusive: SETUP_REGION_ORANGE },
-  2: { scenario: 2, tribKind: "1T", tribHeight: 1, free1: 0, free2: 1, relaxOneVsTwoBy: 1, tribAreaMaxExclusive: SETUP_REGION_YELLOW },
-  3: { scenario: 3, tribKind: "1T", tribHeight: 1, free1: 2, free2: 0, relaxOneVsTwoBy: 0, tribAreaMaxExclusive: SETUP_REGION_YELLOW },
-};
+type Ax = { q: number; r: number };
+const { neighbors } = buildHexGeometry();
 
-export function getScenarioDefinition(scenario: Scenario) {
-  return SCENARIOS[scenario];
-}
+function buildHexGeometry() {
+  const coords: Ax[] = [];
+  const idxOf = new Map<string, number>();
 
-export function encodePosition(pos: Position): string {
-  return encodePositionDetailed(pos).code;
-}
-
-export function encodePositionDetailed(pos: Position): EncodeResult {
-  const vr = validatePosition(pos);
-  if (!vr.ok) return { code: INVALID_SETUP_CODE, ok: false, error: vr.error };
-
-  const rank = rankPosition(vr.position);
-  if (rank === null) {
-    return {
-      code: INVALID_SETUP_CODE,
-      ok: false,
-      error: { kind: "UNKNOWN_CASE_COUNTS", ...countsOf(vr.position) },
-    };
-  }
-
-  const rankDigits = bigIntToBase36Digits(rank, CODE_LEN);
-  const scrDigits = feistelScramble(rankDigits);
-  const scrVal = base36DigitsToBigInt(scrDigits);
-  const outVal = modBig(scrVal + DEFAULT_OFFSET, MOD_M);
-  const outDigits = bigIntToBase36Digits(outVal, CODE_LEN);
-  return { code: digitsToBase36String(outDigits), ok: true };
-}
-
-export function decodeCode(code: string): Position | null {
-  const dr = decodeCodeDetailed(code);
-  return dr.ok ? dr.position! : null;
-}
-
-export function decodeCodeDetailed(code: string): DecodeResult {
-  const digs = base36StringToDigits(code);
-  if (!digs) return { ok: false, error: { kind: "INVALID_CODE" } };
-
-  const inVal = base36DigitsToBigInt(digs);
-  const unOffsetVal = modBig(inVal - DEFAULT_OFFSET, MOD_M);
-  const unOffsetDigits = bigIntToBase36Digits(unOffsetVal, CODE_LEN);
-  const rankDigits = feistelUnscramble(unOffsetDigits);
-  const rank = base36DigitsToBigInt(rankDigits);
-
-  if (rank < 0n || rank >= TOTAL_RANK_SPACE) return { ok: false, error: { kind: "OUT_OF_RANGE_RANK" } };
-
-  const pos = unrankPosition(rank);
-  if (!pos) return { ok: false, error: { kind: "DECODED_POSITION_INVALID" } };
-
-  const vr = validatePosition(pos);
-  if (!vr.ok) return { ok: false, error: { kind: "DECODED_POSITION_INVALID", details: vr.error } };
-
-  return { ok: true, position: vr.position };
-}
-
-export function validatePositionDetailed(pos: Position): { ok: true; position: Position } | { ok: false; error: EncodeError } {
-  return validatePosition(pos);
-}
-
-export function parseBoardString(board: string, scenario: Scenario): Position | null {
-  const parts = board.split(";").map((s) => s.trim());
-  if (parts.length !== SETUP_REGION_LIME) return null;
-
-  let tribTile = -1;
-  const threes: number[] = [];
-  const twos: number[] = [];
-  const ones: number[] = [];
-
-  for (let i = 0; i < parts.length; i++) {
-    const v = parts[i];
-    if (v === "_" || v === "") continue;
-    if (v.endsWith("T")) {
-      if (tribTile !== -1) return null;
-      tribTile = i;
-      continue;
+  let idx = 0;
+  for (let r = 0; r < SETUP_ROW_LENGTHS.length; r++) {
+    const len = SETUP_ROW_LENGTHS[r];
+    const qStart = -Math.floor(len / 2);
+    for (let x = 0; x < len; x++) {
+      const q = qStart + x;
+      coords[idx] = { q, r };
+      idxOf.set(`${q},${r}`, idx);
+      idx++;
     }
-    if (v === "3") threes.push(i);
-    else if (v === "2") twos.push(i);
-    else if (v === "1") ones.push(i);
-    else return null;
   }
+  if (idx !== N1) throw new Error(`SETUP_ROW_LENGTHS must sum to ${N1}, got ${idx}`);
 
-  if (tribTile === -1) return null;
-  return normalize({ scenario, tribTile, threes, twos, ones });
+  // axial neighbor dirs (pointy-top)
+  const DIRS: Array<[number, number]> = [
+    [1, 0],
+    [1, -1],
+    [0, -1],
+    [-1, 0],
+    [-1, 1],
+    [0, 1],
+  ];
+
+  const neighbors: number[][] = Array.from({ length: N1 }, () => new Array(6).fill(-1));
+  for (let i = 0; i < N1; i++) {
+    const { q, r } = coords[i];
+    for (let d = 0; d < 6; d++) {
+      const [dq, dr] = DIRS[d];
+      const j = idxOf.get(`${q + dq},${r + dr}`);
+      neighbors[i][d] = j === undefined ? -1 : j;
+    }
+  }
+  return { neighbors };
 }
 
 function bandOf(tile: number): 0 | 1 | 2 | 3 {
@@ -173,99 +149,11 @@ function bandOf(tile: number): 0 | 1 | 2 | 3 {
   return 3;
 }
 
-function validatePosition(pos: Position): { ok: true; position: Position } | { ok: false; error: EncodeError } {
-  const p = normalize(pos);
-  if (!p) return { ok: false, error: { kind: "OUT_OF_RANGE_TILE", tile: -1 } };
-  const def = SCENARIOS[p.scenario];
-
-  if (p.tribTile < 0 || p.tribTile >= SETUP_REGION_LIME) return { ok: false, error: { kind: "OUT_OF_RANGE_TILE", tile: p.tribTile } };
-  if (p.tribTile >= def.tribAreaMaxExclusive) return { ok: false, error: { kind: "AREA_VIOLATION", unit: def.tribKind, tile: p.tribTile } };
-  for (const t of p.threes) if (t >= SETUP_REGION_RED) return { ok: false, error: { kind: "AREA_VIOLATION", unit: "3", tile: t } };
-  for (const t of p.twos) if (t >= SETUP_REGION_ORANGE) return { ok: false, error: { kind: "AREA_VIOLATION", unit: "2", tile: t } };
-  for (const t of p.ones) if (t >= SETUP_REGION_LIME) return { ok: false, error: { kind: "AREA_VIOLATION", unit: "1", tile: t } };
-
-  const used = new Set<number>();
-  for (const t of [p.tribTile, ...p.threes, ...p.twos, ...p.ones]) {
-    if (t < 0 || t >= SETUP_REGION_LIME) return { ok: false, error: { kind: "OUT_OF_RANGE_TILE", tile: t } };
-    if (used.has(t)) return { ok: false, error: { kind: "OVERLAP", tile: t } };
-    used.add(t);
-  }
-
-  const n3 = p.threes.length;
-  const n2 = p.twos.length;
-  const n1 = p.ones.length;
-  if (n2 < 2 * n3) return { ok: false, error: { kind: "PAYMENT_2_FOR_3_FAIL", n2, n3 } };
-  if (n1 < n2 - def.relaxOneVsTwoBy) return { ok: false, error: { kind: "PAYMENT_1_FOR_2_FAIL", n1, n2, scenario: p.scenario } };
-
-  const usedN = computeUsedN(p);
-  if (usedN !== TOTAL_N) return { ok: false, error: { kind: "N_BUDGET_FAIL", usedN, expectedN: TOTAL_N } };
-
-  const tri = findTriangleViolation(p);
-  if (tri) return { ok: false, error: tri };
-
-  return { ok: true, position: p };
-}
-
-function computeUsedN(p: Position): number {
-  const def = SCENARIOS[p.scenario];
-  const n3 = p.threes.length;
-  const n2 = p.twos.length;
-  const n1 = p.ones.length;
-  const tribN = def.tribHeight - 1;
-  const paid1 = n1 - def.free1;
-  const paid2 = n2 - def.free2;
-  if (paid1 < 0 || paid2 < 0) return Number.NaN;
-  return 3 * n3 + 2 * paid2 + paid1 + tribN;
-}
-
-type BoardArr = UnitKind[];
-const { neighbors } = buildGeometry();
-
-function buildGeometry() {
-  const coords: Array<[number, number]> = [];
-  const coordToIndex = new Map<string, number>();
-  let idx = 0;
-  for (let r = 0; r < SETUP_ROW_LENGTHS.length; r++) {
-    const len = SETUP_ROW_LENGTHS[r];
-    const qStart = -Math.floor(len / 2);
-    for (let x = 0; x < len; x++) {
-      const q = qStart + x;
-      coords[idx] = [q, r];
-      coordToIndex.set(`${q},${r}`, idx);
-      idx++;
-    }
-  }
-  const dirs: Array<[number, number]> = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
-  const neighbors: number[][] = Array.from({ length: SETUP_REGION_LIME }, () => new Array(6).fill(-1));
-  for (let i = 0; i < SETUP_REGION_LIME; i++) {
-    const [q, r0] = coords[i];
-    for (let d = 0; d < 6; d++) {
-      const [dq, dr] = dirs[d];
-      const j = coordToIndex.get(`${q + dq},${r0 + dr}`);
-      neighbors[i][d] = j === undefined ? -1 : j;
-    }
-  }
-  return { neighbors };
-}
-
-function findTriangleViolation(p: Position): EncodeError | null {
-  const board = buildBoardArray(p);
-  const upDirs = [5, 1, 3] as const;
-  const downDirs = [2, 0, 4] as const;
-  for (let c = 0; c < SETUP_REGION_LIME; c++) {
-    const up = triVertices(c, upDirs);
-    if (up && sameBand(up) && sameNonEmptyUnit(board, up)) {
-      return { kind: "TRIANGLE_EQUAL_UNITS", center: c, orientation: "UP", vertices: up, unit: board[up[0]] };
-    }
-    const down = triVertices(c, downDirs);
-    if (down && sameBand(down) && sameNonEmptyUnit(board, down)) {
-      return { kind: "TRIANGLE_EQUAL_UNITS", center: c, orientation: "DOWN", vertices: down, unit: board[down[0]] };
-    }
-  }
-  return null;
-}
-
-function triVertices(center: number, dirs: readonly number[]): [number, number, number] | null {
+function triangleVertices(center: number, orientation: Orientation): [number, number, number] | null {
+  // alternating neighbor triples
+  // UP  : dirs [5,1,3]
+  // DOWN: dirs [2,0,4]
+  const dirs = orientation === "UP" ? [5, 1, 3] : [2, 0, 4];
   const a = neighbors[center][dirs[0]];
   const b = neighbors[center][dirs[1]];
   const c = neighbors[center][dirs[2]];
@@ -273,485 +161,434 @@ function triVertices(center: number, dirs: readonly number[]): [number, number, 
   return [a, b, c];
 }
 
-function sameBand([a, b, c]: [number, number, number]): boolean {
-  const ba = bandOf(a), bb = bandOf(b), bc = bandOf(c);
-  return ba === bb && bb === bc;
+/* ---------------- Bit utilities ---------------- */
+
+function bitAt(mask: bigint, i: number): 0 | 1 {
+  return ((mask >> BigInt(i)) & 1n) === 1n ? 1 : 0;
 }
 
-function sameNonEmptyUnit(board: BoardArr, [a, b, c]: [number, number, number]): boolean {
-  const ua = board[a], ub = board[b], uc = board[c];
-  return ua !== "_" && ua === ub && ub === uc;
+function setBit(mask: bigint, i: number): bigint {
+  return mask | (1n << BigInt(i));
 }
 
-function buildBoardArray(p: Position): BoardArr {
-  const board: BoardArr = new Array(SETUP_REGION_LIME).fill("_");
-  for (const t of p.ones) board[t] = "1";
-  for (const t of p.twos) board[t] = "2";
-  for (const t of p.threes) board[t] = "3";
-  board[p.tribTile] = SCENARIOS[p.scenario].tribKind;
-  return board;
-}
-
-type Case = { scenario: Scenario; n3: number; n2: number; n1: number; offset: bigint; size: bigint };
-let CASES: Case[] = [];
-let CASES_BY_SCENARIO: Record<Scenario, Case[]> = { 0: [], 1: [], 2: [], 3: [] };
-let TOTAL_RANK_SPACE: bigint = 0n;
-
-function initCases() {
-  const all: Case[] = [];
-  for (const s of [0, 1, 2, 3] as Scenario[]) {
-    const list: Omit<Case, "offset">[] = enumerateCasesForScenario(s);
-    list.sort((a, b) => (a.n3 - b.n3) || (a.n2 - b.n2) || (a.n1 - b.n1));
-    CASES_BY_SCENARIO[s] = [];
-    for (const c of list) CASES_BY_SCENARIO[s].push({ ...c, offset: 0n });
-  }
-  let off = 0n;
-  for (const s of [0, 1, 2, 3] as Scenario[]) {
-    for (const c of CASES_BY_SCENARIO[s]) {
-      (c as Case).offset = off;
-      off += c.size;
-      all.push(c);
-    }
-  }
-  CASES = all;
-  TOTAL_RANK_SPACE = off;
-}
-
-function enumerateCasesForScenario(s: Scenario): Omit<Case, "offset">[] {
-  const def = SCENARIOS[s];
-  const cBudget = TOTAL_N - (def.tribHeight - 1) + def.free1 + 2 * def.free2;
-  const out: Omit<Case, "offset">[] = [];
-  for (let n3 = 0; n3 <= SETUP_REGION_RED; n3++) {
-    for (let n2 = 0; n2 <= SETUP_REGION_ORANGE; n2++) {
-      const n1 = cBudget - 3 * n3 - 2 * n2;
-      if (n1 < 0 || n1 > SETUP_REGION_LIME) continue;
-      if (n2 < 2 * n3) continue;
-      if (n1 < n2 - def.relaxOneVsTwoBy) continue;
-      if (n1 < def.free1 || n2 < def.free2) continue;
-      const size = caseSize(s, n3, n2, n1);
-      if (size > 0n) out.push({ scenario: s, n3, n2, n1, size });
-    }
-  }
-  return out;
-}
-
-function caseSize(s: Scenario, n3: number, n2: number, n1: number): bigint {
-  const def = SCENARIOS[s];
-  let occ = 0;
-  let size3: bigint;
-  if (def.tribKind === "3T") {
-    if (n3 > SETUP_REGION_RED - 1) return 0n;
-    size3 = BigInt(SETUP_REGION_RED) * nCk(SETUP_REGION_RED - 1, n3);
-    occ = 1 + n3;
-  } else {
-    if (n3 > SETUP_REGION_RED) return 0n;
-    size3 = nCk(SETUP_REGION_RED, n3);
-    occ = n3;
-  }
-
-  const availOrange = SETUP_REGION_ORANGE - occ;
-  if (availOrange < 0) return 0n;
-  let size2: bigint;
-  if (def.tribKind === "2T") {
-    if (n2 > availOrange - 1) return 0n;
-    size2 = BigInt(availOrange) * nCk(availOrange - 1, n2);
-    occ += 1 + n2;
-  } else {
-    if (n2 > availOrange) return 0n;
-    size2 = nCk(availOrange, n2);
-    occ += n2;
-  }
-
-  let sizeT: bigint = 1n;
-  if (def.tribKind === "1T") {
-    const availYellow = SETUP_REGION_YELLOW - occ;
-    if (availYellow <= 0) return 0n;
-    sizeT = BigInt(availYellow);
-    occ += 1;
-  }
-  const availLime = SETUP_REGION_LIME - occ;
-  if (availLime < 0 || n1 > availLime) return 0n;
-  const size1 = nCk(availLime, n1);
-  return size3 * size2 * sizeT * size1;
-}
-
-function countsOf(p: Position) {
-  return { n1: p.ones.length, n2: p.twos.length, n3: p.threes.length, scenario: p.scenario as Scenario };
-}
-
-function rankPosition(p: Position): bigint | null {
-  const n3 = p.threes.length;
-  const n2 = p.twos.length;
-  const n1 = p.ones.length;
-  const c = findCase(p.scenario, n3, n2, n1);
-  if (!c) return null;
-  const within = rankWithinCase(p, c);
-  if (within === null) return null;
-  return c.offset + within;
-}
-
-function unrankPosition(rank: bigint): Position | null {
-  let lo = 0;
-  let hi = CASES.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    const c = CASES[mid];
-    if (rank < c.offset) hi = mid;
-    else if (rank >= c.offset + c.size) lo = mid + 1;
-    else return unrankWithinCase(c, rank - c.offset);
-  }
-  return null;
-}
-
-function findCase(s: Scenario, n3: number, n2: number, n1: number): Case | null {
-  const list = CASES_BY_SCENARIO[s];
-  for (const c of list) if (c.n3 === n3 && c.n2 === n2 && c.n1 === n1) return c;
-  return null;
-}
-
-function rankWithinCase(p: Position, c: Case): bigint | null {
-  const def = SCENARIOS[c.scenario];
-  const n3 = c.n3, n2 = c.n2, n1 = c.n1;
-  const used = new Set<number>();
-  let r3: bigint;
-
-  if (def.tribKind === "3T") {
-    if (p.tribTile < 0 || p.tribTile >= SETUP_REGION_RED) return null;
-    used.add(p.tribTile);
-    const avail = tiles(0, SETUP_REGION_RED).filter((t) => t !== p.tribTile);
-    if (!isSubset(p.threes, avail)) return null;
-    const combRank = rankComb(avail, p.threes);
-    const radix = nCk(SETUP_REGION_RED - 1, n3);
-    r3 = BigInt(p.tribTile) * radix + combRank;
-    for (const t of p.threes) used.add(t);
-  } else {
-    if (!isSubset(p.threes, tiles(0, SETUP_REGION_RED))) return null;
-    r3 = rankComb(tiles(0, SETUP_REGION_RED), p.threes);
-    for (const t of p.threes) used.add(t);
-  }
-
-  const availOrange = tiles(0, SETUP_REGION_ORANGE).filter((t) => !used.has(t));
-  let r2: bigint;
-  if (def.tribKind === "2T") {
-    if (!availOrange.includes(p.tribTile)) return null;
-    const tribIdx = availOrange.indexOf(p.tribTile);
-    used.add(p.tribTile);
-    const avail2 = availOrange.filter((t) => t !== p.tribTile);
-    if (!isSubset(p.twos, avail2)) return null;
-    const combRank = rankComb(avail2, p.twos);
-    const radix = nCk(avail2.length, n2);
-    r2 = BigInt(tribIdx) * radix + combRank;
-    for (const t of p.twos) used.add(t);
-  } else {
-    if (!isSubset(p.twos, availOrange)) return null;
-    r2 = rankComb(availOrange, p.twos);
-    for (const t of p.twos) used.add(t);
-  }
-
-  let rT: bigint = 0n;
-  if (def.tribKind === "1T") {
-    const availYellow = tiles(0, SETUP_REGION_YELLOW).filter((t) => !used.has(t));
-    if (!availYellow.includes(p.tribTile)) return null;
-    rT = BigInt(availYellow.indexOf(p.tribTile));
-    used.add(p.tribTile);
-  } else {
-    if ((def.tribKind === "3T" && p.tribTile >= SETUP_REGION_RED) || (def.tribKind === "2T" && p.tribTile >= SETUP_REGION_ORANGE)) return null;
-  }
-
-  const availLime = tiles(0, SETUP_REGION_LIME).filter((t) => !used.has(t));
-  if (!isSubset(p.ones, availLime)) return null;
-  const r1 = rankComb(availLime, p.ones);
-
-  const sz3 = def.tribKind === "3T" ? BigInt(SETUP_REGION_RED) * nCk(SETUP_REGION_RED - 1, n3) : nCk(SETUP_REGION_RED, n3);
-  const occ3 = n3 + (def.tribKind === "3T" ? 1 : 0);
-  const aOrange = SETUP_REGION_ORANGE - occ3;
-  const sz2 = def.tribKind === "2T" ? BigInt(aOrange) * nCk(aOrange - 1, n2) : nCk(aOrange, n2);
-  const occ2 = occ3 + n2 + (def.tribKind === "2T" ? 1 : 0);
-  const szT = def.tribKind === "1T" ? BigInt(SETUP_REGION_YELLOW - occ2) : 1n;
-  const occT = occ2 + (def.tribKind === "1T" ? 1 : 0);
-  const sz1 = nCk(SETUP_REGION_LIME - occT, n1);
-
-  let rank = r3;
-  rank = rank * sz2 + r2;
-  rank = rank * szT + rT;
-  rank = rank * sz1 + r1;
-  if (rank < 0n || rank >= c.size) return null;
-  return rank;
-}
-
-function unrankWithinCase(c: Case, within: bigint): Position | null {
-  const def = SCENARIOS[c.scenario];
-  const n3 = c.n3, n2 = c.n2, n1 = c.n1;
-  const sz3 = def.tribKind === "3T" ? BigInt(SETUP_REGION_RED) * nCk(SETUP_REGION_RED - 1, n3) : nCk(SETUP_REGION_RED, n3);
-  const occ3 = n3 + (def.tribKind === "3T" ? 1 : 0);
-  const aOrange = SETUP_REGION_ORANGE - occ3;
-  const sz2 = def.tribKind === "2T" ? BigInt(aOrange) * nCk(aOrange - 1, n2) : nCk(aOrange, n2);
-  const occ2 = occ3 + n2 + (def.tribKind === "2T" ? 1 : 0);
-  const szT = def.tribKind === "1T" ? BigInt(SETUP_REGION_YELLOW - occ2) : 1n;
-  const occT = occ2 + (def.tribKind === "1T" ? 1 : 0);
-  const sz1 = nCk(SETUP_REGION_LIME - occT, n1);
-
-  let r = within;
-  const r1 = r % sz1; r /= sz1;
-  const rT = r % szT; r /= szT;
-  const r2 = r % sz2; r /= sz2;
-  const r3 = r;
-
-  const used = new Set<number>();
-  let tribTile = -1;
-  let threes: number[] = [];
-  let twos: number[] = [];
-  let ones: number[] = [];
-
-  if (def.tribKind === "3T") {
-    const radix = nCk(SETUP_REGION_RED - 1, n3);
-    const tribIdx = Number(r3 / radix);
-    const combRank = r3 % radix;
-    tribTile = tribIdx;
-    used.add(tribTile);
-    const avail = tiles(0, SETUP_REGION_RED).filter((t) => t !== tribTile);
-    threes = unrankComb(avail, n3, combRank);
-    for (const t of threes) used.add(t);
-  } else {
-    threes = unrankComb(tiles(0, SETUP_REGION_RED), n3, r3);
-    for (const t of threes) used.add(t);
-  }
-
-  const availOrange = tiles(0, SETUP_REGION_ORANGE).filter((t) => !used.has(t));
-  if (def.tribKind === "2T") {
-    const radix = nCk(availOrange.length - 1, n2);
-    const tribIdx = Number(r2 / radix);
-    const combRank = r2 % radix;
-    if (tribIdx < 0 || tribIdx >= availOrange.length) return null;
-    tribTile = availOrange[tribIdx];
-    used.add(tribTile);
-    const avail2 = availOrange.filter((t) => t !== tribTile);
-    twos = unrankComb(avail2, n2, combRank);
-    for (const t of twos) used.add(t);
-  } else {
-    twos = unrankComb(availOrange, n2, r2);
-    for (const t of twos) used.add(t);
-  }
-
-  if (def.tribKind === "1T") {
-    const availYellow = tiles(0, SETUP_REGION_YELLOW).filter((t) => !used.has(t));
-    const idx = Number(rT);
-    if (idx < 0 || idx >= availYellow.length) return null;
-    tribTile = availYellow[idx];
-    used.add(tribTile);
-  }
-
-  const availLime = tiles(0, SETUP_REGION_LIME).filter((t) => !used.has(t));
-  ones = unrankComb(availLime, n1, r1);
-  return normalize({ scenario: c.scenario, tribTile, threes, twos, ones });
-}
-
-const CHOOSE: bigint[][] = precomputeChoose(SETUP_REGION_LIME);
-initCases();
-
-function precomputeChoose(nMax: number): bigint[][] {
-  const c: bigint[][] = [];
-  for (let n = 0; n <= nMax; n++) {
-    c[n] = new Array<bigint>(n + 1).fill(0n);
-    c[n][0] = 1n;
-    c[n][n] = 1n;
-    for (let k = 1; k < n; k++) c[n][k] = c[n - 1][k - 1] + c[n - 1][k];
+function popcount(x: bigint): number {
+  let v = x;
+  let c = 0;
+  while (v !== 0n) {
+    v &= v - 1n;
+    c++;
   }
   return c;
 }
 
-function nCk(n: number, k: number): bigint {
-  if (k < 0 || k > n) return 0n;
-  return CHOOSE[n][k];
-}
-
-function rankComb(available: number[], chosen: number[]): bigint {
-  const avail = available.slice().sort((a, b) => a - b);
-  const sel = chosen.slice().sort((a, b) => a - b);
-  const n = avail.length;
-  const k = sel.length;
-  if (k === 0) return 0n;
-  const pos: number[] = [];
-  let j = 0;
-  for (const t of sel) {
-    while (j < n && avail[j] !== t) j++;
-    if (j >= n) throw new Error("chosen tile not in available set");
-    pos.push(j);
-  }
-  let rank = 0n;
-  let prev = -1;
-  for (let i = 0; i < k; i++) {
-    const ci = pos[i];
-    for (let x = prev + 1; x < ci; x++) rank += nCk(n - 1 - x, k - 1 - i);
-    prev = ci;
-  }
-  return rank;
-}
-
-function unrankComb(available: number[], k: number, rank: bigint): number[] {
-  const avail = available.slice().sort((a, b) => a - b);
-  const n = avail.length;
-  if (k === 0) return [];
-  if (rank < 0n || rank >= nCk(n, k)) throw new Error("rank out of range");
-  const positions: number[] = [];
-  let r = rank;
-  let start = 0;
-  for (let i = 0; i < k; i++) {
-    for (let x = start; x < n; x++) {
-      const c = nCk(n - 1 - x, k - 1 - i);
-      if (r >= c) r -= c;
-      else {
-        positions.push(x);
-        start = x + 1;
-        break;
-      }
-    }
-  }
-  return positions.map((p) => avail[p]);
-}
-
-function digitsToBase36String(digs: number[]): string {
-  return digs.map((d) => DIGITS[d]).join("");
-}
-
-function base36StringToDigits(s: string): number[] | null {
-  if (typeof s !== "string" || s.length !== CODE_LEN) return null;
-  const up = s.toUpperCase();
-  const out: number[] = [];
-  for (const ch of up) {
-    const v = DIGIT_MAP[ch];
-    if (v === undefined) return null;
-    out.push(v);
-  }
-  return out;
-}
-
-function bigIntToBase36Digits(x: bigint, len: number): number[] {
+function lsbIndex(x: bigint): number {
+  // assumes x != 0
+  let i = 0;
   let v = x;
-  const out = new Array<number>(len).fill(0);
-  for (let i = len - 1; i >= 0; i--) {
-    out[i] = Number(v % 36n);
-    v /= 36n;
+  while ((v & 1n) === 0n) {
+    v >>= 1n;
+    i++;
   }
-  return out;
+  return i;
 }
 
-function base36DigitsToBigInt(digs: number[]): bigint {
-  let v = 0n;
-  for (const d of digs) v = v * 36n + BigInt(d);
+/* ---------------- Packing / Unpacking ----------------
+ *
+ * payload layout (MSB -> LSB):
+ *  [ tribTile:5 ][ mask3:15 ][ mask2:26 ][ mask1:37 ]
+ */
+
+function packPayload(s: SetupMasks): bigint {
+  let v = BigInt(s.tribTile) & ((1n << 5n) - 1n);
+  v = (v << 15n) | (s.mask3 & ((1n << 15n) - 1n));
+  v = (v << 26n) | (s.mask2 & ((1n << 26n) - 1n));
+  v = (v << 37n) | (s.mask1 & ((1n << 37n) - 1n));
   return v;
 }
 
-function modBig(x: bigint, m: bigint): bigint {
-  let r = x % m;
-  if (r < 0n) r += m;
-  return r;
+function unpackPayload(v: bigint): SetupMasks {
+  let x = v;
+
+  const mask1 = x & ((1n << 37n) - 1n);
+  x >>= 37n;
+  const mask2 = x & ((1n << 26n) - 1n);
+  x >>= 26n;
+  const mask3 = x & ((1n << 15n) - 1n);
+  x >>= 15n;
+  const tribTile = Number(x & ((1n << 5n) - 1n));
+
+  return { tribTile, mask3, mask2, mask1 };
 }
 
-const HALF_LEN = 6;
-const MOD_HALF = 36 ** HALF_LEN;
-const ROUNDS = 6;
-const ROUND_KEYS = [0xA341316C, 0xC8013EA4, 0xAD90777D, 0x7E95761E, 0xD3E00B9D, 0xA9B42C37] as const;
+/* ---------------- Validation + characteristics ---------------- */
 
-function digitsToHalf(digs: number[], offset: number): number {
-  let v = 0;
-  for (let i = 0; i < HALF_LEN; i++) v = v * 36 + digs[offset + i];
-  return v >>> 0;
+function unitAt(setup: SetupMasks, tile: number): UnitKind {
+  if (tile < 0 || tile >= N1) return "_";
+  const is3 = tile < N3 ? bitAt(setup.mask3, tile) : 0;
+  const is2 = tile < N2 ? bitAt(setup.mask2, tile) : 0;
+  const is1 = bitAt(setup.mask1, tile);
+  const isTrib = tile === setup.tribTile;
+
+  const sum = is1 + is2 + is3;
+  if (sum === 0) return "_";
+  if (sum > 1) return "_"; // overlap will be reported elsewhere
+
+  const base: UnitKind = is3 ? "3" : is2 ? "2" : "1";
+  if (!isTrib) return base;
+  return base === "1" ? "1T" : base === "2" ? "2T" : "3T";
 }
 
-function halfToDigits(v0: number): number[] {
-  let v = v0 >>> 0;
-  const out = new Array<number>(HALF_LEN).fill(0);
-  for (let i = HALF_LEN - 1; i >= 0; i--) {
-    out[i] = v % 36;
-    v = Math.floor(v / 36);
+function validateSetup(setup: SetupMasks): { ok: true; decoded: SetupDecoded } | { ok: false; error: EncodeError } {
+  // trib tile range (0..31)
+  if (setup.tribTile < 0 || setup.tribTile >= TRIB_RANGE) {
+    return { ok: false, error: { kind: "OUT_OF_RANGE_TRIB_TILE", tribTile: setup.tribTile } };
+  }
+
+  // mask range (defensive)
+  if (setup.mask3 < 0n || setup.mask3 >= (1n << 15n)) return { ok: false, error: { kind: "MASK_OUT_OF_RANGE", which: "mask3" } };
+  if (setup.mask2 < 0n || setup.mask2 >= (1n << 26n)) return { ok: false, error: { kind: "MASK_OUT_OF_RANGE", which: "mask2" } };
+  if (setup.mask1 < 0n || setup.mask1 >= (1n << 37n)) return { ok: false, error: { kind: "MASK_OUT_OF_RANGE", which: "mask1" } };
+
+  // overlaps between masks (aligned by tile index)
+  const overlap12 = setup.mask1 & setup.mask2; // tiles 0..25
+  const overlap13 = setup.mask1 & setup.mask3; // tiles 0..14
+  const overlap23 = setup.mask2 & setup.mask3; // tiles 0..14
+  const overlap = overlap12 | overlap13 | overlap23;
+  if (overlap !== 0n) {
+    return { ok: false, error: { kind: "OVERLAP", tile: lsbIndex(overlap) } };
+  }
+
+  // trib tile must be occupied by exactly one height
+  const t = setup.tribTile;
+  const t1 = bitAt(setup.mask1, t);
+  const t2 = t < N2 ? bitAt(setup.mask2, t) : 0;
+  const t3 = t < N3 ? bitAt(setup.mask3, t) : 0;
+  const sum = t1 + t2 + t3;
+  if (sum === 0) return { ok: false, error: { kind: "TRIB_TILE_NOT_OCCUPIED", tribTile: t } };
+  if (sum > 1) return { ok: false, error: { kind: "TRIB_TILE_MULTIPLE_HEIGHTS", tribTile: t } };
+
+  const tribunHeight: 1 | 2 | 3 = t3 ? 3 : t2 ? 2 : 1;
+
+  // triangle rule: within same band, 3 equal non-empty units around a center
+  for (let c = 0; c < N1; c++) {
+    for (const orientation of ["UP", "DOWN"] as const) {
+      const verts = triangleVertices(c, orientation);
+      if (!verts) continue;
+
+      const b0 = bandOf(verts[0]);
+      if (bandOf(verts[1]) !== b0 || bandOf(verts[2]) !== b0) continue;
+
+      const u0 = unitAt(setup, verts[0]);
+      if (u0 === "_") continue;
+      const u1 = unitAt(setup, verts[1]);
+      const u2 = unitAt(setup, verts[2]);
+      if (u0 === u1 && u1 === u2) {
+        return { ok: false, error: { kind: "TRIANGLE_EQUAL_UNITS", center: c, orientation, vertices: verts, unit: u0 } };
+      }
+    }
+  }
+
+  // payment rules + setup budget
+  //
+  // Counts used for payment MUST exclude the tribun tile itself. For tribunHeight===1,
+  // the remaining “free budget” can be interpreted either as (a) one free 2-high or (b) two free 1-high.
+  const total1 = popcount(setup.mask1);
+  const total2 = popcount(setup.mask2);
+  const total3 = popcount(setup.mask3);
+
+  const n1 = total1 - (tribunHeight === 1 ? 1 : 0);
+  const n2 = total2 - (tribunHeight === 2 ? 1 : 0);
+  const n3 = total3 - (tribunHeight === 3 ? 1 : 0);
+
+  const usedBudget = 1 * n1 + 2 * n2 + 3 * n3 + tribunHeight;
+  if (usedBudget !== SETUP_BUDGET) {
+    return { ok: false, error: { kind: "BUDGET_FAIL", usedBudget, expectedBudget: SETUP_BUDGET } };
+  }
+
+  if (n2 < 2 * n3) return { ok: false, error: { kind: "PAYMENT_2_FOR_3_FAIL", n2, n3 } };
+
+  if (tribunHeight === 1) {
+    // Variant A: one free 2-high unit (so #1 must cover #2-1)
+    const okFree2 = n1 >= n2 - 1;
+    // Variant B: two free 1-high units (so #1 must cover #2-2)
+    const okFree11 = n1 >= n2 - 2;
+    if (!okFree2 && !okFree11) return { ok: false, error: { kind: "PAYMENT_1_FOR_2_FAIL", n1, n2 } };
+  } else {
+    if (n1 < n2) return { ok: false, error: { kind: "PAYMENT_1_FOR_2_FAIL", n1, n2 } };
+  }
+
+  const freeN = 3 - tribunHeight;
+  const costArmy = 1 * n1 + 2 * n2 + 3 * n3;
+  const armySize = Math.max(0, costArmy - freeN);
+
+  return { ok: true, decoded: { ...setup, tribunHeight, freeN, costArmy, armySize } };
+}
+
+/* ---------------- Base-37 conversion helpers ---------------- */
+
+function normalizeCodeInput(code: string): string | null {
+  if (typeof code !== "string") return null;
+  const cleaned = code.replace(/\s+/g, "").toUpperCase();
+  if (cleaned.length !== CODE_LEN) return null;
+  for (const ch of cleaned) if (DIGIT_MAP[ch] === undefined) return null;
+  return cleaned;
+}
+
+function digitsToString(digs: number[]): string {
+  return digs.map((d) => ALPHABET37[d]).join("");
+}
+
+function stringToDigits(code16: string): number[] {
+  const digs: number[] = [];
+  for (const ch of code16) digs.push(DIGIT_MAP[ch]);
+  return digs;
+}
+
+function toBase37Fixed(v: bigint, len: number): number[] {
+  let x = v;
+  const out = new Array<number>(len).fill(0);
+  for (let i = len - 1; i >= 0; i--) {
+    out[i] = Number(x % BASE);
+    x /= BASE;
   }
   return out;
 }
 
-function feistelFn(x0: number, round: number): number {
-  let x = x0 >>> 0;
-  x ^= x >>> 16;
-  x = Math.imul(x, 0x7FEB352D) >>> 0;
-  x ^= x >>> 15;
-  x = Math.imul(x, 0x846CA68B) >>> 0;
-  x ^= x >>> 16;
-  x = (x + ROUND_KEYS[round]) >>> 0;
-  return (x % MOD_HALF) >>> 0;
+function fromBase37Digits(digs: number[]): bigint {
+  let v = 0n;
+  for (const d of digs) v = v * BASE + BigInt(d);
+  return v;
 }
 
-function feistelScramble(digs: number[]): number[] {
-  let l = digitsToHalf(digs, 0);
-  let r = digitsToHalf(digs, HALF_LEN);
-  for (let round = 0; round < ROUNDS; round++) {
-    const f = feistelFn(r, round);
-    const newL = r;
-    const newR = (l + f) % MOD_HALF;
-    l = newL >>> 0;
-    r = newR >>> 0;
+/* ---------------- Feistel scramble (permutation on 37^16) ---------------- */
+
+const ROUNDS = 8;
+const ROUND_KEYS = [
+  0x9E3779B97F4A7C15n,
+  0xBF58476D1CE4E5B9n,
+  0x94D049BB133111EBn,
+  0xD6E8FEB86659FD93n,
+  0xA5A3562F9C5E5E87n,
+  0xC2B2AE3D27D4EB4Fn,
+  0x165667B19E3779F9n,
+  0x85EBCA77C2B2AE63n,
+];
+
+const MASK64 = (1n << 64n) - 1n;
+
+function feistelF(r: bigint, round: number): bigint {
+  // Mix into 64-bit then mod BASE_POW_8.
+  let x = (r ^ (r >> 17n) ^ (r << 31n)) & MASK64;
+  x = (x * ROUND_KEYS[round]) & MASK64;
+  x ^= x >> 29n;
+  x = (x * 0xBF58476D1CE4E5B9n) & MASK64;
+  x ^= x >> 32n;
+  return x % BASE_POW_8;
+}
+
+function feistelEnc(v: bigint): bigint {
+  let L = v / BASE_POW_8;
+  let R = v % BASE_POW_8;
+  for (let i = 0; i < ROUNDS; i++) {
+    const newL = R;
+    const newR = (L + feistelF(R, i)) % BASE_POW_8;
+    L = newL;
+    R = newR;
   }
-  return [...halfToDigits(l), ...halfToDigits(r)];
+  return L * BASE_POW_8 + R;
 }
 
-function feistelUnscramble(digs: number[]): number[] {
-  let l = digitsToHalf(digs, 0);
-  let r = digitsToHalf(digs, HALF_LEN);
-  for (let round = ROUNDS - 1; round >= 0; round--) {
-    const oldR = l;
-    const f = feistelFn(oldR, round);
-    let oldL = (r - f) % MOD_HALF;
-    if (oldL < 0) oldL += MOD_HALF;
-    r = oldR >>> 0;
-    l = oldL >>> 0;
+function feistelDec(v: bigint): bigint {
+  let L = v / BASE_POW_8;
+  let R = v % BASE_POW_8;
+  for (let i = ROUNDS - 1; i >= 0; i--) {
+    const oldR = L;
+    let oldL = (R - feistelF(oldR, i)) % BASE_POW_8;
+    if (oldL < 0n) oldL += BASE_POW_8;
+    R = oldR;
+    L = oldL;
   }
-  return [...halfToDigits(l), ...halfToDigits(r)];
+  return L * BASE_POW_8 + R;
 }
 
-function normalize(p: Position): Position | null {
-  if (!p) return null;
-  const scenario = p.scenario;
-  if (scenario !== 0 && scenario !== 1 && scenario !== 2 && scenario !== 3) return null;
-  const tribTile = p.tribTile | 0;
-  const threes = dedupSorted(p.threes);
-  const twos = dedupSorted(p.twos);
-  const ones = dedupSorted(p.ones);
-  return { scenario, tribTile, threes, twos, ones };
-}
+/* ---------------- Defaults via swap-permutation ----------------
+ *
+ * To make a setup map to a memorable code, we perform swaps:
+ *   swap(raw_value_for_setup, desired_code_value)
+ *
+ * This stays invertible and scales with the number of defaults (tiny).
+ */
 
-function dedupSorted(xs: number[]): number[] {
-  const arr = (xs ?? []).map((v) => v | 0).sort((a, b) => a - b);
-  const out: number[] = [];
-  for (const x of arr) if (out.length === 0 || out[out.length - 1] !== x) out.push(x);
-  return out;
-}
+type DefaultEntry = { code: string; setup: SetupMasks };
 
-function tiles(lo: number, hiExclusive: number): number[] {
-  const out: number[] = [];
-  for (let i = lo; i < hiExclusive; i++) out.push(i);
-  return out;
-}
+const DEFAULT_SETUP: SetupMasks = (() => {
+  // Equivalent to the previous DEFAULT_POSITION (legacy codec), but expressed as bitmaps.
+  // Tribun is on tile 0 at height 1, encoded by setting tile 0 in mask1.
+  const tribTile = 0;
 
-function isSubset(xs: number[], allowed: number[]): boolean {
-  const set = new Set(allowed);
-  for (const x of xs) if (!set.has(x)) return false;
-  return true;
-}
+  let mask3 = 0n;
+  for (const t of [4, 7, 8]) mask3 = setBit(mask3, t);
 
-const DEFAULT_POSITION: Position = normalize({
-  scenario: 2,
-  tribTile: 0,
-  threes: [4, 7, 8],
-  twos: [3, 5, 6, 9, 11, 12, 13, 22, 24],
-  ones: [21, 25, 27, 28, 29, 30, 33, 35],
-})!;
+  let mask2 = 0n;
+  for (const t of [3, 5, 6, 9, 11, 12, 13, 22, 24]) mask2 = setBit(mask2, t);
 
-const DEFAULT_TARGET_CODE = "DEFAULTSETUP";
-const DEFAULT_OFFSET: bigint = (() => {
-  const vr = validatePosition(DEFAULT_POSITION);
-  if (!vr.ok) throw new Error("DEFAULT_POSITION is invalid.");
-  const rank = rankPosition(vr.position);
-  if (rank === null) throw new Error("DEFAULT_POSITION is not rankable.");
-  const scr = base36DigitsToBigInt(feistelScramble(bigIntToBase36Digits(rank, CODE_LEN)));
-  const desired = base36DigitsToBigInt(base36StringToDigits(DEFAULT_TARGET_CODE)!);
-  return modBig(desired - scr, MOD_M);
+  let mask1 = 0n;
+  for (const t of [0, 21, 25, 27, 28, 29, 30, 33, 35]) mask1 = setBit(mask1, t);
+
+  return { tribTile, mask3, mask2, mask1 };
 })();
+
+const DEFAULT_CODE = "TRADITIONALSETUP"; // 16 chars base37
+
+const DEFAULTS: DefaultEntry[] = [{ code: DEFAULT_CODE, setup: DEFAULT_SETUP }];
+
+type SwapPair = { a: bigint; b: bigint };
+const SWAPS: SwapPair[] = buildSwaps(DEFAULTS);
+
+function buildSwaps(defaults: DefaultEntry[]): SwapPair[] {
+  const pairs: SwapPair[] = [];
+  const used = new Set<string>();
+
+  for (const d of defaults) {
+    const norm = normalizeCodeInput(d.code);
+    if (!norm) throw new Error(`Default code invalid: ${d.code}`);
+
+    const desiredVal = fromBase37Digits(stringToDigits(norm));
+    if (desiredVal < 0n || desiredVal >= BASE_POW_16) throw new Error(`Default code out of range: ${d.code}`);
+
+    const payload = packPayload(d.setup);
+    if (payload < 0n || payload >= BASE_POW_16) throw new Error("Default payload does not fit into 37^16.");
+    const rawVal = feistelEnc(payload);
+
+    if (rawVal === desiredVal) continue;
+
+    const ka = rawVal.toString();
+    const kb = desiredVal.toString();
+    if (used.has(ka) || used.has(kb)) throw new Error("Swap collision between defaults; choose different mnemonic codes.");
+    used.add(ka);
+    used.add(kb);
+    pairs.push({ a: rawVal, b: desiredVal });
+  }
+
+  return pairs;
+}
+
+function applySwaps(v: bigint): bigint {
+  for (const { a, b } of SWAPS) {
+    if (v === a) return b;
+    if (v === b) return a;
+  }
+  return v;
+}
+
+/* ---------------- Public encode/decode ---------------- */
+
+/**
+ * Legacy name kept for UI compatibility: a "position" is now a bitmap setup.
+ */
+export type Position = SetupMasks;
+
+export function encodePosition(setup: SetupMasks): string {
+  return encodePositionDetailed(setup).code;
+}
+
+export function encodePositionDetailed(setup: SetupMasks): EncodeResult {
+  const vr = validateSetup(setup);
+  if (!vr.ok) return { ok: false, code: INVALID_SETUP_CODE, error: vr.error };
+
+  const payload = packPayload(setup);
+  if (payload < 0n || payload >= BASE_POW_16) return { ok: false, code: INVALID_SETUP_CODE, error: { kind: "MASK_OUT_OF_RANGE", which: "mask1" } };
+
+  let codeVal = feistelEnc(payload);
+  codeVal = applySwaps(codeVal);
+
+  const code = digitsToString(toBase37Fixed(codeVal, CODE_LEN));
+  return { ok: true, code, characteristics: { tribunHeight: vr.decoded.tribunHeight, armySize: vr.decoded.armySize } };
+}
+
+export function decodeCode(code: string): SetupDecoded | null {
+  const dr = decodeCodeDetailed(code);
+  return dr.ok ? dr.setup! : null;
+}
+
+export function decodeCodeDetailed(code: string): DecodeResult {
+  const norm = normalizeCodeInput(code);
+  if (!norm) return { ok: false, error: { kind: "INVALID_CODE" } };
+
+  let codeVal = fromBase37Digits(stringToDigits(norm));
+  if (codeVal < 0n || codeVal >= BASE_POW_16) return { ok: false, error: { kind: "INVALID_CODE" } };
+
+  codeVal = applySwaps(codeVal);
+
+  const payload = feistelDec(codeVal);
+  if (payload < 0n || payload >= PAYLOAD_MAX) return { ok: false, error: { kind: "OUT_OF_RANGE_PAYLOAD" } };
+
+  const setup = unpackPayload(payload);
+  const vr = validateSetup(setup);
+  if (!vr.ok) return { ok: false, error: { kind: "DECODED_SETUP_INVALID", details: vr.error } };
+
+  return { ok: true, setup: vr.decoded };
+}
+
+export function validatePositionDetailed(setup: SetupMasks): { ok: true; position: SetupMasks } | { ok: false; error: EncodeError } {
+  const vr = validateSetup(setup);
+  return vr.ok ? { ok: true, position: setup } : { ok: false, error: vr.error };
+}
+
+/**
+ * Parses a 37-tile semicolon string into masks.
+ *
+ * Accepted cell tokens:
+ * - `_` or empty: empty tile
+ * - `1`, `2`, `3`: non-trib units
+ * - `1T`, `2T`, `3T`: tribun tile at given height (exactly one must exist)
+ */
+export function parseBoardString(board: string): SetupMasks | null {
+  const parts = board.split(";").map((s) => s.trim());
+  if (parts.length !== SETUP_REGION_LIME) return null;
+
+  let tribTile = -1;
+  let mask3 = 0n;
+  let mask2 = 0n;
+  let mask1 = 0n;
+
+  for (let i = 0; i < parts.length; i++) {
+    const v = parts[i];
+    if (v === "_" || v === "") continue;
+
+    const isTrib = v.endsWith("T");
+    const base = isTrib ? v.slice(0, -1) : v;
+    if (base !== "1" && base !== "2" && base !== "3") return null;
+
+    if (isTrib) {
+      if (tribTile !== -1) return null;
+      tribTile = i;
+    }
+
+    if (base === "3") mask3 = setBit(mask3, i);
+    else if (base === "2") mask2 = setBit(mask2, i);
+    else mask1 = setBit(mask1, i);
+  }
+
+  if (tribTile === -1) return null;
+  const out: SetupMasks = { tribTile, mask3, mask2, mask1 };
+  const vr = validateSetup(out);
+  return vr.ok ? out : null;
+}
+
+/* ---------------- Convenience for display ---------------- */
+
+export function group4(code16: string): string {
+  const norm = normalizeCodeInput(code16);
+  if (!norm) return code16;
+  return `${norm.slice(0, 4)} ${norm.slice(4, 8)} ${norm.slice(8, 12)} ${norm.slice(12, 16)}`;
+}
+
+/* ---------------- Example sanity check ---------------- */
+
+export function selfTestDefault(): { ok: boolean; code: string; grouped: string } {
+  const code = encodePosition(DEFAULT_SETUP);
+  return { ok: code === DEFAULT_CODE, code, grouped: group4(code) };
+}
+
+// (legacy code removed)

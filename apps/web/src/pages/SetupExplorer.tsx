@@ -6,9 +6,7 @@ import { UnitGlyph as SharedUnitGlyph } from "../ui/UnitGlyph";
 import {
   decodeCodeDetailed,
   encodePositionDetailed,
-  getScenarioDefinition,
-  type Position,
-  type Scenario,
+  type SetupMasks,
   SETUP_REGION_LIME,
   SETUP_REGION_ORANGE,
   SETUP_REGION_RED,
@@ -27,6 +25,8 @@ type ValidationProblem = {
   message: string;
   details: Record<string, unknown>;
 };
+
+type ArmySizeStatus = { ok: true; armySize: number } | { ok: false };
 
 const EMPTY_CELL: TileCell = { height: 0, tribun: false };
 const TRASH_ICON_URL = new URL("../assets/game/units/icons/Trash.webp", import.meta.url).href;
@@ -138,42 +138,54 @@ function makeEmptyCells(): TileCell[] {
 }
 
 function normalizeHashInput(input: string): string {
-  return input.trim().toUpperCase();
+  // Allow grouped codes like "TRAD ITIO NALS ETUP" by stripping whitespace.
+  return input.replace(/\s+/g, "").trim().toUpperCase();
 }
 
-function isBase36Code12(value: string): boolean {
-  return /^[0-9A-Z]{12}$/.test(value);
+function isBase37Code16(value: string): boolean {
+  return /^[0-9A-Z#]{16}$/.test(value);
 }
 
-function positionToCells(pos: Position): TileCell[] {
+function setupToCells(setup: SetupMasks): TileCell[] {
   const cells = makeEmptyCells();
-  for (const idx of pos.ones) cells[idx] = { height: 1, tribun: false };
-  for (const idx of pos.twos) cells[idx] = { height: 2, tribun: false };
-  for (const idx of pos.threes) cells[idx] = { height: 3, tribun: false };
-  const tribHeight = getScenarioDefinition(pos.scenario).tribHeight;
-  cells[pos.tribTile] = { height: tribHeight, tribun: true };
+
+  for (let idx = 0; idx < SETUP_REGION_LIME; idx++) {
+    const is1 = ((setup.mask1 >> BigInt(idx)) & 1n) === 1n;
+    const is2 = idx < SETUP_REGION_ORANGE ? ((setup.mask2 >> BigInt(idx)) & 1n) === 1n : false;
+    const is3 = idx < SETUP_REGION_RED ? ((setup.mask3 >> BigInt(idx)) & 1n) === 1n : false;
+
+    if (is1) cells[idx] = { height: 1, tribun: false };
+    else if (is2) cells[idx] = { height: 2, tribun: false };
+    else if (is3) cells[idx] = { height: 3, tribun: false };
+  }
+
+  // Tribun height is encoded by which bitmap contains tribTile.
+  const t = setup.tribTile;
+  const t3 = t < SETUP_REGION_RED ? ((setup.mask3 >> BigInt(t)) & 1n) === 1n : false;
+  const t2 = t < SETUP_REGION_ORANGE ? ((setup.mask2 >> BigInt(t)) & 1n) === 1n : false;
+  const tribHeight: 1 | 2 | 3 = t3 ? 3 : t2 ? 2 : 1;
+  cells[t] = { height: tribHeight, tribun: true };
   return cells;
 }
 
-function toPositionForScenario(cells: TileCell[], scenario: Scenario): Position | null {
+function cellsToSetupMasks(cells: TileCell[]): SetupMasks | null {
   let tribTile = -1;
-  const threes: number[] = [];
-  const twos: number[] = [];
-  const ones: number[] = [];
+  let mask3 = 0n;
+  let mask2 = 0n;
+  let mask1 = 0n;
   for (let i = 0; i < cells.length; i++) {
     const cell = cells[i];
     if (cell.height === 0) continue;
     if (cell.tribun) {
       if (tribTile !== -1) return null;
       tribTile = i;
-      continue;
     }
-    if (cell.height === 3) threes.push(i);
-    else if (cell.height === 2) twos.push(i);
-    else ones.push(i);
+    if (cell.height === 3) mask3 |= 1n << BigInt(i);
+    else if (cell.height === 2) mask2 |= 1n << BigInt(i);
+    else mask1 |= 1n << BigInt(i);
   }
   if (tribTile === -1) return null;
-  return { scenario, tribTile, threes, twos, ones };
+  return { tribTile, mask3, mask2, mask1 };
 }
 
 function unitKind(cell: TileCell): "1" | "2" | "3" | "1T" | "2T" | "3T" | "_" {
@@ -298,7 +310,7 @@ function emptyCounts() {
 
 function deriveHashStatus(value: string): HashStatus {
   if (!value) return "idle";
-  if (!isBase36Code12(value)) return "invalid";
+  if (!isBase37Code16(value)) return "invalid";
   const decoded = decodeCodeDetailed(value);
   return decoded.ok ? "valid" : "invalid";
 }
@@ -385,14 +397,8 @@ export default function SetupExplorer() {
 
     const tribunHeight: 0 | 1 | 2 | 3 =
       tribunIndices.length > 0 ? ownCells[tribunIndices[0]].height : 0;
-    const scenariosByTrib: Scenario[] =
-      tribunIndices.length === 1 && tribunHeight === 3
-        ? [0]
-        : tribunIndices.length === 1 && tribunHeight === 2
-        ? [1]
-        : tribunIndices.length === 1 && tribunHeight === 1
-        ? [2, 3]
-        : [];
+    const setupIsStructurallyPossible =
+      tribunIndices.length === 1 && (tribunHeight === 1 || tribunHeight === 2 || tribunHeight === 3);
 
     const problems: ValidationProblem[] = [];
 
@@ -448,20 +454,19 @@ export default function SetupExplorer() {
 
     if (tribunIndices.length === 1) {
       if (tribunHeight === 1) {
-        const variantAOk = counts.twos <= counts.ones + 1 && counts.twos >= 1 + 2 * counts.threes;
-        const variantBOk = counts.twos <= counts.ones && counts.twos >= 2 * counts.threes;
-        if (!variantAOk && !variantBOk) {
+        // 1T remainder can be interpreted as either:
+        // - one free 2-high unit (free2): require #1 >= #2 - 1
+        // - two free 1-high units (free11): require #1 >= #2 - 2
+        const okFree2 = counts.ones >= counts.twos - 1;
+        const okFree11 = counts.ones >= counts.twos - 2;
+        if (!okFree2 && !okFree11) {
           problems.push({
             kind: "PAYMENT_2",
-            message: `2-payments failed for both 1T variants: (variant A needs #2 <= #1+1 and #2 >= 1+2*#3, variant B needs #2 <= #1 and #2 >= 2*#3; have #1=${counts.ones}, #2=${counts.twos}).`,
-            details: {
-              variantA: { ok: variantAOk, needMax2: counts.ones + 1, needMin2: 1 + 2 * counts.threes },
-              variantB: { ok: variantBOk, needMax2: counts.ones, needMin2: 2 * counts.threes },
-              counts,
-            },
+            message: `2-payments failed for both 1T variants: need (#1 >= #2-1) or (#1 >= #2-2) (have #1=${counts.ones}, #2=${counts.twos}).`,
+            details: { n1: counts.ones, n2: counts.twos, okFree2, okFree11 },
           });
         }
-      } else if (tribunHeight === 2 || tribunHeight === 3) {
+      } else {
         if (counts.ones < counts.twos) {
           problems.push({
             kind: "PAYMENT_2",
@@ -482,22 +487,38 @@ export default function SetupExplorer() {
     }
 
     let hash: string | null = null;
+    let armySize: ArmySizeStatus = { ok: false };
     if (problems.length === 0) {
-      for (const scenario of scenariosByTrib) {
-        const pos = toPositionForScenario(ownCells, scenario);
-        if (!pos) continue;
-        const encoded = encodePositionDetailed(pos);
-        if (encoded.ok) {
-          hash = encoded.code;
-          break;
-        }
-      }
-      if (!hash) {
+      if (!setupIsStructurallyPossible) {
         problems.push({
           kind: "ENCODE",
-          message: "Encoding failed for all applicable scenarios.",
-          details: { scenariosByTrib },
+          message: "Encoding failed: tribun tile/height is not set correctly.",
+          details: { tribunIndices, tribunHeight },
         });
+      } else {
+        const setup = cellsToSetupMasks(ownCells);
+        if (!setup) {
+          problems.push({
+            kind: "ENCODE",
+            message: "Encoding failed: could not build setup masks.",
+            details: { tribunIndices, tribunHeight },
+          });
+        } else {
+          const encoded = encodePositionDetailed(setup);
+          if (encoded.ok) {
+            hash = encoded.code;
+            if (encoded.characteristics) {
+              armySize = { ok: true, armySize: encoded.characteristics.armySize };
+            }
+          }
+          else {
+            problems.push({
+              kind: "ENCODE",
+              message: `Encoding failed: ${encoded.error?.kind ?? "unknown error"}.`,
+              details: { error: encoded.error },
+            });
+          }
+        }
       }
     }
 
@@ -509,6 +530,7 @@ export default function SetupExplorer() {
       expected,
       problems,
       hash,
+      armySize,
     };
   }, [ownCells]);
 
@@ -648,7 +670,7 @@ export default function SetupExplorer() {
     setOwnHashStatus(status);
     if (status === "valid") {
       const decoded = decodeCodeDetailed(value);
-      if (decoded.ok && decoded.position) setOwnCells(positionToCells(decoded.position));
+      if (decoded.ok && decoded.setup) setOwnCells(setupToCells(decoded.setup));
     }
   };
 
@@ -659,7 +681,7 @@ export default function SetupExplorer() {
     setEnemyHashStatus(status);
     if (status === "valid") {
       const decoded = decodeCodeDetailed(value);
-      if (decoded.ok && decoded.position) setEnemyCells(positionToCells(decoded.position));
+      if (decoded.ok && decoded.setup) setEnemyCells(setupToCells(decoded.setup));
     } else if (status === "invalid") {
       setEnemyCells(makeEmptyCells());
     }
@@ -764,8 +786,8 @@ export default function SetupExplorer() {
               <input
                 value={ownHashInput}
                 onChange={(e) => onOwnHashChange(e.target.value)}
-                placeholder="12-char base36 hash"
-                maxLength={12}
+                placeholder="16-char base37 code"
+                maxLength={19}
                 style={{
                   border: ownHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
                   borderRadius: "10px",
@@ -799,8 +821,8 @@ export default function SetupExplorer() {
                   <input
                     value={enemyHashInput}
                     onChange={(e) => onEnemyHashChange(e.target.value)}
-                    placeholder="12-char base36 hash"
-                    maxLength={12}
+                    placeholder="16-char base37 code"
+                    maxLength={19}
                     style={{
                       border: enemyHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
                       borderRadius: "10px",
@@ -1066,6 +1088,12 @@ export default function SetupExplorer() {
               <div>#1: {ownValidation.counts.ones}</div>
               <div>#2: {ownValidation.counts.twos}</div>
               <div>#3: {ownValidation.counts.threes}</div>
+            </div>
+            <div>
+              Army size:{" "}
+              <span style={{ fontFamily: '"JetBrains Mono", monospace', fontWeight: 700 }}>
+                {ownValidation.problems.length === 0 && ownValidation.armySize.ok ? ownValidation.armySize.armySize : "—"}
+              </span>
             </div>
             <div>Tribun height: {ownValidation.tribunHeight > 0 ? ownValidation.tribunHeight : "—"}</div>
           </div>

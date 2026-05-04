@@ -1,26 +1,36 @@
-export type Scenario = 0 | 1 | 2 | 3;
-export type UnitKind = "_" | "1" | "1T" | "2" | "2T" | "3" | "3T";
-export interface Position {
-    scenario: Scenario;
+export type UnitKind = "_" | "1" | "2" | "3" | "1T" | "2T" | "3T";
+export type Orientation = "UP" | "DOWN";
+export interface SetupMasks {
     tribTile: number;
-    threes: number[];
-    twos: number[];
-    ones: number[];
+    mask3: bigint;
+    mask2: bigint;
+    mask1: bigint;
+}
+export interface SetupDecoded extends SetupMasks {
+    tribunHeight: 1 | 2 | 3;
+    freeN: number;
+    costArmy: number;
+    armySize: number;
 }
 export type EncodeError = {
-    kind: "NO_TRIBUN";
+    kind: "OUT_OF_RANGE_TRIB_TILE";
+    tribTile: number;
 } | {
-    kind: "MULTIPLE_TRIBUNS";
-} | {
-    kind: "OUT_OF_RANGE_TILE";
-    tile: number;
+    kind: "MASK_OUT_OF_RANGE";
+    which: "mask1" | "mask2" | "mask3";
 } | {
     kind: "OVERLAP";
     tile: number;
 } | {
-    kind: "AREA_VIOLATION";
-    unit: UnitKind;
-    tile: number;
+    kind: "TRIB_TILE_NOT_OCCUPIED";
+    tribTile: number;
+} | {
+    kind: "TRIB_TILE_MULTIPLE_HEIGHTS";
+    tribTile: number;
+} | {
+    kind: "BUDGET_FAIL";
+    usedBudget: number;
+    expectedBudget: number;
 } | {
     kind: "PAYMENT_2_FOR_3_FAIL";
     n2: number;
@@ -29,65 +39,66 @@ export type EncodeError = {
     kind: "PAYMENT_1_FOR_2_FAIL";
     n1: number;
     n2: number;
-    scenario: Scenario;
-} | {
-    kind: "N_BUDGET_FAIL";
-    usedN: number;
-    expectedN: number;
 } | {
     kind: "TRIANGLE_EQUAL_UNITS";
     center: number;
-    orientation: "UP" | "DOWN";
+    orientation: Orientation;
     vertices: [number, number, number];
     unit: UnitKind;
-} | {
-    kind: "UNKNOWN_CASE_COUNTS";
-    n1: number;
-    n2: number;
-    n3: number;
-    scenario: Scenario;
 };
 export interface EncodeResult {
     code: string;
     ok: boolean;
     error?: EncodeError;
+    characteristics?: {
+        tribunHeight: 1 | 2 | 3;
+        armySize: number;
+    };
 }
 export interface DecodeResult {
     ok: boolean;
-    position?: Position;
+    setup?: SetupDecoded;
     error?: {
-        kind: "INVALID_CODE" | "OUT_OF_RANGE_RANK" | "DECODED_POSITION_INVALID";
+        kind: "INVALID_CODE" | "OUT_OF_RANGE_PAYLOAD" | "DECODED_SETUP_INVALID";
         details?: EncodeError;
     };
 }
-export declare const INVALID_SETUP_CODE = "------------";
+export declare const INVALID_SETUP_CODE: string;
 export declare const SETUP_REGION_RED = 15;
 export declare const SETUP_REGION_ORANGE = 26;
 export declare const SETUP_REGION_YELLOW = 32;
 export declare const SETUP_REGION_LIME = 37;
 export declare const SETUP_TILE_COUNT = 37;
 export declare const SETUP_ROW_LENGTHS: number[];
-type ScenarioDef = {
-    scenario: Scenario;
-    tribKind: UnitKind;
-    tribHeight: 1 | 2 | 3;
-    free1: number;
-    free2: number;
-    relaxOneVsTwoBy: number;
-    tribAreaMaxExclusive: number;
-};
-export declare function getScenarioDefinition(scenario: Scenario): ScenarioDef;
-export declare function encodePosition(pos: Position): string;
-export declare function encodePositionDetailed(pos: Position): EncodeResult;
-export declare function decodeCode(code: string): Position | null;
+export declare const ALPHABET37 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
+/**
+ * Legacy name kept for UI compatibility: a "position" is now a bitmap setup.
+ */
+export type Position = SetupMasks;
+export declare function encodePosition(setup: SetupMasks): string;
+export declare function encodePositionDetailed(setup: SetupMasks): EncodeResult;
+export declare function decodeCode(code: string): SetupDecoded | null;
 export declare function decodeCodeDetailed(code: string): DecodeResult;
-export declare function validatePositionDetailed(pos: Position): {
+export declare function validatePositionDetailed(setup: SetupMasks): {
     ok: true;
-    position: Position;
+    position: SetupMasks;
 } | {
     ok: false;
     error: EncodeError;
 };
-export declare function parseBoardString(board: string, scenario: Scenario): Position | null;
-export {};
+/**
+ * Parses a 37-tile semicolon string into masks.
+ *
+ * Accepted cell tokens:
+ * - `_` or empty: empty tile
+ * - `1`, `2`, `3`: non-trib units
+ * - `1T`, `2T`, `3T`: tribun tile at given height (exactly one must exist)
+ */
+export declare function parseBoardString(board: string): SetupMasks | null;
+export declare function group4(code16: string): string;
+export declare function selfTestDefault(): {
+    ok: boolean;
+    code: string;
+    grouped: string;
+};
 //# sourceMappingURL=TribunSetupCodec.d.ts.map
