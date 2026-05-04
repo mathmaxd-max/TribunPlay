@@ -109,7 +109,6 @@ for (let i = 0; i < SETUP_REGION_LIME; i++) {
   ENEMY_CID_TO_INDEX.set(ENEMY_SETUP_CIDS[i], i);
 }
 
-const TOTAL_BUDGET = 36;
 const NEIGHBOR_VECTORS: ReadonlyArray<readonly [number, number]> = [
   [1, 1],
   [1, 0],
@@ -445,43 +444,60 @@ export default function SetupExplorer() {
         ? ownCells[tribunIndices[0]].height
         : tribunIndices.reduce((acc, idx) => acc + ownCells[idx].height, 0);
     const used = counts.ones + 2 * counts.twos + 3 * counts.threes + tribHeightBudget;
-    const expected = TOTAL_BUDGET;
-    if (used !== expected) {
-      problems.push({
-        kind: "BUDGET",
-        message: `Unit budget mismatch: used=${used} expected=${expected} (delta=${used - expected}).`,
-        details: { used, expected, delta: used - expected },
-      });
-    }
+    {
+      // Payment rules (UI counts exclude the tribun tile itself).
+      const hasOneTribun = tribunIndices.length === 1;
+      const tH = hasOneTribun ? tribunHeight : 0;
 
-    if (counts.twos < 2 * counts.threes) {
-      problems.push({
-        kind: "PAYMENT_3",
-        message: `3-payments failed: need #2 >= 2*#3 (have #2=${counts.twos}, #3=${counts.threes}).`,
-        details: { n2: counts.twos, n3: counts.threes },
-      });
-    }
+      // 3-payment: cover 3-high units with 2-high units.
+      // For 1T there are two variants:
+      // - Variant A: one free 2-high unit -> effectively (n2-1) >= 2*n3
+      // - Variant B: two free 1-high units -> n2 >= 2*n3
+      const ok3PayVariantA = tH === 1 ? counts.twos - 1 >= 2 * counts.threes : counts.twos >= 2 * counts.threes;
+      const ok3PayVariantB = tH === 1 ? counts.twos >= 2 * counts.threes : counts.twos >= 2 * counts.threes;
+      const ok3Pay = tH === 1 ? ok3PayVariantA || ok3PayVariantB : ok3PayVariantA;
+      if (!ok3Pay) {
+        problems.push({
+          kind: "PAYMENT_3",
+          message:
+            tH === 1
+              ? `3-payments failed for both 1T variants: need (#2-1 >= 2*#3) or (#2 >= 2*#3) (have #2=${counts.twos}, #3=${counts.threes}).`
+              : `3-payments failed: need #2 >= 2*#3 (have #2=${counts.twos}, #3=${counts.threes}).`,
+          details: { n2: counts.twos, n3: counts.threes, tribunHeight: tH, okVariantA: ok3PayVariantA, okVariantB: ok3PayVariantB },
+        });
+      }
 
-    if (tribunIndices.length === 1) {
-      if (tribunHeight === 1) {
-        // 1T remainder can be interpreted as either:
-        // - one free 2-high unit (free2): require #1 >= #2 - 1
-        // - two free 1-high units (free11): require #1 >= #2 - 2
+      // 2-payment: cover 2-high units with 1-high units (accounting for the free allocation).
+      if (tH === 1) {
+        // Variant A: one free 2-high -> (#1-1) >= (#2-1) => #1 >= #2-1
         const okFree2 = counts.ones >= counts.twos - 1;
-        const okFree11 = counts.ones >= counts.twos - 2;
+        // Variant B: two free 1-high -> (#1-3) >= #2, but #1 includes the tribun itself => counts.ones >= #2+2
+        const okFree11 = counts.ones >= counts.twos + 2;
         if (!okFree2 && !okFree11) {
           problems.push({
             kind: "PAYMENT_2",
-            message: `2-payments failed for both 1T variants: need (#1 >= #2-1) or (#1 >= #2-2) (have #1=${counts.ones}, #2=${counts.twos}).`,
+            message: `2-payments failed for both 1T variants: need (#1 >= #2-1) or (#1 >= #2+2) (have #1=${counts.ones}, #2=${counts.twos}).`,
             details: { n1: counts.ones, n2: counts.twos, okFree2, okFree11 },
           });
         }
+      } else if (tH === 2) {
+        // 2T: one free 1-high => (#1-1) >= #2, but #1 includes the tribun itself => counts.ones >= #2
+        const ok = counts.ones >= counts.twos;
+        if (!ok) {
+          problems.push({
+            kind: "PAYMENT_2",
+            message: `2-payments failed for 2T: need #1 >= #2 (have #1=${counts.ones}, #2=${counts.twos}).`,
+            details: { n1: counts.ones, n2: counts.twos, tribunHeight: tH },
+          });
+        }
       } else {
-        if (counts.ones < counts.twos) {
+        // No Tribun (pre-encoding) or 3T: require #1 >= #2.
+        const ok = counts.ones >= counts.twos;
+        if (!ok) {
           problems.push({
             kind: "PAYMENT_2",
             message: `2-payments failed: need #1 >= #2 (have #1=${counts.ones}, #2=${counts.twos}).`,
-            details: { n1: counts.ones, n2: counts.twos },
+            details: { n1: counts.ones, n2: counts.twos, tribunHeight: tH },
           });
         }
       }
@@ -537,7 +553,6 @@ export default function SetupExplorer() {
       tribunHeight,
       tribunIndices,
       used,
-      expected,
       problems,
       hash,
       armySize,
@@ -722,37 +737,6 @@ export default function SetupExplorer() {
     return set;
   }, [brush, tribunBrush, ownCells]);
 
-  const computeRotateForPlayerKeepingSide = (nextPlayerColor: PlayerCosmetic) => {
-    const BLACK_CORNER_CID = 0;
-    let whiteCornerCid: number;
-    try {
-      const blackCorner = engine.decodeCoord(BLACK_CORNER_CID);
-      whiteCornerCid = engine.encodeCoord(-blackCorner.x, -blackCorner.y);
-    } catch {
-      return rotate180;
-    }
-
-    // Larger values are lower on the screen (more "bottom").
-    const bottomMetric = (cid: number, rotated: boolean) => {
-      const { x, y } = engine.decodeCoord(cid);
-      const dx = rotated ? -x : x;
-      const dy = rotated ? -y : y;
-      return dx + dy;
-    };
-
-    const wantedCurrent = playerColor === "black" ? BLACK_CORNER_CID : whiteCornerCid;
-    const otherCurrent = wantedCurrent === BLACK_CORNER_CID ? whiteCornerCid : BLACK_CORNER_CID;
-    const currentIsBottom = bottomMetric(wantedCurrent, rotate180) > bottomMetric(otherCurrent, rotate180);
-
-    const wantedNext = nextPlayerColor === "black" ? BLACK_CORNER_CID : whiteCornerCid;
-    const otherNext = wantedNext === BLACK_CORNER_CID ? whiteCornerCid : BLACK_CORNER_CID;
-
-    const nextNoFlipIsBottom = bottomMetric(wantedNext, false) > bottomMetric(otherNext, false);
-    const nextRotateToBottom = !nextNoFlipIsBottom;
-
-    return currentIsBottom ? nextRotateToBottom : !nextRotateToBottom;
-  };
-
   useEffect(() => {
     const stop = () => {
       paintRef.current.active = false;
@@ -843,6 +827,32 @@ export default function SetupExplorer() {
       fontSize: "12px",
       letterSpacing: "0.5px",
     }) as const;
+
+  const ownIsBlack = playerColor === "black";
+  const overlayTextFill = ownIsBlack ? "#000" : "#fff";
+  const overlayTextShadow = ownIsBlack ? "#fff" : "#000";
+  const armySizeOverlayValue =
+    ownValidation.problems.length === 0 && ownValidation.armySize.ok ? `${ownValidation.armySize.armySize}` : "—";
+
+  const tribunSituationWellDefined =
+    ownValidation.problems.length === 0 ||
+    (ownValidation.problems.length > 0 && ownValidation.problems.every((p) => p.kind === "SYMMETRY"));
+  const showTribunSituationOverlay = tribunSituationWellDefined && ownValidation.counts.tribun === 1 && ownValidation.tribunHeight > 0;
+
+  const tribunSuffix = (() => {
+    if (!showTribunSituationOverlay) return null;
+    const h = ownValidation.tribunHeight as 1 | 2 | 3;
+    if (h === 3) return "";
+    if (h === 2) return "+1";
+    // h === 1
+    const { ones, twos } = ownValidation.counts;
+    const okFree2 = ones >= twos - 1;
+    const okFree11 = ones >= twos - 2;
+    if (okFree2) return "+2";
+    if (okFree11) return "+1+1";
+    return "";
+  })();
+  const tribunOverlayColor = ownIsBlack ? "#AE0000" : "#00B4FF";
 
   return (
     <div
@@ -1138,6 +1148,67 @@ export default function SetupExplorer() {
               }}
             />
 
+            {showTribunSituationOverlay && (
+              <div
+                aria-label="Tribun remainder"
+                style={{
+                  position: "absolute",
+                  left: "10px",
+                  bottom: "10px",
+                  zIndex: 3,
+                  padding: "6px 10px",
+                  borderRadius: "12px",
+                  border: "2px solid #6f5a38",
+                  background: "rgba(255, 246, 232, 0.95)",
+                  boxShadow: "0 8px 16px rgba(20, 15, 10, 0.16)",
+                  fontFamily: '"JetBrains Mono", monospace',
+                  fontWeight: 900,
+                  fontSize: "22px",
+                  letterSpacing: "0.5px",
+                  color: "#5a4630",
+                  userSelect: "none",
+                  pointerEvents: "none",
+                }}
+                title="Tribun remainder (simplified)"
+              >
+                <span style={{ color: tribunOverlayColor }}>{ownValidation.tribunHeight}</span>
+                <span
+                  style={{
+                    color: overlayTextFill,
+                    textShadow: `-1px 0 ${overlayTextShadow}, 0 1px ${overlayTextShadow}, 1px 0 ${overlayTextShadow}, 0 -1px ${overlayTextShadow}`,
+                  }}
+                >
+                  {tribunSuffix}
+                </span>
+              </div>
+            )}
+
+            <div
+              aria-label="Army size"
+              style={{
+                position: "absolute",
+                right: "10px",
+                bottom: "10px",
+                zIndex: 3,
+                padding: "6px 10px",
+                borderRadius: "12px",
+                border: "2px solid #6f5a38",
+                background: "rgba(255, 246, 232, 0.95)",
+                boxShadow: "0 8px 16px rgba(20, 15, 10, 0.16)",
+                fontFamily: '"JetBrains Mono", monospace',
+                fontWeight: 900,
+                fontSize: "22px",
+                letterSpacing: "0.5px",
+                color: overlayTextFill,
+                textShadow: `-1px 0 ${overlayTextShadow}, 0 1px ${overlayTextShadow}, 1px 0 ${overlayTextShadow}, 0 -1px ${overlayTextShadow}`,
+                userSelect: "none",
+                pointerEvents: "none",
+              }}
+              title="Army size"
+            >
+              {armySizeOverlayValue}
+            </div>
+
             <div style={{ width: "100%", display: "flex", justifyContent: "center", overflow: "auto" }}>
               <div style={{ position: "relative", minWidth: `${boardMetrics.width}px`, height: `${boardMetrics.height}px` }}>
                 {boardMetrics.tiles.map((tile) => {
@@ -1155,17 +1226,6 @@ export default function SetupExplorer() {
                   const hexState: HexagonState = isOwnSetupTile && isBrushableRender ? "selectable" : "default";
                   const bg = getHexagonColor(baseColor, hexState);
                   const clip = "polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)";
-                  const defenseCount = defenseOverlay.countByCid[tile.cid];
-                  const defenseDamage = defenseOverlay.damageByCid[tile.cid];
-                  const ownOccupiedHeight = ownBoardContext.occupiedHeightByCid[tile.cid];
-                  const defenseModeAllowsTile =
-                    defenseMode === "all" ||
-                    (defenseMode === "empty" && ownOccupiedHeight === 0) ||
-                    (defenseMode === "occupied" && ownOccupiedHeight > 0);
-                  const showDefenseOverlay =
-                    defenseMode !== "none" && defenseModeAllowsTile && defenseCount > 0 && defenseDamage > 0;
-                  const defenseCountWarn = defenseCount < 2;
-                  const defenseDamageWarn = ownOccupiedHeight > 0 && defenseDamage < ownOccupiedHeight;
 
                   return (
                     <div
@@ -1207,32 +1267,79 @@ export default function SetupExplorer() {
                       >
                         {own.height > 0 && <SetupUnitGlyph cell={own} viewMode={unitViewMode} side="own" playerColor={playerColor} />}
                         {enemy.height > 0 && <SetupUnitGlyph cell={enemy} viewMode={unitViewMode} side="enemy" playerColor={playerColor} />}
-                        {showDefenseOverlay && (
-                          <div
-                            style={{
-                              position: "absolute",
-                              inset: 0,
-                              display: "flex",
-                              flexDirection: "column",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: "2px",
-                              pointerEvents: "none",
-                              textShadow: "0 1px 0 rgba(255, 255, 255, 0.75)",
-                            }}
-                          >
-                            <div style={{ fontSize: "11px", fontWeight: 800, lineHeight: 1, color: defenseCountWarn ? "#8a1f1f" : "#2a2218" }}>
-                              C {defenseCount}
-                            </div>
-                            <div style={{ fontSize: "11px", fontWeight: 800, lineHeight: 1, color: defenseDamageWarn ? "#8a1f1f" : "#2a2218" }}>
-                              D {defenseDamage}
-                            </div>
-                          </div>
-                        )}
                       </div>
                     </div>
                   );
                 })}
+                {defenseMode !== "none" && (
+                  <div style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 1000 }}>
+                    {boardMetrics.tiles.map((tile) => {
+                      const defenseCount = defenseOverlay.countByCid[tile.cid];
+                      const defenseDamage = defenseOverlay.damageByCid[tile.cid];
+                      const ownOccupiedHeight = ownBoardContext.occupiedHeightByCid[tile.cid];
+                      const defenseModeAllowsTile =
+                        defenseMode === "all" ||
+                        (defenseMode === "empty" && ownOccupiedHeight === 0) ||
+                        (defenseMode === "occupied" && ownOccupiedHeight > 0);
+                      const showDefenseOverlay = defenseModeAllowsTile && defenseCount > 0 && defenseDamage > 0;
+                      if (!showDefenseOverlay) return null;
+
+                      const defenseCountWarn = defenseCount < 2;
+                      const defenseDamageWarn = ownOccupiedHeight > 0 && defenseDamage < ownOccupiedHeight;
+                      const centerX = tile.centerX - boardMetrics.minX;
+                      const centerY = tile.centerY - boardMetrics.minY;
+
+                      return (
+                        <div
+                          key={`defense-overlay-${tile.cid}`}
+                          style={{
+                            position: "absolute",
+                            left: `${centerX}px`,
+                            top: `${centerY}px`,
+                            transform: "translate(-50%, -50%)",
+                            display: "flex",
+                            flexDirection: "row",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: "60%",
+                            width: "44px",
+                          }}
+                        >
+                          <div
+                            style={{
+                              textAlign: "center",
+                              fontSize: "16px",
+                              fontWeight: 800,
+                              lineHeight: 1,
+                              color: defenseCountWarn ? "#7a1a1a" : "#1f5b2a",
+                              WebkitTextStroke: defenseCountWarn ? "0.3px #f3caca" : "0.3px #d9f1dc",
+                              textShadow: defenseCountWarn
+                                ? "-0.35px 0 #f3caca, 0 0.35px #f3caca, 0.35px 0 #f3caca, 0 -0.35px #f3caca"
+                                : "-0.35px 0 #d9f1dc, 0 0.35px #d9f1dc, 0.35px 0 #d9f1dc, 0 -0.35px #d9f1dc",
+                            }}
+                          >
+                            {defenseCount}
+                          </div>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              fontSize: "16px",
+                              fontWeight: 800,
+                              lineHeight: 1,
+                              color: defenseDamageWarn ? "#7a1a1a" : "#1f5b2a",
+                              WebkitTextStroke: defenseDamageWarn ? "0.3px #f3caca" : "0.3px #d9f1dc",
+                              textShadow: defenseDamageWarn
+                                ? "-0.35px 0 #f3caca, 0 0.35px #f3caca, 0.35px 0 #f3caca, 0 -0.35px #f3caca"
+                                : "-0.35px 0 #d9f1dc, 0 0.35px #d9f1dc, 0.35px 0 #d9f1dc, 0 -0.35px #d9f1dc",
+                            }}
+                          >
+                            {defenseDamage}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -223,19 +223,36 @@ async function run() {
     assert.equal(enc.ok, true);
   }
 
-  // Valid: 10×1, 8×2, 3×3 with 1T (budget 36, 1+1 remainder interpretation).
+  // Valid: 10×1, 8×2, 3×3 with 1T (1+1 remainder interpretation is now stricter: n1 >= n2+2 holds).
   {
     const setup = makeSetupByCounts({ tribunHeight: 1, n1: 10, n2: 8, n3: 3 });
     const enc = engine.encodePositionDetailed(setup);
     assert.equal(enc.ok, true);
   }
 
-  // Invalid: 8×1, 8×2, 3×3 with 1T (budget 34).
+  // Previously invalid due to budget check; should now be valid (still satisfies payments).
   {
     const setup = makeSetupByCounts({ tribunHeight: 1, n1: 8, n2: 8, n3: 3 });
     const enc = engine.encodePositionDetailed(setup);
+    assert.equal(enc.ok, true);
+  }
+
+  // Invalid: 1T, variant B would require n1 >= n2+2 but fails; variant A also fails.
+  // - 3-payment fails for variant A: (n2-1) >= 2*n3 is false
+  // - 3-payment fails for variant B: n2 >= 2*n3 is false
+  {
+    const setup = makeSetupByCounts({ tribunHeight: 1, n1: 8, n2: 5, n3: 3 });
+    const enc = engine.encodePositionDetailed(setup);
     assert.equal(enc.ok, false);
-    assert.equal(enc.error?.kind, "BUDGET_FAIL");
+    assert.equal(enc.error?.kind, "PAYMENT_2_FOR_3_FAIL");
+  }
+
+  // 2T: requires n1 >= n2+1 (one free 1-high unit). This should fail if n1==n2.
+  {
+    const setup = makeSetupByCounts({ tribunHeight: 2, n1: 8, n2: 8, n3: 0 });
+    const enc = engine.encodePositionDetailed(setup);
+    assert.equal(enc.ok, false);
+    assert.equal(enc.error?.kind, "PAYMENT_1_FOR_2_FAIL");
   }
 
   console.log('Encoding regression checks passed.');

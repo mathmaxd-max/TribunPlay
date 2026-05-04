@@ -28,10 +28,6 @@ export type EncodeError = {
     kind: "TRIB_TILE_MULTIPLE_HEIGHTS";
     tribTile: number;
 } | {
-    kind: "BUDGET_FAIL";
-    usedBudget: number;
-    expectedBudget: number;
-} | {
     kind: "PAYMENT_2_FOR_3_FAIL";
     n2: number;
     n3: number;

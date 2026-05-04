@@ -32,7 +32,6 @@ export type EncodeError =
   | { kind: "OVERLAP"; tile: number }
   | { kind: "TRIB_TILE_NOT_OCCUPIED"; tribTile: number }
   | { kind: "TRIB_TILE_MULTIPLE_HEIGHTS"; tribTile: number }
-  | { kind: "BUDGET_FAIL"; usedBudget: number; expectedBudget: number }
   | { kind: "PAYMENT_2_FOR_3_FAIL"; n2: number; n3: number }
   | { kind: "PAYMENT_1_FOR_2_FAIL"; n1: number; n2: number }
   | {
@@ -70,8 +69,6 @@ const N3 = SETUP_REGION_RED; // 15 tiles: 0..14
 const N2 = SETUP_REGION_ORANGE; // 26 tiles: 0..25
 const N1 = SETUP_REGION_LIME; // 37 tiles: 0..36
 const TRIB_RANGE = SETUP_REGION_YELLOW; // tribTile is 0..31
-
-const SETUP_BUDGET = 36;
 
 export const ALPHABET37 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
 const DIGIT_MAP: Record<string, number> = (() => {
@@ -288,7 +285,7 @@ function validateSetup(setup: SetupMasks): { ok: true; decoded: SetupDecoded } |
     }
   }
 
-  // payment rules + setup budget
+  // payment rules
   //
   // Counts used for payment MUST exclude the tribun tile itself. For tribunHeight===1,
   // the remaining “free budget” can be interpreted either as (a) one free 2-high or (b) two free 1-high.
@@ -300,19 +297,28 @@ function validateSetup(setup: SetupMasks): { ok: true; decoded: SetupDecoded } |
   const n2 = total2 - (tribunHeight === 2 ? 1 : 0);
   const n3 = total3 - (tribunHeight === 3 ? 1 : 0);
 
-  const usedBudget = 1 * n1 + 2 * n2 + 3 * n3 + tribunHeight;
-  if (usedBudget !== SETUP_BUDGET) {
-    return { ok: false, error: { kind: "BUDGET_FAIL", usedBudget, expectedBudget: SETUP_BUDGET } };
+  // 3-payment: cover 3-high units with 2-high units.
+  // For 1T there are two variants:
+  // - Variant A: one free 2-high unit -> effectively (n2-1) >= 2*n3
+  // - Variant B: two free 1-high units -> n2 >= 2*n3
+  if (tribunHeight === 1) {
+    const okVariantA = n2 - 1 >= 2 * n3;
+    const okVariantB = n2 >= 2 * n3;
+    if (!okVariantA && !okVariantB) return { ok: false, error: { kind: "PAYMENT_2_FOR_3_FAIL", n2, n3 } };
+  } else {
+    if (n2 < 2 * n3) return { ok: false, error: { kind: "PAYMENT_2_FOR_3_FAIL", n2, n3 } };
   }
 
-  if (n2 < 2 * n3) return { ok: false, error: { kind: "PAYMENT_2_FOR_3_FAIL", n2, n3 } };
-
+  // 2-payment: cover 2-high units with 1-high units (accounting for the free allocation).
   if (tribunHeight === 1) {
-    // Variant A: one free 2-high unit (so #1 must cover #2-1)
+    // Variant A: one free 2-high -> (#1-1) >= (#2-1) => #1 >= #2-1
     const okFree2 = n1 >= n2 - 1;
-    // Variant B: two free 1-high units (so #1 must cover #2-2)
-    const okFree11 = n1 >= n2 - 2;
+    // Variant B: two free 1-high -> (#1-3) >= #2 => #1 >= #2+2
+    const okFree11 = n1 >= n2 + 2;
     if (!okFree2 && !okFree11) return { ok: false, error: { kind: "PAYMENT_1_FOR_2_FAIL", n1, n2 } };
+  } else if (tribunHeight === 2) {
+    // 2T: one free 1-high -> (#1-1) >= #2 => #1 >= #2+1
+    if (n1 < n2 + 1) return { ok: false, error: { kind: "PAYMENT_1_FOR_2_FAIL", n1, n2 } };
   } else {
     if (n1 < n2) return { ok: false, error: { kind: "PAYMENT_1_FOR_2_FAIL", n1, n2 } };
   }
