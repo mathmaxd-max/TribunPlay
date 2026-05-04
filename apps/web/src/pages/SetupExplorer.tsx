@@ -20,6 +20,7 @@ type PreviewMode = "empty" | "hash";
 type PlayerCosmetic = "black" | "white";
 type UnitViewMode = "icon" | "number";
 type UnitSide = "own" | "enemy";
+type DefenseMode = "none" | "empty" | "occupied" | "all";
 type ValidationProblem = {
   kind: string;
   message: string;
@@ -31,6 +32,11 @@ type ArmySizeStatus = { ok: true; armySize: number } | { ok: false };
 const EMPTY_CELL: TileCell = { height: 0, tribun: false };
 const TRASH_ICON_URL = new URL("../assets/game/units/icons/Trash.webp", import.meta.url).href;
 const TRASH_OUTLINE_URL = new URL("../assets/game/units/icons/_Trash.webp", import.meta.url).href;
+const OPCODE_MOVE = 0;
+const OPCODE_COMBINE = 5;
+const OPCODE_SPLIT = 7;
+const OPCODE_DRAW = 10;
+const OPCODE_END = 11;
 
 function TrashGlyph(props: { sizePx: number; fillColor: string; outlineColor: string }) {
   const { sizePx, fillColor, outlineColor } = props;
@@ -345,6 +351,7 @@ export default function SetupExplorer() {
   const [playerColor, setPlayerColor] = useState<PlayerCosmetic>("black");
   const [unitViewMode, setUnitViewMode] = useState<UnitViewMode>("icon");
   const [hashCopyStatus, setHashCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [defenseMode, setDefenseMode] = useState<DefenseMode>("none");
   const paintRef = useRef<{ active: boolean; button: 0 | 2; lastCid: number | null }>({
     active: false,
     button: 0,
@@ -366,6 +373,8 @@ export default function SetupExplorer() {
   // is rendered onto (and painted via) changes with `playerColor`.
   const ownCidToIndex = playerColor === "white" ? OWN_CID_TO_INDEX : ENEMY_CID_TO_INDEX;
   const enemyCidToIndex = playerColor === "white" ? ENEMY_CID_TO_INDEX : OWN_CID_TO_INDEX;
+  const ownSetupCids = playerColor === "white" ? OWN_SETUP_CIDS : ENEMY_SETUP_CIDS;
+  const ownEngineColor: engine.Color = playerColor === "black" ? 0 : 1;
 
   const ownValidation = useMemo(() => {
     const counts = emptyCounts();
@@ -534,6 +543,83 @@ export default function SetupExplorer() {
       armySize,
     };
   }, [ownCells]);
+
+  const ownBoardContext = useMemo(() => {
+    const board = new Uint8Array(121);
+    const occupiedHeightByCid = new Uint8Array(121);
+
+    for (let idx = 0; idx < ownCells.length; idx++) {
+      const cell = ownCells[idx];
+      if (cell.height === 0) continue;
+      const cid = ownSetupCids[idx];
+      occupiedHeightByCid[cid] = cell.height;
+      board[cid] = engine.unitToUnitByte({
+        color: ownEngineColor,
+        tribun: cell.tribun,
+        p: cell.height,
+        s: 0,
+      });
+    }
+
+    return { board, occupiedHeightByCid };
+  }, [ownCells, ownSetupCids, ownEngineColor]);
+
+  const defenseOverlay = useMemo(() => {
+    const countByCid = new Uint8Array(121);
+    const damageByCid = new Uint16Array(121);
+
+    for (let idx = 0; idx < ownCells.length; idx++) {
+      const cell = ownCells[idx];
+      if (cell.height === 0) continue;
+
+      const fromCid = ownSetupCids[idx];
+      const reachable = engine.getAttackReachableTiles(
+        fromCid,
+        cell.height,
+        ownEngineColor,
+        cell.tribun,
+        ownBoardContext.board
+      );
+      const uniqueReachable = new Set(reachable);
+      for (const targetCid of uniqueReachable) {
+        countByCid[targetCid] += 1;
+        damageByCid[targetCid] += cell.height;
+      }
+    }
+
+    return { countByCid, damageByCid };
+  }, [ownCells, ownSetupCids, ownEngineColor, ownBoardContext.board]);
+
+  const moveStats = useMemo(() => {
+    if (ownValidation.problems.length > 0 || !ownValidation.hash) return null;
+
+    const state: engine.State = {
+      board: new Uint8Array(ownBoardContext.board),
+      turn: ownEngineColor,
+      ply: 0,
+      drawOfferBy: null,
+      drawOfferBlocked: null,
+      status: "active",
+    };
+
+    const actions = engine.generateLegalActions(state);
+    let move = 0;
+    let split = 0;
+    let combination = 0;
+    let total = 0;
+
+    for (const action of actions) {
+      const decoded = engine.decodeAction(action);
+      if (decoded.opcode === OPCODE_MOVE) move++;
+      if (decoded.opcode === OPCODE_SPLIT) split++;
+      if (decoded.opcode === OPCODE_COMBINE) combination++;
+
+      // Keep total focused on gameplay actions and exclude meta draw/end options.
+      if (decoded.opcode !== OPCODE_DRAW && decoded.opcode !== OPCODE_END) total++;
+    }
+
+    return { move, split, combination, total };
+  }, [ownValidation.problems.length, ownValidation.hash, ownBoardContext.board, ownEngineColor]);
 
   const boardMetrics = useMemo(() => {
     const innerHexSize = 26;
@@ -913,6 +999,24 @@ export default function SetupExplorer() {
                 </button>
               </div>
             </div>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+              <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Defense</div>
+              <div style={segmentedWrapStyle}>
+                <button type="button" onClick={() => setDefenseMode("none")} style={segmentedBtnStyle(defenseMode === "none")}>
+                  None
+                </button>
+                <button type="button" onClick={() => setDefenseMode("empty")} style={segmentedBtnStyle(defenseMode === "empty")}>
+                  Empty
+                </button>
+                <button type="button" onClick={() => setDefenseMode("occupied")} style={segmentedBtnStyle(defenseMode === "occupied")}>
+                  Occupied
+                </button>
+                <button type="button" onClick={() => setDefenseMode("all")} style={segmentedBtnStyle(defenseMode === "all")}>
+                  All
+                </button>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1051,6 +1155,17 @@ export default function SetupExplorer() {
                   const hexState: HexagonState = isOwnSetupTile && isBrushableRender ? "selectable" : "default";
                   const bg = getHexagonColor(baseColor, hexState);
                   const clip = "polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)";
+                  const defenseCount = defenseOverlay.countByCid[tile.cid];
+                  const defenseDamage = defenseOverlay.damageByCid[tile.cid];
+                  const ownOccupiedHeight = ownBoardContext.occupiedHeightByCid[tile.cid];
+                  const defenseModeAllowsTile =
+                    defenseMode === "all" ||
+                    (defenseMode === "empty" && ownOccupiedHeight === 0) ||
+                    (defenseMode === "occupied" && ownOccupiedHeight > 0);
+                  const showDefenseOverlay =
+                    defenseMode !== "none" && defenseModeAllowsTile && defenseCount > 0 && defenseDamage > 0;
+                  const defenseCountWarn = defenseCount < 2;
+                  const defenseDamageWarn = ownOccupiedHeight > 0 && defenseDamage < ownOccupiedHeight;
 
                   return (
                     <div
@@ -1092,6 +1207,28 @@ export default function SetupExplorer() {
                       >
                         {own.height > 0 && <SetupUnitGlyph cell={own} viewMode={unitViewMode} side="own" playerColor={playerColor} />}
                         {enemy.height > 0 && <SetupUnitGlyph cell={enemy} viewMode={unitViewMode} side="enemy" playerColor={playerColor} />}
+                        {showDefenseOverlay && (
+                          <div
+                            style={{
+                              position: "absolute",
+                              inset: 0,
+                              display: "flex",
+                              flexDirection: "column",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "2px",
+                              pointerEvents: "none",
+                              textShadow: "0 1px 0 rgba(255, 255, 255, 0.75)",
+                            }}
+                          >
+                            <div style={{ fontSize: "11px", fontWeight: 800, lineHeight: 1, color: defenseCountWarn ? "#8a1f1f" : "#2a2218" }}>
+                              C {defenseCount}
+                            </div>
+                            <div style={{ fontSize: "11px", fontWeight: 800, lineHeight: 1, color: defenseDamageWarn ? "#8a1f1f" : "#2a2218" }}>
+                              D {defenseDamage}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -1173,6 +1310,13 @@ export default function SetupExplorer() {
               </span>
             </div>
             <div>Tribun height: {ownValidation.tribunHeight > 0 ? ownValidation.tribunHeight : "—"}</div>
+            <div style={{ display: "grid", gap: "2px" }}>
+              <div style={{ fontWeight: 700 }}>Move generation</div>
+              <div>Move: {moveStats ? moveStats.move : "—"}</div>
+              <div>Split: {moveStats ? moveStats.split : "—"}</div>
+              <div>Combination: {moveStats ? moveStats.combination : "—"}</div>
+              <div>Total: {moveStats ? moveStats.total : "—"}</div>
+            </div>
           </div>
         </section>
       </main>

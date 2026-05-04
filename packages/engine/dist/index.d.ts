@@ -45,6 +45,7 @@ export declare function decodeAction(action: number): {
 };
 export declare function packBoard(board: Uint8Array): string;
 export declare function unpackBoard(b64: string): Uint8Array;
+export declare function getAttackReachableTiles(fromCid: number, height: Height, color: Color, isTribun: boolean, board: Uint8Array): number[];
 export declare function generateLegalActions(state: State): Uint32Array;
 export declare function applyAction(state: State, action: number): State;
 export interface DefaultPosition {

@@ -541,7 +541,7 @@ function getReachableTiles(fromCid, height, color, isTribun, board, forAttack = 
     return reachable;
 }
 // Attack pattern: height 8 attacks as height 2 plus t1 adjacency and jumps
-function getAttackReachableTiles(fromCid, height, color, isTribun, board) {
+export function getAttackReachableTiles(fromCid, height, color, isTribun, board) {
     if (height === 8) {
         // Height 8 always attacks as height 2
         const { x, y } = decodeCoord(fromCid);

@@ -609,7 +609,7 @@ function getReachableTiles(
 }
 
 // Attack pattern: height 8 attacks as height 2 plus t1 adjacency and jumps
-function getAttackReachableTiles(
+export function getAttackReachableTiles(
   fromCid: number,
   height: Height,
   color: Color,
