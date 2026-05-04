@@ -344,6 +344,7 @@ export default function SetupExplorer() {
   const [rotate180, setRotate180] = useState(false);
   const [playerColor, setPlayerColor] = useState<PlayerCosmetic>("black");
   const [unitViewMode, setUnitViewMode] = useState<UnitViewMode>("icon");
+  const [hashCopyStatus, setHashCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const paintRef = useRef<{ active: boolean; button: 0 | 2; lastCid: number | null }>({
     active: false,
     button: 0,
@@ -586,7 +587,7 @@ export default function SetupExplorer() {
       if (!canPlaceOnIndex(setupIndex, height, tribunBrush, onlyEmpty, prev)) return prev;
       if (tribunBrush) {
         for (let i = 0; i < next.length; i++) {
-          if (next[i].tribun) next[i].tribun = false;
+          if (next[i].tribun) next[i] = { ...EMPTY_CELL };
         }
       }
       next[setupIndex] = { height, tribun: tribunBrush };
@@ -618,6 +619,22 @@ export default function SetupExplorer() {
     }
     return set;
   }, [brush, tribunBrush, onlyEmpty, ownCells]);
+
+  // Render-only "selectable" tiles: keep empty-only write behavior, but avoid visually disabling occupied tiles.
+  // This mirrors the non-empty-only styling while leaving placement rules unchanged.
+  const brushableRenderSet = useMemo(() => {
+    const set = new Set<number>();
+    for (let i = 0; i < SETUP_REGION_LIME; i++) {
+      const cell = ownCells[i];
+      if (brush === "eraser") {
+        if (cellOccupied(cell)) set.add(i);
+        continue;
+      }
+      const height = Number(brush) as 1 | 2 | 3;
+      if (canPlaceOnIndex(i, height, tribunBrush, false, ownCells)) set.add(i);
+    }
+    return set;
+  }, [brush, tribunBrush, ownCells]);
 
   const computeRotateForPlayerKeepingSide = (nextPlayerColor: PlayerCosmetic) => {
     const BLACK_CORNER_CID = 0;
@@ -663,6 +680,12 @@ export default function SetupExplorer() {
     };
   }, []);
 
+  useEffect(() => {
+    if (hashCopyStatus === "idle") return;
+    const t = window.setTimeout(() => setHashCopyStatus("idle"), 1200);
+    return () => window.clearTimeout(t);
+  }, [hashCopyStatus]);
+
   const onOwnHashChange = (raw: string) => {
     const value = normalizeHashInput(raw);
     setOwnHashInput(value);
@@ -671,6 +694,17 @@ export default function SetupExplorer() {
     if (status === "valid") {
       const decoded = decodeCodeDetailed(value);
       if (decoded.ok && decoded.setup) setOwnCells(setupToCells(decoded.setup));
+    }
+  };
+
+  const copyOwnHashToClipboard = async () => {
+    const hash = ownValidation.problems.length === 0 ? ownValidation.hash : null;
+    if (!hash) return;
+    try {
+      await navigator.clipboard.writeText(hash);
+      setHashCopyStatus("copied");
+    } catch {
+      setHashCopyStatus("failed");
     }
   };
 
@@ -847,7 +881,8 @@ export default function SetupExplorer() {
                   type="button"
                   onClick={() => {
                     const next = "black";
-                    setRotate180(computeRotateForPlayerKeepingSide(next));
+                    userFlippedRef.current = true;
+                    setRotate180((prev) => !prev);
                     setPlayerColor(next);
                   }}
                   style={segmentedBtnStyle(playerColor === "black")}
@@ -858,7 +893,8 @@ export default function SetupExplorer() {
                   type="button"
                   onClick={() => {
                     const next = "white";
-                    setRotate180(computeRotateForPlayerKeepingSide(next));
+                    userFlippedRef.current = true;
+                    setRotate180((prev) => !prev);
                     setPlayerColor(next);
                   }}
                   style={segmentedBtnStyle(playerColor === "white")}
@@ -1008,10 +1044,11 @@ export default function SetupExplorer() {
                   const own = isOwnSetupTile ? ownCells[ownIdx] : EMPTY_CELL;
                   const enemy = isEnemySetupTile && previewMode === "hash" ? enemyCells[enemyIdx] : EMPTY_CELL;
                   const isBrushable = isOwnSetupTile ? brushableSet.has(ownIdx) : false;
+                  const isBrushableRender = isOwnSetupTile ? brushableRenderSet.has(ownIdx) : false;
                   const hexX = tile.centerX - boardMetrics.outerHexWidth / 2 - boardMetrics.minX;
                   const hexY = tile.centerY - boardMetrics.outerHexHeight / 2 - boardMetrics.minY;
                   const baseColor = getBaseColor(tile.x, tile.y);
-                  const hexState: HexagonState = isOwnSetupTile && isBrushable ? "selectable" : "default";
+                  const hexState: HexagonState = isOwnSetupTile && isBrushableRender ? "selectable" : "default";
                   const bg = getHexagonColor(baseColor, hexState);
                   const clip = "polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)";
 
@@ -1027,6 +1064,7 @@ export default function SetupExplorer() {
                         clipPath: clip,
                         background: "#2d2922",
                         cursor: isOwnSetupTile ? "pointer" : "default",
+                        opacity: isOwnSetupTile && !isBrushable ? 0.9 : 1,
                       }}
                       onMouseDown={(e) => {
                         if (!isOwnSetupTile) return;
@@ -1074,15 +1112,54 @@ export default function SetupExplorer() {
           </section>
         )}
 
+        <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+            <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Hash</div>
+            <button
+              type="button"
+              onClick={copyOwnHashToClipboard}
+              disabled={ownValidation.problems.length !== 0 || !ownValidation.hash}
+              style={{
+                padding: "6px 10px",
+                borderRadius: "10px",
+                border: "2px solid #6f5a38",
+                background: "#fff6e8",
+                fontWeight: 700,
+                cursor: ownValidation.problems.length !== 0 || !ownValidation.hash ? "not-allowed" : "pointer",
+                opacity: ownValidation.problems.length !== 0 || !ownValidation.hash ? 0.55 : 1,
+                height: "34px",
+              }}
+              title="Copy hash to clipboard"
+            >
+              {hashCopyStatus === "copied" ? "Copied" : hashCopyStatus === "failed" ? "Copy failed" : "Copy"}
+            </button>
+          </div>
+          <div
+            style={{
+              fontFamily: '"JetBrains Mono", monospace',
+              fontWeight: 800,
+              fontSize: "26px",
+              letterSpacing: "2px",
+              background: "#fff9ef",
+              border: "1px solid #bda98b",
+              borderRadius: "12px",
+              padding: "12px 14px",
+              color: "#2a2218",
+              userSelect: "text",
+              WebkitUserSelect: "text",
+              wordBreak: "break-all",
+            }}
+          >
+            {ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : "—"}
+          </div>
+          <div style={{ fontSize: "12px", color: "#5a4630" }}>
+            You can click and drag to select the hash, or use the Copy button.
+          </div>
+        </section>
+
         <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
           <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Stats</div>
           <div style={{ display: "grid", gap: "6px", fontSize: "13px", color: "#5a4630" }}>
-            <div>
-              Hash:{" "}
-              <span style={{ fontFamily: '"JetBrains Mono", monospace', fontWeight: 700 }}>
-                {ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : "—"}
-              </span>
-            </div>
             <div style={{ display: "grid", gap: "2px" }}>
               <div style={{ fontWeight: 700 }}>Used heights</div>
               <div>#1: {ownValidation.counts.ones}</div>
