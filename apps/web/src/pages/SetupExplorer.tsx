@@ -346,7 +346,7 @@ export default function SetupExplorer() {
   const [brush, setBrush] = useState<Brush>("1");
   const [tribunBrush, setTribunBrush] = useState(false);
   const [onlyEmpty, setOnlyEmpty] = useState(true);
-  const [rotate180, setRotate180] = useState(false);
+  const [userFlip180, setUserFlip180] = useState(false);
   const [playerColor, setPlayerColor] = useState<PlayerCosmetic>("black");
   const [unitViewMode, setUnitViewMode] = useState<UnitViewMode>("icon");
   const [hashCopyStatus, setHashCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
@@ -374,6 +374,7 @@ export default function SetupExplorer() {
   const enemyCidToIndex = playerColor === "white" ? ENEMY_CID_TO_INDEX : OWN_CID_TO_INDEX;
   const ownSetupCids = playerColor === "white" ? OWN_SETUP_CIDS : ENEMY_SETUP_CIDS;
   const ownEngineColor: engine.Color = playerColor === "black" ? 0 : 1;
+  const rotate180 = (playerColor === "black") !== userFlip180;
 
   const ownValidation = useMemo(() => {
     const counts = emptyCounts();
@@ -505,9 +506,15 @@ export default function SetupExplorer() {
 
     const symViolations = collectSymmetryViolations(ownCells);
     for (const v of symViolations) {
+      // `v.kind` is like "1", "2", "3", "1T", ...; we only want the height.
+      const height = Number(v.kind[0]);
+      let effectiveOrientation = rotate180 ? (v.orientation === "UP" ? "DOWN" : "UP") : v.orientation;
+      // Triangle labeling is defined in "own/canonical" space; when viewing as White, invert the displayed notion.
+      if (playerColor === "white") effectiveOrientation = effectiveOrientation === "UP" ? "DOWN" : "UP";
+      const glyph = effectiveOrientation === "UP" ? "△" : "▽";
       problems.push({
         kind: "SYMMETRY",
-        message: `Symmetry: equal units in ${v.orientation} triangle around center ${v.centerSetupIdx} (cid=${v.centerCid}) at vertices [${v.verticesSetupIdx.join(",")}] (cids=[${v.verticesCid.join(",")}], unit=${v.kind}).`,
+        message: `Symmetry: ${height}${glyph}`,
         details: v,
       });
     }
@@ -557,7 +564,7 @@ export default function SetupExplorer() {
       hash,
       armySize,
     };
-  }, [ownCells]);
+  }, [ownCells, rotate180, playerColor]);
 
   const ownBoardContext = useMemo(() => {
     const board = new Uint8Array(121);
@@ -977,8 +984,8 @@ export default function SetupExplorer() {
                   type="button"
                   onClick={() => {
                     const next = "black";
+                    if (next === playerColor) return;
                     userFlippedRef.current = true;
-                    setRotate180((prev) => !prev);
                     setPlayerColor(next);
                   }}
                   style={segmentedBtnStyle(playerColor === "black")}
@@ -989,8 +996,8 @@ export default function SetupExplorer() {
                   type="button"
                   onClick={() => {
                     const next = "white";
+                    if (next === playerColor) return;
                     userFlippedRef.current = true;
-                    setRotate180((prev) => !prev);
                     setPlayerColor(next);
                   }}
                   style={segmentedBtnStyle(playerColor === "white")}
@@ -1122,7 +1129,7 @@ export default function SetupExplorer() {
               type="button"
               onClick={() => {
                 userFlippedRef.current = true;
-                setRotate180((prev) => !prev);
+                setUserFlip180((prev) => !prev);
               }}
               title="Flip board"
               aria-label="Flip board"
