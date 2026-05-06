@@ -40,6 +40,10 @@ It is written to be:
 - [`ui/03-fsm-examples.md`](ui/03-fsm-examples.md)
 - [`ui/04-hexagon-coloring.md`](ui/04-hexagon-coloring.md)
 
+### Product milestones (roadmap)
+- [`milestone-overview/README.md`](milestone-overview/README.md) — index (M01–M10)
+- [`milestone-overview/MILESTONES.md`](milestone-overview/MILESTONES.md) — full milestone spec (single file)
+
 ### Examples
 - [`examples/01-action-examples.md`](examples/01-action-examples.md)
 - [`examples/02-ws-messages.md`](examples/02-ws-messages.md)
