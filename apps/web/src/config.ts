@@ -74,3 +74,11 @@ async function detectBestEndpoint(
 }
 
 export { API_BASE, WS_BASE, detectBestEndpoint, performHealthCheck, type HealthCheckResult };
+
+/**
+ * Cloudflare Turnstile site key (public).
+ * When unset, the CAPTCHA widget is not shown and no token is sent.
+ */
+const TURNSTILE_SITE_KEY: string | null = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? null;
+
+export { TURNSTILE_SITE_KEY };

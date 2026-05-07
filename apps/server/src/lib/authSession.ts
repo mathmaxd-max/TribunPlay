@@ -124,6 +124,13 @@ export const refreshAuthSession = async (params: {
 
   const replacementId = crypto.randomUUID();
   await db.batch([
+    // Insert the replacement first so the FK in `replaced_by_token_id` can reference it.
+    db
+      .prepare(
+        `INSERT INTO auth_refresh_tokens (id, account_id, token_hash, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .bind(replacementId, account.id, refresh.hash, refresh.expiresAtIso, new Date().toISOString()),
     db
       .prepare(
         `UPDATE auth_refresh_tokens
@@ -131,12 +138,6 @@ export const refreshAuthSession = async (params: {
          WHERE id = ?`
       )
       .bind(new Date().toISOString(), replacementId, row.id),
-    db
-      .prepare(
-        `INSERT INTO auth_refresh_tokens (id, account_id, token_hash, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?)`
-      )
-      .bind(replacementId, account.id, refresh.hash, refresh.expiresAtIso, new Date().toISOString()),
   ]);
 
   return {

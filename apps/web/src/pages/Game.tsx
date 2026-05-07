@@ -10,7 +10,9 @@ import {
   buildIdentityPayload,
   getStoredIdentity,
   mergeIdentityFromParticipant,
+  setIdentityFromAuthSuccess,
   setStoredIdentity,
+  type AuthSuccessResponse,
 } from '../auth/identityStore';
 import { API_BASE, WS_BASE } from '../config';
 
@@ -297,6 +299,7 @@ export default function Game() {
   });
   const [showEndModal, setShowEndModal] = useState(false);
   const [showSurrenderConfirm, setShowSurrenderConfirm] = useState(false);
+  const [cancellingLobby, setCancellingLobby] = useState(false);
   const [gameState, setGameState] = useState<engine.State | null>(null);
   const gameStateRef = useRef<engine.State | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -845,7 +848,22 @@ export default function Game() {
             return;
           }
 
-          const identityPayload = buildIdentityPayload(currentIdentity);
+          const refreshSessionOrThrow = async () => {
+            if (currentIdentity.mode !== 'token') return currentIdentity;
+            const refreshResponse = await fetch(`${API_BASE}/api/auth/refresh`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ refreshToken: currentIdentity.session.refreshToken }),
+            });
+            if (!refreshResponse.ok) {
+              throw new Error('Session expired. Please log in again.');
+            }
+            const refreshed = (await refreshResponse.json()) as AuthSuccessResponse;
+            const nextIdentity = setIdentityFromAuthSuccess(refreshed);
+            return nextIdentity;
+          };
+
+          let identityPayload = buildIdentityPayload(currentIdentity);
 
           // First time joining this game - call join API
           const joinResponse = await fetch(`${API_BASE}/api/game/join`, {
@@ -855,25 +873,58 @@ export default function Game() {
           });
 
           if (!joinResponse.ok) {
+            if (joinResponse.status === 401) {
+              const nextIdentity = await refreshSessionOrThrow();
+              identityPayload = buildIdentityPayload(nextIdentity);
+              const retry = await fetch(`${API_BASE}/api/game/join`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code, identity: identityPayload }),
+              });
+              if (!retry.ok) {
+                const errData = await retry.json().catch(() => ({ error: 'Failed to join game' }));
+                throw new Error(errData.error || 'Failed to join game');
+              }
+              const joinData = await retry.json();
+              gameId = joinData.gameId;
+              token = joinData.token;
+              seat = joinData.seat;
+              setRole(seat);
+
+              if (joinData.participant) {
+                const mergedIdentity = mergeIdentityFromParticipant(nextIdentity, joinData.participant);
+                setStoredIdentity(mergedIdentity);
+              }
+
+              localStorage.setItem(`game_token_${code}`, token);
+              localStorage.setItem(`game_id_${code}`, gameId);
+              localStorage.setItem(`game_seat_${code}`, seat);
+            } else {
+              const errData = await joinResponse.json().catch(() => ({ error: 'Failed to join game' }));
+              throw new Error(errData.error || 'Failed to join game');
+            }
+          } else {
             const errData = await joinResponse.json().catch(() => ({ error: 'Failed to join game' }));
             throw new Error(errData.error || 'Failed to join game');
           }
 
-          const joinData = await joinResponse.json();
-          gameId = joinData.gameId;
-          token = joinData.token;
-          seat = joinData.seat;
-          setRole(seat);
+          if (joinResponse.ok) {
+            const joinData = await joinResponse.json();
+            gameId = joinData.gameId;
+            token = joinData.token;
+            seat = joinData.seat;
+            setRole(seat);
 
-          if (joinData.participant) {
-            const mergedIdentity = mergeIdentityFromParticipant(currentIdentity, joinData.participant);
-            setStoredIdentity(mergedIdentity);
+            if (joinData.participant) {
+              const mergedIdentity = mergeIdentityFromParticipant(currentIdentity, joinData.participant);
+              setStoredIdentity(mergedIdentity);
+            }
+
+            // Store for future use
+            localStorage.setItem(`game_token_${code}`, token);
+            localStorage.setItem(`game_id_${code}`, gameId);
+            localStorage.setItem(`game_seat_${code}`, seat);
           }
-
-          // Store for future use
-          localStorage.setItem(`game_token_${code}`, token);
-          localStorage.setItem(`game_id_${code}`, gameId);
-          localStorage.setItem(`game_seat_${code}`, seat);
         }
 
         // Connect WebSocket
@@ -1246,6 +1297,38 @@ export default function Game() {
       return;
     }
     wsRef.current.send(JSON.stringify({ t: type }));
+  };
+
+  const handleCancelLobby = async () => {
+    if (!code) return;
+    const currentIdentity = getStoredIdentity();
+    if (!currentIdentity) {
+      navigate(`/?next=${encodeURIComponent(`/game/${code}`)}`, { replace: true });
+      return;
+    }
+    setCancellingLobby(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/game/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, identity: buildIdentityPayload(currentIdentity) }),
+      });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({ error: 'Failed to close lobby' }));
+        throw new Error(errData.error || 'Failed to close lobby');
+      }
+
+      // Clean up stored credentials for this lobby so the user can start fresh.
+      localStorage.removeItem(`game_token_${code}`);
+      localStorage.removeItem(`game_id_${code}`);
+      localStorage.removeItem(`game_seat_${code}`);
+      navigate('/hub', { replace: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to close lobby');
+    } finally {
+      setCancellingLobby(false);
+    }
   };
 
   const cycleIndex = (currentIndex: number, delta: number, length: number) => {
@@ -3017,6 +3100,26 @@ export default function Game() {
                 >
                   {lobbyActionLabel}
                 </button>
+                {role === 'black' && roomStatus === 'lobby' && (
+                  <button
+                    onClick={handleCancelLobby}
+                    disabled={cancellingLobby}
+                    style={{
+                      marginTop: '10px',
+                      padding: '10px 16px',
+                      borderRadius: '999px',
+                      border: '2px solid #8b3b3b',
+                      background: cancellingLobby ? '#e6dccf' : '#f7d7d5',
+                      color: '#5c1c16',
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      letterSpacing: '1px',
+                      cursor: cancellingLobby ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {cancellingLobby ? 'Closing...' : 'Close lobby'}
+                  </button>
+                )}
                 {!canHostStart && (
                   <div style={{ fontSize: '12px', color: '#7a6543' }}>
                     {role === 'black' ? 'Both players must connect before starting.' : 'Waiting for the host to start.'}

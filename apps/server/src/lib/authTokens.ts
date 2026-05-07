@@ -103,7 +103,9 @@ export const verifyAccessToken = async (
   token: string,
 ): Promise<AuthTokenPayload> => {
   const safeSecret = safeParseSecret(secret);
-  const [encodedPayload, encodedSignature] = token.split(".");
+  const separatorIndex = token.lastIndexOf(".");
+  const encodedPayload = separatorIndex > 0 ? token.slice(0, separatorIndex) : "";
+  const encodedSignature = separatorIndex > 0 ? token.slice(separatorIndex + 1) : "";
 
   if (!encodedPayload || !encodedSignature) {
     throw new AuthTokenError(401, "Invalid access token");
@@ -164,7 +166,9 @@ export const toAuthTokenHttpError = (error: unknown): { status: number; message:
   }
 
   if (error instanceof Error) {
-    return { status: 500, message: error.message };
+    // Do not pass through arbitrary error messages here.
+    // Higher-level mappers (e.g. refresh/session) may translate expected failures into 401/403.
+    return { status: 500, message: "Unknown auth token error" };
   }
 
   return { status: 500, message: "Unknown auth token error" };

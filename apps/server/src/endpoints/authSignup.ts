@@ -9,11 +9,14 @@ import {
   validateEmail,
   validatePassword,
 } from "../lib/password";
+import { verifyTurnstile } from "../lib/turnstile";
+import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
 
 const signupBodySchema = z.object({
   email: Str(),
   password: Str(),
   name: Str(),
+  turnstileToken: Str({ required: false }),
 });
 
 export class AuthSignup extends OpenAPIRoute {
@@ -71,6 +74,30 @@ export class AuthSignup extends OpenAPIRoute {
       return c.json({ error: normalized.message }, normalized.status as 400 | 500);
     }
 
+    const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
+
+    {
+      const captcha = await verifyTurnstile({
+        enabled: env.TURNSTILE_ENABLED === "true",
+        secretKey: env.TURNSTILE_SECRET_KEY,
+        token: data.body.turnstileToken,
+        remoteIp: clientIp,
+      });
+      if (!captcha.success) {
+        return c.json({ error: captcha.error }, 400);
+      }
+    }
+
+    const bucket = `signup:${email}:${clientIp}`;
+    const ipBucket = `signup_ip:${clientIp}`;
+    try {
+      await consumeAuthAttempt(env.DB, bucket);
+      // M01 additional non-invasive bot protection: a second per-IP bucket complements per-email+IP.
+      await consumeAuthAttempt(env.DB, ipBucket);
+    } catch {
+      return c.json({ error: "Too many signup attempts. Please try again later." }, 429);
+    }
+
     const existing = await env.DB
       .prepare("SELECT id FROM accounts WHERE lower(email) = ? AND provider IN ('email', 'google')")
       .bind(email)
@@ -100,6 +127,8 @@ export class AuthSignup extends OpenAPIRoute {
           .bind(accountId, passwordHash, nowIso, nowIso, nowIso),
       ]);
 
+      await resetAuthAttempt(env.DB, bucket);
+      await resetAuthAttempt(env.DB, ipBucket);
       return issueAuthSession({
         db: env.DB,
         tokenSecret: env.AUTH_TOKEN_SECRET,

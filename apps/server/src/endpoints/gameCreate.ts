@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { AppContext } from "../types";
 import * as engine from "@tribunplay/engine";
 import { identitySchema, resolveIdentity, toHttpError } from "../lib/identity";
+import { verifyTurnstile } from "../lib/turnstile";
+import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
 
 const createGameBodySchema = z.object({
   timeControl: z
@@ -29,6 +31,7 @@ const createGameBodySchema = z.object({
   boardBytesB64: z.string().optional(),
   unitsByCid: z.record(z.string(), z.array(z.number())).optional(),
   identity: identitySchema,
+  turnstileToken: Str({ required: false }),
 });
 
 export class GameCreate extends OpenAPIRoute {
@@ -73,12 +76,52 @@ export class GameCreate extends OpenAPIRoute {
     const data = await this.getValidatedData<typeof this.schema>();
     const body = data.body;
 
+    const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
+    const guestRateBucket = `game_create_ip:${clientIp}`;
+
+    if (env.TURNSTILE_ENABLED === "true" && body.identity.mode === "guest") {
+      const captcha = await verifyTurnstile({
+        enabled: true,
+        secretKey: env.TURNSTILE_SECRET_KEY,
+        token: body.turnstileToken,
+        remoteIp: clientIp,
+      });
+      if (!captcha.success) {
+        return c.json({ error: captcha.error }, 400);
+      }
+    }
+
+    if (body.identity.mode === "guest") {
+      try {
+        // M01 additional non-invasive bot protection (guest): per-IP limiting on game creation.
+        await consumeAuthAttempt(env.DB, guestRateBucket);
+      } catch {
+        return c.json({ error: "Too many create attempts. Please try again later." }, 429);
+      }
+    }
+
     let resolvedIdentity;
     try {
       resolvedIdentity = await resolveIdentity(env.DB, env.AUTH_TOKEN_SECRET, body.identity);
     } catch (error) {
       const normalized = toHttpError(error);
       return c.json({ error: normalized.message }, normalized.status as 400 | 401 | 403 | 500 | 503);
+    }
+
+    // Prevent a player from creating multiple lobby/active games at once.
+    // The web will proactively redirect, but this keeps the invariant server-side.
+    const existing = await env.DB
+      .prepare(
+        `SELECT code FROM games
+         WHERE status IN ('lobby', 'active')
+           AND (black_player_id = ? OR white_player_id = ?)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(resolvedIdentity.accountId, resolvedIdentity.accountId)
+      .first<{ code: string }>();
+    if (existing?.code) {
+      return c.json({ error: "You are already in an ongoing game.", code: existing.code }, 409);
     }
 
     const gameId = crypto.randomUUID();
@@ -161,6 +204,10 @@ export class GameCreate extends OpenAPIRoute {
           nowIso,
         ),
     ]);
+
+    if (body.identity.mode === "guest") {
+      await resetAuthAttempt(env.DB, guestRateBucket);
+    }
 
     const url = new URL(c.req.url);
     const wsUrl = `ws://${url.host}/ws/game/${gameId}?token=${token}`;

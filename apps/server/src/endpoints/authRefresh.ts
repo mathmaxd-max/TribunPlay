@@ -56,6 +56,10 @@ export class AuthRefresh extends OpenAPIRoute {
         refreshToken: data.body.refreshToken,
       });
     } catch (error) {
+      console.error("[AUTH] refresh.failed", {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       const normalized = toAuthSessionHttpError(error);
       return c.json({ error: normalized.message }, normalized.status as 400 | 401 | 403 | 500 | 503);
     }

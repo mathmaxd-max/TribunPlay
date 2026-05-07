@@ -5,4 +5,12 @@ interface Env {
 	DB: D1Database;
 	GOOGLE_CLIENT_ID?: string;
 	AUTH_TOKEN_SECRET?: string;
+	/**
+	 * When set to "true", auth endpoints require a server-verified Cloudflare Turnstile token.
+	 */
+	TURNSTILE_ENABLED?: string;
+	/**
+	 * Cloudflare Turnstile secret key (server-side). Should be set via Wrangler secrets.
+	 */
+	TURNSTILE_SECRET_KEY?: string;
 }

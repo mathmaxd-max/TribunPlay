@@ -5,10 +5,12 @@ import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
 import { issueAuthSession, toAuthSessionHttpError } from "../lib/authSession";
 import { toPasswordHttpError, validateEmail, validatePassword } from "../lib/password";
 import { verifyPassword } from "../lib/password";
+import { verifyTurnstile } from "../lib/turnstile";
 
 const loginBodySchema = z.object({
   email: Str(),
   password: Str(),
+  turnstileToken: Str({ required: false }),
 });
 
 export class AuthLogin extends OpenAPIRoute {
@@ -66,9 +68,24 @@ export class AuthLogin extends OpenAPIRoute {
 
     const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
     const bucket = `login:${email}:${clientIp}`;
+    const ipBucket = `login_ip:${clientIp}`;
+
+    {
+      const captcha = await verifyTurnstile({
+        enabled: env.TURNSTILE_ENABLED === "true",
+        secretKey: env.TURNSTILE_SECRET_KEY,
+        token: data.body.turnstileToken,
+        remoteIp: clientIp,
+      });
+      if (!captcha.success) {
+        return c.json({ error: captcha.error }, 400);
+      }
+    }
 
     try {
       await consumeAuthAttempt(env.DB, bucket);
+      // M01 additional non-invasive bot protection: a second per-IP bucket complements per-email+IP.
+      await consumeAuthAttempt(env.DB, ipBucket);
     } catch {
       return c.json({ error: "Too many login attempts. Please try again later." }, 429);
     }
@@ -93,6 +110,7 @@ export class AuthLogin extends OpenAPIRoute {
     }
 
     await resetAuthAttempt(env.DB, bucket);
+    await resetAuthAttempt(env.DB, ipBucket);
     await env.DB
       .prepare("UPDATE account_credentials SET last_login_at = ?, updated_at = ? WHERE account_id = ?")
       .bind(new Date().toISOString(), new Date().toISOString(), account.id)

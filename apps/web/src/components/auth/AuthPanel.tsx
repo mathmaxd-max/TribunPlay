@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { requestGoogleIdToken } from "../../auth/googleIdentity";
-import { API_BASE } from "../../config";
+import { API_BASE, TURNSTILE_SITE_KEY } from "../../config";
 import type { AuthSuccessResponse } from "../../auth/identityStore";
+import { renderTurnstile } from "../../auth/turnstile";
 
 const labelStyle = {
   fontSize: "12px",
@@ -34,8 +35,71 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
   const [password, setPassword] = useState("");
   const [loadingMode, setLoadingMode] = useState<"google" | "login" | "signup" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+
+  const turnstileEnabled = useMemo(() => Boolean(TURNSTILE_SITE_KEY), []);
+  const turnstileHostRef = useRef<HTMLDivElement | null>(null);
+  const turnstileResetRef = useRef<(() => void) | null>(null);
 
   const isLoading = loadingMode !== null;
+
+  useEffect(() => {
+    if (!turnstileEnabled) return;
+    if (!TURNSTILE_SITE_KEY) return;
+    const host = turnstileHostRef.current;
+    if (!host) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        host.innerHTML = "";
+        setTurnstileToken(null);
+
+        const { reset } = await renderTurnstile(host, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: "auto",
+          callback: (token) => {
+            if (!cancelled) setTurnstileToken(token);
+          },
+          "expired-callback": () => {
+            if (!cancelled) setTurnstileToken(null);
+          },
+          "error-callback": () => {
+            if (!cancelled) setTurnstileToken(null);
+          },
+        });
+
+        if (!cancelled) {
+          turnstileResetRef.current = () => reset();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setTurnstileToken(null);
+          setError(err instanceof Error ? err.message : "CAPTCHA is unavailable.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      turnstileResetRef.current = null;
+    };
+  }, [turnstileEnabled]);
+
+  const getCaptchaTokenOrThrow = (): string | null => {
+    if (!turnstileEnabled) return null;
+    if (!turnstileToken) {
+      throw new Error("Please complete the CAPTCHA to continue.");
+    }
+    return turnstileToken;
+  };
+
+  const resetCaptchaAfterSubmit = () => {
+    if (!turnstileEnabled) return;
+    setTurnstileToken(null);
+    turnstileResetRef.current?.();
+  };
 
   const handleGoogle = async () => {
     if (!googleClientId) {
@@ -46,11 +110,12 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     setLoadingMode("google");
     setError(null);
     try {
+      const captchaToken = getCaptchaTokenOrThrow();
       const googleIdToken = await requestGoogleIdToken(googleClientId);
       const response = await fetch(`${API_BASE}/api/auth/google`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ googleIdToken }),
+        body: JSON.stringify({ googleIdToken, turnstileToken: captchaToken }),
       });
 
       if (!response.ok) {
@@ -63,6 +128,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google sign-in failed");
     } finally {
+      resetCaptchaAfterSubmit();
       setLoadingMode(null);
     }
   };
@@ -81,14 +147,15 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     setLoadingMode(mode);
     setError(null);
     try {
+      const captchaToken = getCaptchaTokenOrThrow();
       const endpoint = mode === "login" ? "/api/auth/login" : "/api/auth/signup";
       const response = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
           mode === "login"
-            ? { email: normalizedEmail, password }
-            : { email: normalizedEmail, password, name: name.trim() },
+            ? { email: normalizedEmail, password, turnstileToken: captchaToken }
+            : { email: normalizedEmail, password, name: name.trim(), turnstileToken: captchaToken },
         ),
       });
 
@@ -106,6 +173,8 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
+      // Token is short-lived and generally single-use; always reset after an attempt.
+      resetCaptchaAfterSubmit();
       setLoadingMode(null);
     }
   };
@@ -132,7 +201,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
 
       <button
         onClick={handleGoogle}
-        disabled={isLoading || !googleClientId}
+        disabled={isLoading || !googleClientId || (turnstileEnabled && !turnstileToken)}
         style={{
           width: "100%",
           padding: "11px 14px",
@@ -154,6 +223,35 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         <div style={{ fontSize: "12px", color: "#6f5a38", textTransform: "uppercase", letterSpacing: "1px" }}>or</div>
         <div style={{ height: "1px", background: "#d7c5ab" }} />
       </div>
+
+      {turnstileEnabled && (
+        <div style={{ display: "grid", gap: "8px" }}>
+          <div style={labelStyle}>CAPTCHA</div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              padding: "10px",
+              borderRadius: "14px",
+              background: "rgba(255, 249, 239, 0.55)",
+              boxShadow: "inset 0 0 0 1px rgba(204, 184, 155, 0.65)",
+            }}
+          >
+            <div
+              ref={turnstileHostRef}
+              style={{
+                minHeight: "66px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                borderRadius: "12px",
+                overflow: "hidden",
+                background: "transparent",
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {mode === "signup" && (
         <div style={{ display: "grid", gap: "6px" }}>
@@ -209,7 +307,13 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
 
       <button
         onClick={handleEmailSubmit}
-        disabled={isLoading || !email.trim() || !password || (mode === "signup" && !name.trim())}
+        disabled={
+          isLoading ||
+          !email.trim() ||
+          !password ||
+          (mode === "signup" && !name.trim()) ||
+          (turnstileEnabled && !turnstileToken)
+        }
         aria-busy={loadingMode === "login" || loadingMode === "signup"}
         style={{
           width: "100%",

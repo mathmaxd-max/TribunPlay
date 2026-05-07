@@ -1,13 +1,16 @@
-import { type Dispatch, type SetStateAction, useState } from 'react';
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   buildIdentityPayload,
   getStoredIdentity,
   mergeIdentityFromParticipant,
+  setIdentityFromAuthSuccess,
   setStoredIdentity,
+  type AuthSuccessResponse,
   type StoredIdentity,
 } from '../auth/identityStore';
-import { API_BASE } from '../config';
+import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
+import { renderTurnstile } from '../auth/turnstile';
 import { formatDurationHms } from '../utils/formatDuration';
 import { useHealthCheck } from '../utils/useHealthCheck';
 
@@ -180,6 +183,73 @@ export default function Home() {
   });
 
   const isLoading = loadingAction !== null;
+  const turnstileEnabled = useMemo(() => Boolean(TURNSTILE_SITE_KEY), []);
+  const guestTurnstileRequired = Boolean(turnstileEnabled && identity?.mode === 'guest');
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const turnstileHostRef = useRef<HTMLDivElement | null>(null);
+  const turnstileResetRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    if (!guestTurnstileRequired) {
+      setTurnstileToken(null);
+      turnstileResetRef.current = null;
+      return;
+    }
+    if (!TURNSTILE_SITE_KEY) return;
+    const host = turnstileHostRef.current;
+    if (!host) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        host.innerHTML = '';
+        setTurnstileToken(null);
+
+        const { reset } = await renderTurnstile(host, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: 'auto',
+          callback: (token) => {
+            if (!cancelled) setTurnstileToken(token);
+          },
+          'expired-callback': () => {
+            if (!cancelled) setTurnstileToken(null);
+          },
+          'error-callback': () => {
+            if (!cancelled) setTurnstileToken(null);
+          },
+        });
+
+        if (!cancelled) {
+          turnstileResetRef.current = () => reset();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setTurnstileToken(null);
+          setError(err instanceof Error ? err.message : 'CAPTCHA is unavailable.');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      turnstileResetRef.current = null;
+    };
+  }, [guestTurnstileRequired]);
+
+  const getCaptchaTokenOrThrow = (): string | null => {
+    if (!guestTurnstileRequired) return null;
+    if (!turnstileToken) {
+      throw new Error('Please complete the CAPTCHA to continue.');
+    }
+    return turnstileToken;
+  };
+
+  const resetCaptchaAfterSubmit = () => {
+    if (!guestTurnstileRequired) return;
+    setTurnstileToken(null);
+    turnstileResetRef.current?.();
+  };
 
   const setClockValue = (
     setter: Dispatch<SetStateAction<ClockInput>>,
@@ -264,6 +334,72 @@ export default function Home() {
     setIdentity(merged);
   };
 
+  const refreshSessionOrThrow = async (current: StoredIdentity): Promise<StoredIdentity> => {
+    if (current.mode !== 'token') return current;
+    const refreshResponse = await fetch(`${API_BASE}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: current.session.refreshToken }),
+    });
+    if (!refreshResponse.ok) {
+      throw new Error('Session expired. Please log in again.');
+    }
+    const refreshed = (await refreshResponse.json()) as AuthSuccessResponse;
+    const nextIdentity = setIdentityFromAuthSuccess(refreshed);
+    setIdentity(nextIdentity);
+    return nextIdentity;
+  };
+
+  const findActivePlayerGame = async (): Promise<string | null> => {
+    const { current, payload: identityPayload } = requireIdentityPayload();
+    const doLookup = async (payload: unknown) =>
+      fetch(`${API_BASE}/api/game/active`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identity: payload }),
+      });
+
+    let response = await doLookup(identityPayload);
+    if (!response.ok && response.status === 401) {
+      const nextIdentity = await refreshSessionOrThrow(current);
+      response = await doLookup(buildIdentityPayload(nextIdentity));
+    }
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = (await response.json()) as { code?: string | null };
+    return typeof data.code === 'string' && data.code.trim() ? data.code.trim().toUpperCase() : null;
+  };
+
+  const redirectToActiveGameIfAny = async (): Promise<boolean> => {
+    const activeCode = await findActivePlayerGame();
+    if (!activeCode) return false;
+    navigate(`/game/${activeCode}`, { replace: true });
+    return true;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkActivePlayerGame = async () => {
+      try {
+        const activeCode = await findActivePlayerGame();
+        if (!cancelled && activeCode) {
+          navigate(`/game/${activeCode}`, { replace: true });
+        }
+      } catch {
+        // Ignore lookup failures and keep the play screen usable.
+      }
+    };
+
+    void checkActivePlayerGame();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate]);
+
   const handleCreateGame = async () => {
     const canStartGame = sameClockSettings
       ? isClockNonZero(sharedClock)
@@ -280,16 +416,36 @@ export default function Home() {
     setLoadingAction('create');
     setError(null);
     try {
-      const { payload: identityPayload } = requireIdentityPayload();
+      if (await redirectToActiveGameIfAny()) {
+        return;
+      }
+      const { current, payload: identityPayload } = requireIdentityPayload();
+      const captchaToken = getCaptchaTokenOrThrow();
       const timeControl = buildTimeControl();
       const roomSettings = { hostColor, startColor, nextStartColor };
-      const response = await fetch(`${API_BASE}/api/game/create`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ timeControl, roomSettings, identity: identityPayload }),
-      });
+      const turnstilePart = captchaToken ? { turnstileToken: captchaToken } : {};
+      const doCreate = async (payload: unknown) =>
+        fetch(`${API_BASE}/api/game/create`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ timeControl, roomSettings, identity: payload, ...turnstilePart }),
+        });
+
+      let response = await doCreate(identityPayload);
 
       if (!response.ok) {
+        if (response.status === 401) {
+          const nextIdentity = await refreshSessionOrThrow(current);
+          response = await doCreate(buildIdentityPayload(nextIdentity));
+        }
+        if (response.status === 409) {
+          const errData = await response.json().catch(() => ({ error: 'Already in an ongoing game', code: null }));
+          const redirectCode = typeof errData.code === 'string' ? errData.code : null;
+          if (redirectCode) {
+            navigate(`/game/${redirectCode}`, { replace: true });
+            return;
+          }
+        }
         const errData = await response.json().catch(() => ({ error: 'Failed to create game' }));
         throw new Error(errData.error || 'Failed to create game');
       }
@@ -305,6 +461,7 @@ export default function Home() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
+      resetCaptchaAfterSubmit();
       setLoadingAction(null);
     }
   };
@@ -318,14 +475,26 @@ export default function Home() {
     setLoadingAction('join');
     setError(null);
     try {
-      const { payload: identityPayload } = requireIdentityPayload();
-      const response = await fetch(`${API_BASE}/api/game/join`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: code.trim().toUpperCase(), identity: identityPayload }),
-      });
+      if (await redirectToActiveGameIfAny()) {
+        return;
+      }
+      const { current, payload: identityPayload } = requireIdentityPayload();
+      const captchaToken = getCaptchaTokenOrThrow();
+      const turnstilePart = captchaToken ? { turnstileToken: captchaToken } : {};
+      const doJoin = async (payload: unknown) =>
+        fetch(`${API_BASE}/api/game/join`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: code.trim().toUpperCase(), identity: payload, ...turnstilePart }),
+        });
+
+      let response = await doJoin(identityPayload);
 
       if (!response.ok) {
+        if (response.status === 401) {
+          const nextIdentity = await refreshSessionOrThrow(current);
+          response = await doJoin(buildIdentityPayload(nextIdentity));
+        }
         const errData = await response.json().catch(() => ({ error: 'Failed to join game' }));
         throw new Error(errData.error || 'Failed to join game');
       }
@@ -342,6 +511,7 @@ export default function Home() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
+      resetCaptchaAfterSubmit();
       setLoadingAction(null);
     }
   };
@@ -352,7 +522,11 @@ export default function Home() {
     ? isClockNonZero(sharedClock)
     : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
   const clockInvalid = !canStartGame;
-  const createDisabled = isLoading || clockInvalid || !hasIdentity;
+  const createDisabled =
+    isLoading ||
+    clockInvalid ||
+    !hasIdentity ||
+    (guestTurnstileRequired && !turnstileToken);
   const createButtonLabel =
     loadingAction === 'create'
       ? 'Creating...'
@@ -507,6 +681,35 @@ export default function Home() {
             <div style={{ ...sectionLabelStyle, color: '#7a6543' }}>Quick Join</div>
             <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Join Game</div>
 
+            {guestTurnstileRequired && (
+              <div style={{ display: 'grid', gap: '8px' }}>
+                <div style={fieldLabelStyle}>CAPTCHA</div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'center',
+                    padding: '10px',
+                    borderRadius: '14px',
+                    background: 'rgba(255, 249, 239, 0.55)',
+                    boxShadow: 'inset 0 0 0 1px rgba(204, 184, 155, 0.65)',
+                  }}
+                >
+                  <div
+                    ref={turnstileHostRef}
+                    style={{
+                      minHeight: '66px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      borderRadius: '12px',
+                      overflow: 'hidden',
+                      background: 'transparent',
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
             <div style={{ display: 'grid', gap: '9px' }}>
               <div style={fieldLabelStyle}>Game Code</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
@@ -531,7 +734,7 @@ export default function Home() {
                 />
                 <button
                   onClick={handleJoinGame}
-                  disabled={isLoading || !hasIdentity}
+                  disabled={isLoading || !hasIdentity || (guestTurnstileRequired && !turnstileToken)}
                   style={{
                     padding: '10px 18px',
                     borderRadius: '999px',

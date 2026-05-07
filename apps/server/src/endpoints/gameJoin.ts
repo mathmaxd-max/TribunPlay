@@ -2,10 +2,13 @@ import { OpenAPIRoute, Str } from "chanfana";
 import { z } from "zod";
 import type { AppContext } from "../types";
 import { identitySchema, resolveIdentity, toHttpError } from "../lib/identity";
+import { verifyTurnstile } from "../lib/turnstile";
+import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
 
 const joinGameBodySchema = z.object({
   code: Str(),
   identity: identitySchema,
+  turnstileToken: Str({ required: false }),
 });
 
 export class GameJoin extends OpenAPIRoute {
@@ -55,10 +58,35 @@ export class GameJoin extends OpenAPIRoute {
     const env = c.env;
     const data = await this.getValidatedData<typeof this.schema>();
     const code = data.body.code.trim().toUpperCase();
+    const body = data.body;
+
+    const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
+    const guestRateBucket = `game_join_ip:${clientIp}`;
+
+    if (env.TURNSTILE_ENABLED === "true" && body.identity.mode === "guest") {
+      const captcha = await verifyTurnstile({
+        enabled: true,
+        secretKey: env.TURNSTILE_SECRET_KEY,
+        token: body.turnstileToken,
+        remoteIp: clientIp,
+      });
+      if (!captcha.success) {
+        return c.json({ error: captcha.error }, 400);
+      }
+    }
+
+    if (body.identity.mode === "guest") {
+      try {
+        // M01 additional non-invasive bot protection (guest): per-IP limiting on joining games.
+        await consumeAuthAttempt(env.DB, guestRateBucket);
+      } catch {
+        return c.json({ error: "Too many join attempts. Please try again later." }, 429);
+      }
+    }
 
     let resolvedIdentity;
     try {
-      resolvedIdentity = await resolveIdentity(env.DB, env.AUTH_TOKEN_SECRET, data.body.identity);
+      resolvedIdentity = await resolveIdentity(env.DB, env.AUTH_TOKEN_SECRET, body.identity);
     } catch (error) {
       const normalized = toHttpError(error);
       return c.json({ error: normalized.message }, normalized.status as 400 | 401 | 403 | 500 | 503);
@@ -157,6 +185,10 @@ export class GameJoin extends OpenAPIRoute {
 
     const url = new URL(c.req.url);
     const wsUrl = `ws://${url.host}/ws/game/${gameId}?token=${token}`;
+
+    if (body.identity.mode === "guest") {
+      await resetAuthAttempt(env.DB, guestRateBucket);
+    }
 
     return {
       gameId,

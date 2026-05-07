@@ -12,6 +12,7 @@ export default function Landing() {
 
   const params = new URLSearchParams(location.search);
   const nextPath = resolveNextPath(params.get("next"), "/hub");
+  const reason = params.get("reason");
 
   const handleAuthSuccess = (payload: AuthSuccessResponse) => {
     setIdentityFromAuthSuccess(payload);
@@ -76,6 +77,22 @@ export default function Landing() {
         <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
           Log in with email/password, optionally use Google, or continue as a guest to start playing.
         </div>
+
+        {reason === "session_expired" && (
+          <div
+            role="alert"
+            style={{
+              borderRadius: "12px",
+              border: "2px solid #b9833b",
+              background: "rgba(255, 243, 214, 0.9)",
+              color: "#5c441c",
+              padding: "12px 14px",
+              fontWeight: 700,
+            }}
+          >
+            Your session expired. Please log in again.
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "14px", alignItems: "start" }}>
           <AuthPanel googleClientId={googleClientId} onAuthSuccess={handleAuthSuccess} />

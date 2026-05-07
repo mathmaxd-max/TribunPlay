@@ -5,6 +5,12 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    // Enable Turnstile verification on auth endpoints.
+    // Secret key MUST be set as a Wrangler secret:
+    //   wrangler secret put TURNSTILE_SECRET_KEY
+    "TURNSTILE_ENABLED": "false"
+  },
   "durable_objects": {
     "bindings": [
       {
