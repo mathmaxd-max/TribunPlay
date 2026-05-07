@@ -721,7 +721,7 @@ export default function Home() {
                     display: 'flex',
                     justifyContent: 'center',
                     padding: '10px',
-                    borderRadius: '14px',
+                    borderRadius: 0,
                     background: 'rgba(255, 249, 239, 0.55)',
                     boxShadow: 'inset 0 0 0 1px rgba(204, 184, 155, 0.65)',
                   }}
@@ -733,7 +733,7 @@ export default function Home() {
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      borderRadius: '12px',
+                      borderRadius: 0,
                       overflow: 'hidden',
                       background: 'transparent',
                     }}
