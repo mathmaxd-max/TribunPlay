@@ -3,6 +3,8 @@ import Home from "./pages/Home";
 import Game from "./pages/Game";
 import Landing from "./pages/Landing";
 import Hub from "./pages/Hub";
+import History from "./pages/History";
+import Review from "./pages/Review";
 import SetupExplorer from "./pages/SetupExplorer";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
@@ -56,6 +58,22 @@ function App() {
           element={
             <RequireIdentity>
               <Home />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/history"
+          element={
+            <RequireIdentity>
+              <History />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/review/:gameId"
+          element={
+            <RequireIdentity>
+              <Review />
             </RequireIdentity>
           }
         />

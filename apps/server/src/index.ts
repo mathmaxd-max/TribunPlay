@@ -11,6 +11,8 @@ import { AuthSignup } from "./endpoints/authSignup";
 import { AuthGoogle } from "./endpoints/authGoogle";
 import { AuthRefresh } from "./endpoints/authRefresh";
 import { AuthLogout } from "./endpoints/authLogout";
+import { HistoryList } from "./endpoints/historyList";
+import { HistoryGame } from "./endpoints/historyGame";
 import { GameRoom } from "./durable-objects/GameRoom";
 
 // Start a Hono app
@@ -36,6 +38,8 @@ openapi.post("/api/auth/signup", AuthSignup);
 openapi.post("/api/auth/google", AuthGoogle);
 openapi.post("/api/auth/refresh", AuthRefresh);
 openapi.post("/api/auth/logout", AuthLogout);
+openapi.get("/api/history", HistoryList);
+openapi.get("/api/history/:gameId", HistoryGame);
 
 // WebSocket health endpoint.
 // In local dev, immediately closing after accept can cause Wrangler to surface noisy

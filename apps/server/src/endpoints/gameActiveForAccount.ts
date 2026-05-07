@@ -52,32 +52,26 @@ export class GameActiveForAccount extends OpenAPIRoute {
     const accountId = resolvedIdentity.accountId;
     const row = await env.DB
       .prepare(
-        `SELECT id, code, status, black_player_id, white_player_id
-         FROM games
-         WHERE status IN ('lobby', 'active')
-           AND (black_player_id = ? OR white_player_id = ?)
-         ORDER BY created_at DESC
+        `SELECT g.id, g.code, g.status, gp.seat
+         FROM games g
+         INNER JOIN game_participants gp ON gp.game_id = g.id
+         WHERE g.status IN ('lobby', 'active')
+           AND gp.account_id = ?
+         ORDER BY g.created_at DESC
          LIMIT 1`,
       )
-      .bind(accountId, accountId)
+      .bind(accountId)
       .first<{
         id: string;
         code: string;
         status: string;
-        black_player_id: string | null;
-        white_player_id: string | null;
+        seat: "black" | "white";
       }>();
 
     if (!row) {
       return { code: null, gameId: null, status: null, seat: null };
     }
 
-    const seat = row.black_player_id === accountId ? "black" : row.white_player_id === accountId ? "white" : null;
-    if (!seat) {
-      return { code: null, gameId: null, status: null, seat: null };
-    }
-
-    return { code: row.code, gameId: row.id, status: row.status, seat };
+    return { code: row.code, gameId: row.id, status: row.status, seat: row.seat };
   }
 }
-

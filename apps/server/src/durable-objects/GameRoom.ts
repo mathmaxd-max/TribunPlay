@@ -102,6 +102,8 @@ export class GameRoom implements DurableObject {
 	private legalSet: Set<number> = new Set();
 	private actionLog: number[] = [];
 	private supportsDrawOfferBlocked: boolean | null = null;
+	private isGuestOnlyMatchCache: boolean | null = null;
+	private hasPurgedGuestOnlyHistory = false;
 
 	/**
 	 * Guardrails for draw offer UX:
@@ -354,6 +356,9 @@ export class GameRoom implements DurableObject {
 				wasClean: event.wasClean,
 			});
 			this.broadcastRoomUpdate();
+			if (this.roomStatus === "ended") {
+				void this.purgeGuestOnlyHistoryIfRequired("ws.close");
+			}
 		});
 	}
 
@@ -533,6 +538,45 @@ export class GameRoom implements DurableObject {
 			this.supportsDrawOfferBlocked = false;
 		}
 		return this.supportsDrawOfferBlocked;
+	}
+
+	private async isGuestOnlyMatch(): Promise<boolean> {
+		if (this.isGuestOnlyMatchCache !== null) {
+			return this.isGuestOnlyMatchCache;
+		}
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+		const row = await this.env.DB
+			.prepare(
+				`SELECT
+				   black_account.provider AS black_provider,
+				   white_account.provider AS white_provider
+				 FROM games g
+				 LEFT JOIN accounts black_account ON black_account.id = g.black_player_id
+				 LEFT JOIN accounts white_account ON white_account.id = g.white_player_id
+				 WHERE g.id = ?`,
+			)
+			.bind(this.gameId)
+			.first<{ black_provider: string | null; white_provider: string | null }>();
+
+		this.isGuestOnlyMatchCache = row?.black_provider === "guest" && row?.white_provider === "guest";
+		return this.isGuestOnlyMatchCache;
+	}
+
+	private async purgeGuestOnlyHistoryIfRequired(trigger: string): Promise<void> {
+		if (this.hasPurgedGuestOnlyHistory) return;
+		if (!this.gameId) return;
+		if (!(await this.isGuestOnlyMatch())) return;
+
+		// M04 guardrail: guest-vs-guest games must not leave durable DB history rows.
+		await this.env.DB.batch([
+			this.env.DB.prepare("DELETE FROM game_actions WHERE game_id = ?").bind(this.gameId),
+			this.env.DB.prepare("DELETE FROM game_participants WHERE game_id = ?").bind(this.gameId),
+			this.env.DB.prepare("DELETE FROM games WHERE id = ?").bind(this.gameId),
+		]);
+		this.hasPurgedGuestOnlyHistory = true;
+		this.logGame("guest.cleanup.purged", { trigger });
 	}
 
 	private async sendSync(ws: WebSocket, role: "black" | "white" | "spectator"): Promise<void> {
@@ -961,6 +1005,7 @@ export class GameRoom implements DurableObject {
 		const endOpcode = gameEnded ? opcode : null;
 		const endReason = gameEnded && opcode === 11 ? fields.endReason : null;
 		const nextStatus = gameEnded ? "ended" : "active";
+		const endedAtIso = gameEnded ? new Date().toISOString() : null;
 		
 		// Use INSERT OR IGNORE to handle race conditions
 		// Insert first and check if it succeeded before updating game state
@@ -986,7 +1031,8 @@ export class GameRoom implements DurableObject {
 		if (supportsBlocked) {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
-				   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
+				   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, started_at = COALESCE(started_at, ?),
+				   ended_at = CASE WHEN ? = 'ended' THEN COALESCE(ended_at, ?) ELSE ended_at END WHERE id = ?`
 			).bind(
 				newState.ply,
 				newState.turn,
@@ -999,12 +1045,15 @@ export class GameRoom implements DurableObject {
 				endOpcode,
 				endReason,
 				startedAtIso,
+				nextStatus,
+				endedAtIso,
 				gameId
 			).run();
 		} else {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
-				   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`
+				   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, started_at = COALESCE(started_at, ?),
+				   ended_at = CASE WHEN ? = 'ended' THEN COALESCE(ended_at, ?) ELSE ended_at END WHERE id = ?`
 			).bind(
 				newState.ply,
 				newState.turn,
@@ -1016,6 +1065,8 @@ export class GameRoom implements DurableObject {
 				endOpcode,
 				endReason,
 				startedAtIso,
+				nextStatus,
+				endedAtIso,
 				gameId
 			).run();
 		}
@@ -1042,6 +1093,7 @@ export class GameRoom implements DurableObject {
 			this.turnStartTime = null;
 			this.rematchOffers = { black: false, white: false };
 			this.broadcastRoomUpdate();
+			await this.purgeGuestOnlyHistoryIfRequired("action.gameEnded");
 		}
 		const endedForNoMoves = await this.maybeEndOnNoMoves(gameId, legalList);
 		if (!endedForNoMoves) {
@@ -1270,15 +1322,17 @@ export class GameRoom implements DurableObject {
 			this.gameState = endedState;
 			this.roomStatus = "ended";
 			this.turnStartTime = null;
+			await this.purgeGuestOnlyHistoryIfRequired("end.no_moves.idempotent");
 			await this.scheduleNextAlarm();
 			return;
 		}
 		
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		const nowIso = new Date().toISOString();
 		if (supportsBlocked) {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
-			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
 			).bind(
 				endedState.ply,
 				endedState.turn,
@@ -1290,12 +1344,13 @@ export class GameRoom implements DurableObject {
 				endedState.winner ?? null,
 				11,
 				1,
+				nowIso,
 				gameId
 			).run();
 		} else {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
-			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
 			).bind(
 				endedState.ply,
 				endedState.turn,
@@ -1306,6 +1361,7 @@ export class GameRoom implements DurableObject {
 				endedState.winner ?? null,
 				11,
 				1,
+				nowIso,
 				gameId
 			).run();
 		}
@@ -1321,6 +1377,7 @@ export class GameRoom implements DurableObject {
 		this.turnStartTime = null;
 		this.rematchOffers = { black: false, white: false };
 		this.broadcastRoomUpdate();
+		await this.purgeGuestOnlyHistoryIfRequired("end.no_moves");
 	}
 
 	private async applyTimeoutEnd(loserColor: engine.Color, gameId: string): Promise<void> {
@@ -1377,15 +1434,17 @@ export class GameRoom implements DurableObject {
 			this.gameState = endedState;
 			this.roomStatus = "ended";
 			this.turnStartTime = null;
+			await this.purgeGuestOnlyHistoryIfRequired("end.timeout.idempotent");
 			await this.scheduleNextAlarm();
 			return;
 		}
 		
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		const nowIso = new Date().toISOString();
 		if (supportsBlocked) {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
-			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
 			).bind(
 				endedState.ply,
 				endedState.turn,
@@ -1397,12 +1456,13 @@ export class GameRoom implements DurableObject {
 				endedState.winner ?? null,
 				11,
 				2,
+				nowIso,
 				gameId
 			).run();
 		} else {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
-			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
 			).bind(
 				endedState.ply,
 				endedState.turn,
@@ -1413,6 +1473,7 @@ export class GameRoom implements DurableObject {
 				endedState.winner ?? null,
 				11,
 				2,
+				nowIso,
 				gameId
 			).run();
 		}
@@ -1428,6 +1489,7 @@ export class GameRoom implements DurableObject {
 		this.turnStartTime = null;
 		this.rematchOffers = { black: false, white: false };
 		this.broadcastRoomUpdate();
+		await this.purgeGuestOnlyHistoryIfRequired("end.timeout");
 	}
 
 	private getClockSnapshot(
@@ -1543,15 +1605,17 @@ export class GameRoom implements DurableObject {
 			this.gameState = endedState;
 			this.roomStatus = "ended";
 			this.turnStartTime = null;
+			await this.purgeGuestOnlyHistoryIfRequired("end.max_game.idempotent");
 			await this.scheduleNextAlarm();
 			return;
 		}
 		
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		const nowIso = new Date().toISOString();
 		if (supportsBlocked) {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
-			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
 			).bind(
 				endedState.ply,
 				endedState.turn,
@@ -1563,12 +1627,13 @@ export class GameRoom implements DurableObject {
 				endedState.winner ?? null,
 				11,
 				3,
+				nowIso,
 				gameId
 			).run();
 		} else {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
-			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ? WHERE id = ?`
+			   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
 			).bind(
 				endedState.ply,
 				endedState.turn,
@@ -1579,6 +1644,7 @@ export class GameRoom implements DurableObject {
 				endedState.winner ?? null,
 				11,
 				3,
+				nowIso,
 				gameId
 			).run();
 		}
@@ -1594,6 +1660,7 @@ export class GameRoom implements DurableObject {
 		this.turnStartTime = null;
 		this.rematchOffers = { black: false, white: false };
 		this.broadcastRoomUpdate();
+		await this.purgeGuestOnlyHistoryIfRequired("end.max_game");
 	}
 
 	async alarm(): Promise<void> {

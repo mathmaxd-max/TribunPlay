@@ -735,3 +735,47 @@ export const buildOpponentMoveTimeline = (params: BuildTimelineParams): Opponent
 
   return flattenPhases(opcode, changedCids, phases, fallbackNotes);
 };
+
+export const reverseOpponentMoveTimeline = (timeline: OpponentMoveTimeline): OpponentMoveTimeline => {
+  const totalDurationMs = timeline.totalDurationMs;
+  const reversedPrimitives = timeline.primitives
+    .map((primitive, index) => {
+      const reversedStartMs = Math.max(0, totalDurationMs - (primitive.startMs + primitive.durationMs));
+      return {
+        ...primitive,
+        id: `${primitive.id}-rev-${index}`,
+        from: primitive.to,
+        to: primitive.from,
+        fromScale: primitive.toScale,
+        toScale: primitive.fromScale,
+        fromOpacity: primitive.toOpacity,
+        toOpacity: primitive.fromOpacity,
+        startMs: reversedStartMs,
+      };
+    })
+    .sort((a, b) => a.startMs - b.startMs);
+
+  const hidden = new Set<number>();
+  for (const primitive of reversedPrimitives) {
+    if (primitive.kind === "numberMove") continue;
+    if (
+      primitive.kind === "translate" ||
+      primitive.kind === "translateFromPrimary" ||
+      primitive.kind === "spawn" ||
+      primitive.kind === "morphLiberate" ||
+      primitive.kind === "morphEnslave"
+    ) {
+      if (primitive.to.type === "tile") hidden.add(primitive.to.cid);
+    }
+  }
+
+  return {
+    opcode: timeline.opcode,
+    changedCids: [...timeline.changedCids],
+    phases: [...timeline.phases].reverse(),
+    primitives: reversedPrimitives,
+    hiddenStaticUnitCids: Array.from(hidden),
+    totalDurationMs,
+    fallbackNotes: [...timeline.fallbackNotes, "Reverse replay timeline generated from forward primitives."],
+  };
+};
