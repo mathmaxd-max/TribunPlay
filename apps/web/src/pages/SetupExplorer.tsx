@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
 import { UnitGlyph as SharedUnitGlyph } from "../ui/UnitGlyph";
+import { BoardSfxControls } from "../audio/BoardSfxControls";
+import { useBoardSfx } from "../audio/boardSfx";
 import {
   decodeCodeDetailed,
   encodePositionDetailed,
@@ -343,6 +345,7 @@ function SetupUnitGlyph(props: { cell: TileCell; viewMode: UnitViewMode; side: U
 }
 
 export default function SetupExplorer() {
+  const { muted: sfxMuted, volume: sfxVolume, playSfx, setVolume: setSfxVolume, toggleMuted: toggleSfxMuted } = useBoardSfx();
   const [brush, setBrush] = useState<Brush>("1");
   const [tribunBrush, setTribunBrush] = useState(false);
   const [onlyEmpty, setOnlyEmpty] = useState(true);
@@ -357,6 +360,7 @@ export default function SetupExplorer() {
     lastCid: null,
   });
   const userFlippedRef = useRef(false);
+  const pendingBoardInteractSoundRef = useRef(false);
 
   const [ownCells, setOwnCells] = useState<TileCell[]>(makeEmptyCells);
   const [ownHashInput, setOwnHashInput] = useState("");
@@ -366,6 +370,12 @@ export default function SetupExplorer() {
   const [enemyCells, setEnemyCells] = useState<TileCell[]>(makeEmptyCells);
   const [enemyHashInput, setEnemyHashInput] = useState("");
   const [enemyHashStatus, setEnemyHashStatus] = useState<HashStatus>("idle");
+
+  useEffect(() => {
+    if (!pendingBoardInteractSoundRef.current) return;
+    pendingBoardInteractSoundRef.current = false;
+    playSfx("boardInteract");
+  }, [ownCells, playSfx]);
 
   // Mapping between setup-index space and board CIDs depends on which player perspective we are displaying.
   // Important: we keep the underlying `ownCells[]` indexing/hash encoding stable; only which CID each index
@@ -415,7 +425,7 @@ export default function SetupExplorer() {
     if (counts.tribun !== 1) {
       problems.push({
         kind: "TRIBUN_COUNT",
-        message: `Tribun count must be 1 (currently ${counts.tribun}).`,
+        message: counts.tribun === 0 ? "Place a Tribun unit." : `Tribun count must be 1 (currently ${counts.tribun}).`,
         details: { tribunCount: counts.tribun, tribunIndices },
       });
     }
@@ -445,6 +455,14 @@ export default function SetupExplorer() {
         ? ownCells[tribunIndices[0]].height
         : tribunIndices.reduce((acc, idx) => acc + ownCells[idx].height, 0);
     const used = counts.ones + 2 * counts.twos + 3 * counts.threes + tribHeightBudget;
+    if (used < 3) {
+      const missingHeight = 3 - used;
+      problems.push({
+        kind: "MIN_TOTAL_HEIGHT",
+        message: `Total height must be at least 3 (currently ${used}). Add at least +${missingHeight} height.`,
+        details: { used, missingHeight },
+      });
+    }
     {
       // Payment rules (UI counts exclude the tribun tile itself).
       const hasOneTribun = tribunIndices.length === 1;
@@ -458,13 +476,25 @@ export default function SetupExplorer() {
       const ok3PayVariantB = tH === 1 ? counts.twos >= 2 * counts.threes : counts.twos >= 2 * counts.threes;
       const ok3Pay = tH === 1 ? ok3PayVariantA || ok3PayVariantB : ok3PayVariantA;
       if (!ok3Pay) {
+        const requiredTwos = 2 * counts.threes;
+        // 1T only: Variant A treats one 2-unit as “free” (effectively #2-1), Variant B does not.
+        const needMore2VariantA = tH === 1 ? Math.max(0, (requiredTwos + 1) - counts.twos) : Math.max(0, requiredTwos - counts.twos);
+        const needMore2VariantB = Math.max(0, requiredTwos - counts.twos);
         problems.push({
           kind: "PAYMENT_3",
           message:
             tH === 1
-              ? `3-payments failed for both 1T variants: need (#2-1 >= 2*#3) or (#2 >= 2*#3) (have #2=${counts.twos}, #3=${counts.threes}).`
-              : `3-payments failed: need #2 >= 2*#3 (have #2=${counts.twos}, #3=${counts.threes}).`,
-          details: { n2: counts.twos, n3: counts.threes, tribunHeight: tH, okVariantA: ok3PayVariantA, okVariantB: ok3PayVariantB },
+              ? `3-payments failed for both 1T variants, you need more 2 units: +${needMore2VariantA} or +${needMore2VariantB}.`
+              : `3-payments failed, you need more 2 units: +${needMore2VariantB}.`,
+          details: {
+            n2: counts.twos,
+            n3: counts.threes,
+            tribunHeight: tH,
+            okVariantA: ok3PayVariantA,
+            okVariantB: ok3PayVariantB,
+            needMore2VariantA,
+            needMore2VariantB,
+          },
         });
       }
 
@@ -475,36 +505,41 @@ export default function SetupExplorer() {
         // Variant B: two free 1-high -> (#1-3) >= #2, but #1 includes the tribun itself => counts.ones >= #2+2
         const okFree11 = counts.ones >= counts.twos + 2;
         if (!okFree2 && !okFree11) {
+          const needMore1VariantA = Math.max(0, (counts.twos - 1) - counts.ones);
+          const needMore1VariantB = Math.max(0, (counts.twos + 2) - counts.ones);
           problems.push({
             kind: "PAYMENT_2",
-            message: `2-payments failed for both 1T variants: need (#1 >= #2-1) or (#1 >= #2+2) (have #1=${counts.ones}, #2=${counts.twos}).`,
-            details: { n1: counts.ones, n2: counts.twos, okFree2, okFree11 },
+            message: `2-payments failed for both 1T variants, you need more 1 units: +${needMore1VariantA} or +${needMore1VariantB}.`,
+            details: { n1: counts.ones, n2: counts.twos, okFree2, okFree11, needMore1VariantA, needMore1VariantB },
           });
         }
       } else if (tH === 2) {
         // 2T: one free 1-high => (#1-1) >= #2, but #1 includes the tribun itself => counts.ones >= #2
         const ok = counts.ones >= counts.twos;
         if (!ok) {
+          const needMore1 = Math.max(0, counts.twos - counts.ones);
           problems.push({
             kind: "PAYMENT_2",
-            message: `2-payments failed for 2T: need #1 >= #2 (have #1=${counts.ones}, #2=${counts.twos}).`,
-            details: { n1: counts.ones, n2: counts.twos, tribunHeight: tH },
+            message: `2-payments failed for 2T, you need more 1 units: +${needMore1}.`,
+            details: { n1: counts.ones, n2: counts.twos, tribunHeight: tH, needMore1 },
           });
         }
       } else {
         // No Tribun (pre-encoding) or 3T: require #1 >= #2.
         const ok = counts.ones >= counts.twos;
         if (!ok) {
+          const needMore1 = Math.max(0, counts.twos - counts.ones);
           problems.push({
             kind: "PAYMENT_2",
-            message: `2-payments failed: need #1 >= #2 (have #1=${counts.ones}, #2=${counts.twos}).`,
-            details: { n1: counts.ones, n2: counts.twos, tribunHeight: tH },
+            message: `2-payments failed, you need more 1 units: +${needMore1}.`,
+            details: { n1: counts.ones, n2: counts.twos, tribunHeight: tH, needMore1 },
           });
         }
       }
     }
 
     const symViolations = collectSymmetryViolations(ownCells);
+    const symmetryByMessage = new Map<string, { messageBase: string; count: number }>();
     for (const v of symViolations) {
       // `v.kind` is like "1", "2", "3", "1T", ...; we only want the height.
       const height = Number(v.kind[0]);
@@ -512,10 +547,17 @@ export default function SetupExplorer() {
       // Triangle labeling is defined in "own/canonical" space; when viewing as White, invert the displayed notion.
       if (playerColor === "white") effectiveOrientation = effectiveOrientation === "UP" ? "DOWN" : "UP";
       const glyph = effectiveOrientation === "UP" ? "△" : "▽";
+      const messageBase = `Symmetry: ${height} ${glyph}`;
+      const existing = symmetryByMessage.get(messageBase);
+      if (existing) existing.count += 1;
+      else symmetryByMessage.set(messageBase, { messageBase, count: 1 });
+    }
+    for (const entry of symmetryByMessage.values()) {
+      const suffix = entry.count > 1 ? ` ×${entry.count}` : "";
       problems.push({
         kind: "SYMMETRY",
-        message: `Symmetry: ${height}${glyph}`,
-        details: v,
+        message: `${entry.messageBase}${suffix}`,
+        details: { count: entry.count },
       });
     }
 
@@ -688,17 +730,24 @@ export default function SetupExplorer() {
     setOwnCells((prev) => {
       const next = prev.map((cell) => ({ ...cell }));
       if (brush === "eraser") {
+        if (!cellOccupied(prev[setupIndex])) return prev;
         next[setupIndex] = { ...EMPTY_CELL };
+        pendingBoardInteractSoundRef.current = true;
         return next;
       }
       const height = Number(brush) as 1 | 2 | 3;
       if (!canPlaceOnIndex(setupIndex, height, tribunBrush, onlyEmpty, prev)) return prev;
+      const currentCell = prev[setupIndex];
+      const currentMatchesBrush = currentCell.height === height && currentCell.tribun === tribunBrush;
+      const clearingOtherTribun = tribunBrush && prev.some((cell, index) => index !== setupIndex && cell.tribun);
+      if (currentMatchesBrush && !clearingOtherTribun) return prev;
       if (tribunBrush) {
         for (let i = 0; i < next.length; i++) {
           if (next[i].tribun) next[i] = { ...EMPTY_CELL };
         }
       }
       next[setupIndex] = { height, tribun: tribunBrush };
+      pendingBoardInteractSoundRef.current = true;
       return next;
     });
   };
@@ -710,6 +759,7 @@ export default function SetupExplorer() {
       if (!cellOccupied(prev[setupIndex])) return prev;
       const next = prev.map((cell) => ({ ...cell }));
       next[setupIndex] = { ...EMPTY_CELL };
+      pendingBoardInteractSoundRef.current = true;
       return next;
     });
   };
@@ -770,7 +820,10 @@ export default function SetupExplorer() {
     setOwnHashStatus(status);
     if (status === "valid") {
       const decoded = decodeCodeDetailed(value);
-      if (decoded.ok && decoded.setup) setOwnCells(setupToCells(decoded.setup));
+      if (decoded.ok && decoded.setup) {
+        pendingBoardInteractSoundRef.current = false;
+        setOwnCells(setupToCells(decoded.setup));
+      }
     }
   };
 
@@ -894,23 +947,31 @@ export default function SetupExplorer() {
           </div>
           <div style={{ fontSize: "20px", fontWeight: 400 }}>Setup Explorer</div>
         </div>
-        <Link
-          to="/hub"
-          style={{
-            padding: "8px 14px",
-            borderRadius: "999px",
-            border: "2px solid #6f5a38",
-            background: "#f2d9b2",
-            color: "#2a2218",
-            fontWeight: 700,
-            textDecoration: "none",
-            letterSpacing: "1px",
-            textTransform: "uppercase",
-            fontSize: "12px",
-          }}
-        >
-          Back to Hub
-        </Link>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <BoardSfxControls
+            muted={sfxMuted}
+            volume={sfxVolume}
+            onToggleMuted={toggleSfxMuted}
+            onVolumeChange={setSfxVolume}
+          />
+          <Link
+            to="/hub"
+            style={{
+              padding: "8px 14px",
+              borderRadius: "999px",
+              border: "2px solid #6f5a38",
+              background: "#f2d9b2",
+              color: "#2a2218",
+              fontWeight: 700,
+              textDecoration: "none",
+              letterSpacing: "1px",
+              textTransform: "uppercase",
+              fontSize: "12px",
+            }}
+          >
+            Back to Hub
+          </Link>
+        </div>
       </header>
 
       <main style={{ width: "100%", maxWidth: "1180px", margin: "0 auto", padding: "16px 12px 20px", display: "grid", gap: "12px" }}>
