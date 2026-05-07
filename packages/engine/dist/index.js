@@ -224,6 +224,28 @@ export function unpackBoard(b64) {
     }
     return bytes;
 }
+export function deriveBoardDelta(beforeBoard, afterBoard) {
+    if (beforeBoard.length !== afterBoard.length) {
+        throw new Error(`Board length mismatch while deriving delta: before=${beforeBoard.length}, after=${afterBoard.length}`);
+    }
+    const changedCids = [];
+    const tileChanges = [];
+    for (let cid = 0; cid < beforeBoard.length; cid++) {
+        const beforeByte = beforeBoard[cid];
+        const afterByte = afterBoard[cid];
+        if (beforeByte === afterByte)
+            continue;
+        changedCids.push(cid);
+        tileChanges.push({
+            cid,
+            beforeByte,
+            afterByte,
+            beforeUnit: unitByteToUnit(beforeByte),
+            afterUnit: unitByteToUnit(afterByte),
+        });
+    }
+    return { changedCids, tileChanges };
+}
 // Neighbor vectors
 const NEIGHBOR_VECTORS = [
     [1, 1], // 0: up

@@ -13,6 +13,23 @@ const outline4 = new URL("../assets/game/units/icons/_4.webp", import.meta.url).
 const outline6 = new URL("../assets/game/units/icons/_6.webp", import.meta.url).href;
 const outline8 = new URL("../assets/game/units/icons/_8.webp", import.meta.url).href;
 const outlineT = new URL("../assets/game/units/icons/_T.webp", import.meta.url).href;
+const ALL_UNIT_ICON_URLS = [
+  icon1,
+  icon2,
+  icon3,
+  icon4,
+  icon6,
+  icon8,
+  iconT,
+  outline1,
+  outline2,
+  outline3,
+  outline4,
+  outline6,
+  outline8,
+  outlineT,
+] as const;
+let preloadPromise: Promise<void> | null = null;
 
 export type UnitIconRequest = {
   height: number;
@@ -53,3 +70,24 @@ export function resolveUnitIconUrl(req: UnitIconRequest): string | null {
   }
 }
 
+export function preloadAllUnitIcons(): Promise<void> {
+  if (preloadPromise) return preloadPromise;
+  if (typeof Image === "undefined") {
+    preloadPromise = Promise.resolve();
+    return preloadPromise;
+  }
+
+  preloadPromise = Promise.all(
+    ALL_UNIT_ICON_URLS.map(
+      (url) =>
+        new Promise<void>((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve();
+          img.onerror = () => resolve();
+          img.src = url;
+        }),
+    ),
+  ).then(() => undefined);
+
+  return preloadPromise;
+}

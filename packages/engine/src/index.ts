@@ -285,6 +285,46 @@ export function unpackBoard(b64: string): Uint8Array {
   return bytes;
 }
 
+export interface TileChange {
+  cid: number;
+  beforeByte: number;
+  afterByte: number;
+  beforeUnit: Unit | null;
+  afterUnit: Unit | null;
+}
+
+export interface BoardDelta {
+  changedCids: number[];
+  tileChanges: TileChange[];
+}
+
+export function deriveBoardDelta(beforeBoard: Uint8Array, afterBoard: Uint8Array): BoardDelta {
+  if (beforeBoard.length !== afterBoard.length) {
+    throw new Error(
+      `Board length mismatch while deriving delta: before=${beforeBoard.length}, after=${afterBoard.length}`,
+    );
+  }
+
+  const changedCids: number[] = [];
+  const tileChanges: TileChange[] = [];
+
+  for (let cid = 0; cid < beforeBoard.length; cid++) {
+    const beforeByte = beforeBoard[cid];
+    const afterByte = afterBoard[cid];
+    if (beforeByte === afterByte) continue;
+    changedCids.push(cid);
+    tileChanges.push({
+      cid,
+      beforeByte,
+      afterByte,
+      beforeUnit: unitByteToUnit(beforeByte),
+      afterUnit: unitByteToUnit(afterByte),
+    });
+  }
+
+  return { changedCids, tileChanges };
+}
+
 // Neighbor vectors
 const NEIGHBOR_VECTORS = [
   [1, 1],   // 0: up

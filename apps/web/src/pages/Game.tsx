@@ -7,6 +7,14 @@ import { buildCache } from '../ui/cache/buildCache';
 import type { UiMoveCache } from '../ui/cache/UiMoveCache';
 import { SplitUnitGlyph, UnitGlyph } from '../ui/UnitGlyph';
 import {
+  OPPONENT_MOVE_EASING,
+  buildOpponentMoveTimeline,
+  cubicEaseInOut,
+  type OpponentMoveTimeline,
+  type PositionRef,
+  type VisualUnit,
+} from '../ui/animations/opponentMoveTimeline';
+import {
   buildIdentityPayload,
   getStoredIdentity,
   mergeIdentityFromParticipant,
@@ -70,6 +78,25 @@ type UIState =
   | { type: 'empty'; centerCid: number; donors: Map<number, number>; optionIndex: number; symmetry?: EmptySymmetryState }
   | { type: 'own_primary'; originCid: number; targetCid: number | null; optionIndex: number }
   | { type: 'own_secondary'; originCid: number; allocations: number[] };
+
+type TilePixelData = {
+  cid: number;
+  x: number;
+  y: number;
+  displayX: number;
+  displayY: number;
+  centerX: number;
+  centerY: number;
+  hexX: number;
+  hexY: number;
+};
+
+type ActiveOpponentAnimation = {
+  id: number;
+  timeline: OpponentMoveTimeline;
+  startedAtMs: number;
+  nowMs: number;
+};
 
 interface GameSnapshot {
   boardB64: string;
@@ -291,6 +318,7 @@ export default function Game() {
   const msgSeqRef = useRef(0);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [role, setRole] = useState<Role | null>(null);
+  const roleRef = useRef<Role | null>(null);
   const [roomStatus, setRoomStatus] = useState<RoomStatus>('lobby');
   const [roomSettings, setRoomSettings] = useState<RoomSettings>({ ...DEFAULT_ROOM_SETTINGS });
   const [roomPresence, setRoomPresence] = useState<RoomPresence>({
@@ -335,6 +363,9 @@ export default function Game() {
   // UI State Machine
   const [uiState, setUiState] = useState<UIState>({ type: 'idle' });
   const [validator, setValidator] = useState<LegalBloomValidator | null>(null);
+  const [lastOpponentChangedTiles, setLastOpponentChangedTiles] = useState<number[]>([]);
+  const [activeOpponentAnimation, setActiveOpponentAnimation] = useState<ActiveOpponentAnimation | null>(null);
+  const opponentAnimationIdRef = useRef(0);
   
   const cache = useMemo(() => {
     if (!gameState || !validator) return null;
@@ -620,6 +651,36 @@ export default function Game() {
   useEffect(() => {
     gameStateRef.current = gameState;
   }, [gameState]);
+
+  useEffect(() => {
+    roleRef.current = role;
+  }, [role]);
+
+  useEffect(() => {
+    if (!activeOpponentAnimation) return;
+    if (activeOpponentAnimation.timeline.totalDurationMs <= 0) {
+      setActiveOpponentAnimation(null);
+      return;
+    }
+
+    let rafId = 0;
+    const animationId = activeOpponentAnimation.id;
+
+    const tick = (timestampMs: number) => {
+      setActiveOpponentAnimation((previous) => {
+        if (!previous || previous.id !== animationId) return previous;
+        if (timestampMs - previous.startedAtMs >= previous.timeline.totalDurationMs) {
+          return null;
+        }
+        if (timestampMs <= previous.nowMs) return previous;
+        return { ...previous, nowMs: timestampMs };
+      });
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [activeOpponentAnimation?.id, activeOpponentAnimation?.timeline.totalDurationMs]);
 
   useEffect(() => {
     const info = resolveEndInfo({
@@ -1042,6 +1103,8 @@ export default function Game() {
               gameStateRef.current = state;
               setGameState(state);
               setUiState({ type: 'idle' });
+              setLastOpponentChangedTiles([]);
+              setActiveOpponentAnimation(null);
               lastTurnRef.current = snapshot.turn;
               setRoomStatus(nextRoomStatus);
               setRoomSettings(nextRoomSettings);
@@ -1156,6 +1219,45 @@ export default function Game() {
               const previousState = gameStateRef.current;
               if (previousState) {
                 const newState = engine.applyAction(previousState, actionWord);
+                const boardDelta = engine.deriveBoardDelta(previousState.board, newState.board);
+                const currentRole = roleRef.current;
+                const myColor: engine.Color | null = currentRole === 'black' ? 0 : currentRole === 'white' ? 1 : null;
+                const actionActorColor = previousState.turn;
+                const isOpponentCommittedMove = myColor === null || actionActorColor !== myColor;
+
+                if (isOpponentCommittedMove) {
+                  setLastOpponentChangedTiles(boardDelta.changedCids);
+                  const timeline = buildOpponentMoveTimeline({
+                    beforeState: previousState,
+                    afterState: newState,
+                    actionWord,
+                    changedCids: boardDelta.changedCids,
+                  });
+                  logGame('action.animation.timeline', {
+                    opcode: timeline.opcode,
+                    changedCids: timeline.changedCids,
+                    phases: timeline.phases.map((phase) => phase.label),
+                    primitives: timeline.primitives.length,
+                    totalDurationMs: timeline.totalDurationMs,
+                    fallbackNotes: timeline.fallbackNotes,
+                  });
+                  if (timeline.primitives.length > 0 && timeline.totalDurationMs > 0) {
+                    opponentAnimationIdRef.current += 1;
+                    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                    setActiveOpponentAnimation({
+                      id: opponentAnimationIdRef.current,
+                      timeline,
+                      startedAtMs: nowMs,
+                      nowMs,
+                    });
+                  } else {
+                    setActiveOpponentAnimation(null);
+                  }
+                } else {
+                  setLastOpponentChangedTiles([]);
+                  setActiveOpponentAnimation(null);
+                }
+
                 gameStateRef.current = newState;
                 setGameState(newState);
                 logGame('action.apply.ok', {
@@ -1286,6 +1388,8 @@ export default function Game() {
       localPly: gameState?.ply ?? null,
       legalSetSize: cache.legalSet.size,
     });
+    // UX policy for M02: clear opponent-highlight once the local player commits a new action.
+    setLastOpponentChangedTiles([]);
     wsRef.current.send(buffer);
     
     // UI state will be reset when action is applied via WebSocket
@@ -2001,8 +2105,9 @@ export default function Game() {
   const renderBoard = () => {
     if (!gameState) return null;
 
-    const previewOverlay = getPreviewOverlay();
-    const previewState = previewOverlay ? null : getPreviewState();
+    const isOpponentAnimationRunning = activeOpponentAnimation !== null;
+    const previewOverlay = isOpponentAnimationRunning ? null : getPreviewOverlay();
+    const previewState = previewOverlay || isOpponentAnimationRunning ? null : getPreviewState();
     const displayState = previewState || gameState;
 
     // Edge length of a tile is 1 unit, distance to center of edge is sqrt(3)/2 = d
@@ -2058,6 +2163,26 @@ export default function Game() {
       minPixelY = Math.min(minPixelY, topY);
       maxPixelY = Math.max(maxPixelY, bottomY);
     });
+
+    const tilePixels: TilePixelData[] = validTiles.map(({ cid, x, y, displayX, displayY }) => {
+      const z = displayY - displayX;
+      const centerX = (3 * z / 2) * centerSize;
+      const centerY = (displayX + displayY) * d;
+      const hexX = centerX - outerHexWidth / 2 - minPixelX;
+      const hexY = centerY - outerHexHeight / 2 - minPixelY;
+      return {
+        cid,
+        x,
+        y,
+        displayX,
+        displayY,
+        centerX: centerX - minPixelX,
+        centerY: centerY - minPixelY,
+        hexX,
+        hexY,
+      };
+    });
+    const tilePixelByCid = new Map<number, TilePixelData>(tilePixels.map((tile) => [tile.cid, tile]));
 
     // Determine clickable and highlighted tiles using UI backend
     // Use actual gameState for UI logic, not preview state
@@ -2173,16 +2298,26 @@ export default function Game() {
 
     const selectedSet = new Set(selectedTiles);
     const interactableSet = new Set(interactableTiles);
+    const lastOpponentChangedSet = new Set(lastOpponentChangedTiles);
 
     const splitOffsetX = 12;
     const splitOffsetY = 15;
     const myColor: engine.Color | null = role === 'black' ? 0 : role === 'white' ? 1 : null;
+    const activeTimeline = activeOpponentAnimation?.timeline ?? null;
+    const activeTimelineElapsedMs = activeOpponentAnimation
+      ? Math.max(0, activeOpponentAnimation.nowMs - activeOpponentAnimation.startedAtMs)
+      : 0;
+    const hiddenAnimatedUnitCids = new Set(activeTimeline?.hiddenStaticUnitCids ?? []);
 
     const shouldShowNumbersForOwnUnit = (cid: number, unitColor: engine.Color): boolean => {
       // Enemy units always render as icons. Spectators never have "own units".
       if (myColor === null || unitColor !== myColor) return false;
 
-      if (uiState.type === 'own_secondary') return true;
+      if (uiState.type === 'own_secondary') {
+        if (cid === uiState.originCid) return true;
+        // In secondary mode, only the active unit and its current receiving preview units show numbers.
+        return previewOverlay?.units.has(cid) ?? false;
+      }
 
       if (uiState.type === 'empty') {
         // In empty-combine/donation context, height is decision-relevant for donor/participating tiles
@@ -2194,34 +2329,107 @@ export default function Game() {
       return false;
     };
 
-    const tiles: JSX.Element[] = validTiles.map(({ cid, x, y, displayX, displayY }) => {
+    const resolveAnchorOffset = (anchor: 'center' | 'primary' | 'secondary' | undefined): { x: number; y: number } => {
+      if (anchor === 'primary') return { x: splitOffsetX, y: -splitOffsetY };
+      if (anchor === 'secondary') return { x: -splitOffsetX, y: splitOffsetY };
+      return { x: 0, y: 0 };
+    };
+
+    const resolvePositionRef = (position: PositionRef): { x: number; y: number } | null => {
+      if (position.type === 'tile') {
+        const tile = tilePixelByCid.get(position.cid);
+        if (!tile) return null;
+        const offset = resolveAnchorOffset(position.anchor);
+        return { x: tile.centerX + offset.x, y: tile.centerY + offset.y };
+      }
+      if (position.type === 'between') {
+        const fromTile = tilePixelByCid.get(position.fromCid);
+        const toTile = tilePixelByCid.get(position.toCid);
+        if (!fromTile || !toTile) return null;
+        const ratio = Math.max(0, Math.min(1, position.ratio));
+        return {
+          x: fromTile.centerX + (toTile.centerX - fromTile.centerX) * ratio,
+          y: fromTile.centerY + (toTile.centerY - fromTile.centerY) * ratio,
+        };
+      }
+      const tile = tilePixelByCid.get(position.cid);
+      if (!tile) return null;
+      return {
+        x: tile.centerX + Math.cos(position.angleRad) * position.distancePx,
+        y: tile.centerY + Math.sin(position.angleRad) * position.distancePx,
+      };
+    };
+
+    const renderVisualUnit = (unit: VisualUnit, mode: 'icon' | 'number' = 'icon'): JSX.Element | null => {
+      if (unit.p <= 0 && unit.s <= 0) return null;
+      const textColor = unit.tribun
+        ? unit.color === 0
+          ? '#AE0000'
+          : '#00B4FF'
+        : unit.color === 0
+        ? '#000'
+        : '#fff';
+      const textColorSecondary = unit.color === 0 ? '#fff' : '#000';
+      const strokeColor = unit.tribun
+        ? unit.color === 0
+          ? '#000'
+          : '#fff'
+        : unit.color === 0
+        ? '#fff'
+        : '#000';
+      const strokeColorSecondary = unit.color === 0 ? '#000' : '#fff';
+      const sizePx = unit.tribun ? 72 : 64;
+      if (unit.s > 0) {
+        return (
+          <SplitUnitGlyph
+            mode={mode}
+            primary={{ height: unit.s, tribun: false }}
+            secondary={{ height: unit.p, tribun: unit.tribun }}
+            sizePx={sizePx}
+            offsetPx={{ x: splitOffsetX, y: splitOffsetY }}
+            numberColors={{
+              primary: { fill: textColorSecondary, stroke: strokeColorSecondary },
+              secondary: { fill: textColor, stroke: strokeColor },
+            }}
+          />
+        );
+      }
+      return (
+        <UnitGlyph
+          mode={mode}
+          unit={{ height: unit.p, tribun: unit.tribun }}
+          sizePx={sizePx}
+          numberColor={{ fill: textColor, stroke: strokeColor }}
+        />
+      );
+    };
+
+    const tiles: JSX.Element[] = tilePixels.map(({ cid, x, y, hexX, hexY }) => {
       const overlayUnit = previewOverlay?.units.get(cid);
-      const unit: { p: number; s: number; color: engine.Color; tribun: boolean } | null = overlayUnit
+      const staticUnit: { p: number; s: number; color: engine.Color; tribun: boolean } | null = overlayUnit
         ? overlayUnit
         : previewOverlay?.empty.has(cid)
         ? null
         : engine.unitByteToUnit(displayState.board[cid]);
-
-      // Position of coordinate (x,y) is: (3z/2, (x+y)*d) where z = y - x
-      // Position of (0,0) is at (0,0)
-      // Apply spacing multiplier to add gaps between hexagons
-      const z = displayY - displayX;
-      const centerX = (3 * z / 2) * centerSize;
-      const centerY = (displayX + displayY) * d; // d = sqrt(3)/2 * size (already scaled)
-      // Calculate actual left/top position relative to container
-      const hexX = centerX - outerHexWidth / 2 - minPixelX;
-      const hexY = centerY - outerHexHeight / 2 - minPixelY;
+      const shouldHideStaticUnit =
+        isOpponentAnimationRunning &&
+        hiddenAnimatedUnitCids.has(cid) &&
+        !overlayUnit &&
+        !previewOverlay?.empty.has(cid);
+      const unit = shouldHideStaticUnit ? null : staticUnit;
 
       // Determine hexagon state and color using UI backend
       // Explicitly determine state for each tile to ensure correctness
       const baseColor = getBaseColor(x, y);
       let hexagonState: HexagonState = baseTileStates[cid] ?? 'default';
       
-      // Apply priority: selected > interactable > selectable > default
+      // Apply priority: selected > interactable > lastOpponentMove > selectable > default
       if (selectedSet.has(cid)) {
         hexagonState = 'selected';
       } else if (interactableSet.has(cid)) {
         hexagonState = 'interactable';
+      } else if (lastOpponentChangedSet.has(cid)) {
+        hexagonState = 'lastOpponentMove';
       } else {
         hexagonState = baseTileStates[cid] ?? 'default';
       }
@@ -2248,7 +2456,7 @@ export default function Game() {
             clipPath: hexClipPath,
             background: '#222',
             cursor: isClickable ? 'pointer' : 'default',
-            transition: 'all 0.2s ease',
+            transition: `all 0.2s ${OPPONENT_MOVE_EASING}`,
           }}
           onMouseEnter={(e) => {
             if (isClickable) {
@@ -2294,48 +2502,7 @@ export default function Game() {
             justifyContent: 'center',
             fontSize: '10px',
           }}>
-          {unit && (() => {
-            const showNumbers = shouldShowNumbersForOwnUnit(cid, unit.color);
-            const mode = showNumbers ? 'number' : 'icon';
-
-            const textColor = unit.tribun
-              ? (unit.color === 0 ? '#AE0000' : '#00B4FF')
-              : (unit.color === 0 ? '#000' : '#fff');
-            const textColorSecondary = unit.color === 0 ? '#fff' : '#000';
-            const strokeColor = unit.tribun
-              ? (unit.color === 0 ? '#000' : '#fff')
-              : (unit.color === 0 ? '#fff' : '#000');
-            const strokeColorSecondary = unit.color === 0 ? '#000' : '#fff';
-
-            const sizePx = unit.tribun ? 72 : 64;
-
-            if (unit.s > 0) {
-              return (
-                <SplitUnitGlyph
-                  mode={mode}
-                  // For enslaved/slave units, the "secondary" (opponent-colored) part should render bottom-left,
-                  // and the primary (owner-colored) part top-right.
-                  primary={{ height: unit.s, tribun: false }}
-                  secondary={{ height: unit.p, tribun: unit.tribun }}
-                  sizePx={sizePx}
-                  offsetPx={{ x: splitOffsetX, y: splitOffsetY }}
-                  numberColors={{
-                    primary: { fill: textColorSecondary, stroke: strokeColorSecondary },
-                    secondary: { fill: textColor, stroke: strokeColor },
-                  }}
-                />
-              );
-            }
-
-            return (
-              <UnitGlyph
-                mode={mode}
-                unit={{ height: unit.p, tribun: unit.tribun }}
-                sizePx={sizePx}
-                numberColor={{ fill: textColor, stroke: strokeColor }}
-              />
-            );
-          })()}
+          {unit && renderVisualUnit(unit, shouldShowNumbersForOwnUnit(cid, unit.color) ? 'number' : 'icon')}
           <div style={{
             position: 'absolute',
             bottom: '4px',
@@ -2349,6 +2516,76 @@ export default function Game() {
         </div>
       );
     });
+
+    const animatedPrimitives: JSX.Element[] = [];
+    if (activeTimeline) {
+      for (const primitive of activeTimeline.primitives) {
+        const started = activeTimelineElapsedMs >= primitive.startMs;
+        const ended = activeTimelineElapsedMs > primitive.startMs + primitive.durationMs;
+        if (!started || ended) continue;
+
+        const fromPosition = resolvePositionRef(primitive.from);
+        const toPosition = resolvePositionRef(primitive.to);
+        if (!fromPosition || !toPosition) continue;
+
+        const rawProgress = primitive.durationMs <= 0
+          ? 1
+          : (activeTimelineElapsedMs - primitive.startMs) / primitive.durationMs;
+        const eased = cubicEaseInOut(rawProgress);
+        const x = fromPosition.x + (toPosition.x - fromPosition.x) * eased;
+        const y = fromPosition.y + (toPosition.y - fromPosition.y) * eased;
+        const scaleValue = primitive.fromScale + (primitive.toScale - primitive.fromScale) * eased;
+        const opacityValue = primitive.fromOpacity + (primitive.toOpacity - primitive.fromOpacity) * eased;
+
+        if (primitive.kind === 'numberMove') {
+          animatedPrimitives.push(
+            <div
+              key={primitive.id}
+              style={{
+                position: 'absolute',
+                left: `${x}px`,
+                top: `${y}px`,
+                transform: `translate(-50%, -50%) scale(${scaleValue})`,
+                opacity: opacityValue,
+                minWidth: '42px',
+                height: '42px',
+                borderRadius: '999px',
+                border: '2px solid #2a2218',
+                background: '#ffe2a8',
+                color: '#2a2218',
+                fontWeight: 800,
+                fontSize: '27px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                pointerEvents: 'none',
+                zIndex: 18,
+              }}
+            >
+              {primitive.value}
+            </div>,
+          );
+          continue;
+        }
+
+        animatedPrimitives.push(
+          <div
+            key={primitive.id}
+            style={{
+              position: 'absolute',
+              left: `${x}px`,
+              top: `${y}px`,
+              transform: `translate(-50%, -50%) scale(${scaleValue})`,
+              opacity: opacityValue,
+              pointerEvents: 'none',
+              zIndex: 16,
+            }}
+          >
+            {renderVisualUnit(primitive.unit, 'icon')}
+          </div>,
+        );
+      }
+    }
 
     // Calculate board container size based on actual pixel bounds
     // Account for full hexagon dimensions and borders
@@ -2382,6 +2619,7 @@ export default function Game() {
           transformOrigin: 'center',
         }}>
           {tiles}
+          {animatedPrimitives}
         </div>
       </div>
     );

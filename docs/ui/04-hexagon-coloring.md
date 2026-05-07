@@ -59,13 +59,19 @@ A hexagon is in the `interactable` state when:
   - Own.Primary state: highlighted target tiles (move/kill/enslave/tribun targets)
   - Own.Secondary state: adjacent empty tiles (for split/backstabb targets)
 
+### `lastOpponentMove`
+A hexagon is in the `lastOpponentMove` state when:
+- The tile content changed due to the most recently received opponent committed ply
+- The highlight persists until superseded by a newer opponent ply or cleared when the local player commits their next action
+
 ## State Priority
 
 When determining a tile's state, the following priority is applied:
 1. **selected** (highest priority)
 2. **interactable**
-3. **selectable**
-4. **default** (lowest priority)
+3. **lastOpponentMove**
+4. **selectable**
+5. **default** (lowest priority)
 
 A tile can only be in one state at a time, determined by the highest priority that applies.
 
@@ -97,6 +103,11 @@ Colors are defined in `apps/web/src/colors.json` with the following structure:
       "b": "#350058",
       "g": "#5F0098",
       "w": "#AE00EE"
+    },
+    "lastOpponentMove": {
+      "b": "#113A63",
+      "g": "#1E5B96",
+      "w": "#3290D8"
     }
   }
 }
