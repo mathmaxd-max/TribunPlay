@@ -36,6 +36,7 @@ export class SetupLibraryCreate extends OpenAPIRoute {
       },
       "400": { description: "Invalid setup hash or payload" },
       "401": { description: "Unauthorized" },
+      "409": { description: "Setup library limit reached" },
     },
   };
 
@@ -64,6 +65,11 @@ export class SetupLibraryCreate extends OpenAPIRoute {
     if (!decoded.ok || !decoded.setup) {
       return c.json({ error: "Invalid setup hash" }, 400);
     }
+    const flippedEncoded = engine.encodePositionDetailed(engine.flipSetup(decoded.setup));
+    if (!flippedEncoded.ok) {
+      return c.json({ error: "Invalid setup hash" }, 400);
+    }
+    const flippedHash = engine.normalizeSetupHash(flippedEncoded.code);
 
     const name = body.name.trim();
     if (!name) {
@@ -71,38 +77,80 @@ export class SetupLibraryCreate extends OpenAPIRoute {
     }
 
     const nowIso = new Date().toISOString();
-    const itemId = crypto.randomUUID();
-    await c.env.DB
-      .prepare(
-        `INSERT INTO setup_library_items (
-           id, account_id, name, hash, army_size, tribun_height, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(account_id, hash) DO UPDATE SET
-           name = excluded.name,
-           army_size = excluded.army_size,
-           tribun_height = excluded.tribun_height,
-           updated_at = excluded.updated_at`,
-      )
-      .bind(
-        itemId,
-        identity.accountId,
-        name,
-        hash,
-        decoded.setup.armySize,
-        decoded.setup.tribunHeight,
-        nowIso,
-        nowIso,
-      )
-      .run();
-
-    const row = await c.env.DB
+    const existingRow = await c.env.DB
       .prepare(
         `SELECT id, name, hash, army_size, tribun_height, created_at, updated_at
          FROM setup_library_items
-         WHERE account_id = ? AND hash = ?
+         WHERE account_id = ? AND (hash = ? OR hash = ?)
          LIMIT 1`,
       )
-      .bind(identity.accountId, hash)
+      .bind(identity.accountId, hash, flippedHash)
+      .first<{
+        id: string;
+        name: string;
+        hash: string;
+        army_size: number;
+        tribun_height: 1 | 2 | 3;
+        created_at: string;
+        updated_at: string;
+      }>();
+
+    if (existingRow) {
+      await c.env.DB
+        .prepare(
+          `UPDATE setup_library_items
+           SET name = ?, army_size = ?, tribun_height = ?, updated_at = ?
+           WHERE account_id = ? AND id = ?`,
+        )
+        .bind(
+          name,
+          decoded.setup.armySize,
+          decoded.setup.tribunHeight,
+          nowIso,
+          identity.accountId,
+          existingRow.id,
+        )
+        .run();
+    } else {
+      const countRow = await c.env.DB
+        .prepare(`SELECT COUNT(*) AS count FROM setup_library_items WHERE account_id = ?`)
+        .bind(identity.accountId)
+        .first<{ count: number }>();
+      const count = Number(countRow?.count ?? 0);
+      if (count >= 5) {
+        return c.json({ error: "Setup library limit reached (max 5 setups)." }, 409);
+      }
+
+      const itemId = crypto.randomUUID();
+      await c.env.DB
+        .prepare(
+          `INSERT INTO setup_library_items (
+             id, account_id, name, hash, army_size, tribun_height, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          itemId,
+          identity.accountId,
+          name,
+          hash,
+          decoded.setup.armySize,
+          decoded.setup.tribunHeight,
+          nowIso,
+          nowIso,
+        )
+        .run();
+    }
+
+    const row = await c.env.DB
+      .prepare(
+        // Hash and its flip represent one setup identity group, so we read back either.
+        `SELECT id, name, hash, army_size, tribun_height, created_at, updated_at
+         FROM setup_library_items
+         WHERE account_id = ? AND (hash = ? OR hash = ?)
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+      )
+      .bind(identity.accountId, hash, flippedHash)
       .first<{
         id: string;
         name: string;

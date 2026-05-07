@@ -24,11 +24,17 @@ import {
   type AuthSuccessResponse,
 } from '../auth/identityStore';
 import { API_BASE, WS_BASE } from '../config';
-import { loadSetupLibrary } from '../setupLibrary';
+import {
+  deleteSetupLibraryItem,
+  isSetupLibraryAvailable,
+  loadSetupLibrary,
+  renameSetupLibraryItem,
+} from '../setupLibrary';
 import { getFlippedSetupHash, normalizeSetupHashInput } from '../setupHashFlip';
 import { type BoardSfxEvent, useBoardSfx } from '../audio/boardSfx';
 import { getAccountSettings } from '../settings/accountSettings';
 import { areAllUnitIconsReady, preloadAllUnitIcons } from '../ui/unitIcons';
+import { filterSetupLibraryItems, type SetupLibrarySearchMode } from '../ui/setupLibraryFilters';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -375,17 +381,6 @@ const digestBoard = (board: Uint8Array): { sum: number; xor: number; len: number
 
 const toHex32 = (value: number): string => `0x${(value >>> 0).toString(16).padStart(8, '0')}`;
 
-const isSubsequenceMatch = (needleRaw: string, haystackRaw: string): boolean => {
-  const needle = needleRaw.trim().toLowerCase();
-  if (!needle) return true;
-  const haystack = haystackRaw.toLowerCase();
-  let j = 0;
-  for (let i = 0; i < haystack.length && j < needle.length; i += 1) {
-    if (haystack[i] === needle[j]) j += 1;
-  }
-  return j === needle.length;
-};
-
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
@@ -409,9 +404,13 @@ export default function Game() {
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [libraryQuery, setLibraryQuery] = useState('');
+  const [librarySearchMode, setLibrarySearchMode] = useState<SetupLibrarySearchMode>('name');
   const [libraryArmyMin, setLibraryArmyMin] = useState<number | ''>('');
   const [libraryArmyMax, setLibraryArmyMax] = useState<number | ''>('');
   const [libraryTribunHeight, setLibraryTribunHeight] = useState<0 | 1 | 2 | 3>(0);
+  const [editingLibraryItemId, setEditingLibraryItemId] = useState<string | null>(null);
+  const [editingLibraryName, setEditingLibraryName] = useState('');
+  const [libraryItemActionBusyId, setLibraryItemActionBusyId] = useState<string | null>(null);
   const [libraryOpenTarget, setLibraryOpenTarget] = useState<'free' | 'shared' | null>(null);
   const [roomPresence, setRoomPresence] = useState<RoomPresence>({
     players: { black: 0, white: 0 },
@@ -466,8 +465,11 @@ export default function Game() {
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [validator, setValidator] = useState<LegalBloomValidator | null>(null);
   const [lastOpponentChangedTiles, setLastOpponentChangedTiles] = useState<number[]>([]);
+  /** Hover scaling for clickable hexes (fills/rings/units stay in sync; split from global layering). */
+  const [hoveredBoardCid, setHoveredBoardCid] = useState<number | null>(null);
   const [activeOpponentAnimation, setActiveOpponentAnimation] = useState<ActiveOpponentAnimation | null>(null);
   const opponentAnimationIdRef = useRef(0);
+  const libraryEnabled = isSetupLibraryAvailable();
   
   const cache = useMemo(() => {
     if (!gameState || !validator) return null;
@@ -1711,6 +1713,12 @@ export default function Game() {
   };
 
   const openSetupLibrary = async (target: 'free' | 'shared') => {
+    if (!libraryEnabled) {
+      setLibraryError('Setup library is only available for signed-in accounts.');
+      return;
+    }
+    setEditingLibraryItemId(null);
+    setEditingLibraryName('');
     setLibraryOpenTarget(target);
     setLibraryLoading(true);
     setLibraryError(null);
@@ -1721,6 +1729,54 @@ export default function Game() {
       setLibraryError(error instanceof Error ? error.message : 'Failed to load setup library.');
     } finally {
       setLibraryLoading(false);
+    }
+  };
+
+  const startEditingLibraryItem = (item: engine.SetupLibraryItem) => {
+    setEditingLibraryItemId(item.id);
+    setEditingLibraryName(item.name);
+  };
+
+  const cancelEditingLibraryItem = () => {
+    setEditingLibraryItemId(null);
+    setEditingLibraryName('');
+  };
+
+  const commitEditingLibraryItem = async (itemId: string) => {
+    const nextName = editingLibraryName.trim();
+    if (!nextName) {
+      setLibraryError('Name cannot be empty.');
+      return;
+    }
+    setLibraryItemActionBusyId(itemId);
+    setLibraryError(null);
+    try {
+      await renameSetupLibraryItem({ itemId, name: nextName });
+      const nextItems = await loadSetupLibrary();
+      setLibraryItems(nextItems);
+      cancelEditingLibraryItem();
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : 'Failed to rename setup.');
+    } finally {
+      setLibraryItemActionBusyId(null);
+    }
+  };
+
+  const removeLibraryItem = async (item: engine.SetupLibraryItem) => {
+    if (!window.confirm(`Are you sure you want to delete "${item.name}"?`)) return;
+    setLibraryItemActionBusyId(item.id);
+    setLibraryError(null);
+    try {
+      await deleteSetupLibraryItem(item.id);
+      const nextItems = await loadSetupLibrary();
+      setLibraryItems(nextItems);
+      if (editingLibraryItemId === item.id) {
+        cancelEditingLibraryItem();
+      }
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : 'Failed to delete setup.');
+    } finally {
+      setLibraryItemActionBusyId(null);
     }
   };
 
@@ -2453,15 +2509,11 @@ export default function Game() {
     const outerHexSize = innerHexSize + borderWidth;
     const centerSize = outerHexSize * spacingMultiplier;
     const d = Math.sqrt(3) / 2 * centerSize; // d = sqrt(3)/2 * size (scaled distance)
-    // For vertices (±1, 0), (±1/2, ±d) scaled by hexSize:
+    // For vertices (+/-1, 0), (+/-1/2, +/-d) scaled by hexSize:
     // Width: from -innerHexSize to +innerHexSize = 2*innerHexSize
     // Height: from -d to +d = 2d = sqrt(3)*innerHexSize
     const outerHexWidth = 2 * outerHexSize;
     const outerHexHeight = Math.sqrt(3) * outerHexSize;
-    const innerHexWidth = 2 * innerHexSize;
-    const innerHexHeight = Math.sqrt(3) * innerHexSize;
-    const innerOffsetX = (outerHexWidth - innerHexWidth) / 2;
-    const innerOffsetY = (outerHexHeight - innerHexHeight) / 2;
 
     // Collect valid tiles
     const validTiles: Array<{ cid: number; x: number; y: number; displayX: number; displayY: number }> = [];
@@ -2740,7 +2792,27 @@ export default function Game() {
       );
     };
 
-    const tiles: JSX.Element[] = tilePixels.map(({ cid, x, y, hexX, hexY }) => {
+    const HEX_TILE_RING_NEUTRAL = '#222';
+    const HEX_OPPONENT_CHANGE_RING_GREEN = '#007F46';
+    const BOARD_Z_FILL = 2;
+    /** Default #222 seam; focus (selected/interactable); accent (opponent-move green). Keeps accents above idle outlines. */
+    const BOARD_Z_RING_DEFAULT = 4;
+    const BOARD_Z_RING_FOCUS = 5;
+    const BOARD_Z_RING_HIGHLIGHT = 6;
+    const BOARD_Z_UNIT = 7;
+    const BOARD_Z_HIT = 9;
+    /** Raising ring/unit/hit surfaces the hovered hex; fills must stay below every ring (incl. neighbors). */
+    const hoverBoardSurfaceZOffset = 10;
+    /** Hovered fill sits only above other fills (overlap / scale), never above any outline. */
+    const hoverBoardFillZBump = 1;
+
+    const tileFills: JSX.Element[] = [];
+    const tileRings: JSX.Element[] = [];
+    const tileUnits: JSX.Element[] = [];
+    const tileHits: JSX.Element[] = [];
+    const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
+
+    tilePixels.forEach(({ cid, x, y, hexX, hexY }) => {
       const overlayUnit = previewOverlay?.units.get(cid);
       const staticUnit: { p: number; s: number; color: engine.Color; tribun: boolean } | null = overlayUnit
         ? overlayUnit
@@ -2754,35 +2826,146 @@ export default function Game() {
         !previewOverlay?.empty.has(cid);
       const unit = shouldHideStaticUnit ? null : staticUnit;
 
-      // Determine hexagon state and color using UI backend
-      // Explicitly determine state for each tile to ensure correctness
       const baseColor = getBaseColor(x, y);
+      const isSelectedTile = selectedSet.has(cid);
+      const isInteractableTile = interactableSet.has(cid);
+      const isOpponentChangedTile = lastOpponentChangedSet.has(cid);
       let hexagonState: HexagonState = baseTileStates[cid] ?? 'default';
-      
-      // Apply priority: selected > interactable > lastOpponentMove > selectable > default
-      if (selectedSet.has(cid)) {
+
+      if (isSelectedTile) {
         hexagonState = 'selected';
-      } else if (interactableSet.has(cid)) {
+      } else if (isInteractableTile) {
         hexagonState = 'interactable';
-      } else if (lastOpponentChangedSet.has(cid)) {
-        hexagonState = 'lastOpponentMove';
       } else {
         hexagonState = baseTileStates[cid] ?? 'default';
       }
-      
+
       const tileColor = getHexagonColor(baseColor, hexagonState);
-      // Tile is clickable if it's selectable or interactable or selected (and we're in an active state)
+      const tileBorderWidth = isSelectedTile || isInteractableTile ? 2 : isOpponentChangedTile ? 6 : 2;
+      const tileInnerOffsetX = tileBorderWidth;
+      const tileInnerOffsetY = (Math.sqrt(3) / 2) * tileBorderWidth;
+      const tileInnerWidth = outerHexWidth - tileBorderWidth * 2;
+      const tileInnerHeight = outerHexHeight - Math.sqrt(3) * tileBorderWidth;
       const isClickable = isActive && (
-        selectedSet.has(cid) ||
-        interactableSet.has(cid) ||
+        isSelectedTile ||
+        isInteractableTile ||
         (uiState.type === 'idle' && baseTileStates[cid] === 'selectable')
       );
+      const isHoveredTile = hoveredBoardCid === cid && isClickable;
+      const tileRingColor =
+        isSelectedTile || isInteractableTile
+          ? HEX_TILE_RING_NEUTRAL
+          : isOpponentChangedTile
+          ? HEX_OPPONENT_CHANGE_RING_GREEN
+          : HEX_TILE_RING_NEUTRAL;
 
-      const hexClipPath = 'polygon(100% 50%, 75% 0%, 25% 0%, 0% 50%, 25% 100%, 75% 100%)';
-      
-      return (
+      const ringBaseZ =
+        isSelectedTile || isInteractableTile
+          ? BOARD_Z_RING_FOCUS
+          : isOpponentChangedTile
+            ? BOARD_Z_RING_HIGHLIGHT
+            : BOARD_Z_RING_DEFAULT;
+
+      const zFill = isHoveredTile ? BOARD_Z_FILL + hoverBoardFillZBump : BOARD_Z_FILL;
+      const zRing = ringBaseZ + (isHoveredTile ? hoverBoardSurfaceZOffset : 0);
+      const zUnit = isHoveredTile ? BOARD_Z_UNIT + hoverBoardSurfaceZOffset : BOARD_Z_UNIT;
+      const zHit = isHoveredTile ? BOARD_Z_HIT + hoverBoardSurfaceZOffset : BOARD_Z_HIT;
+      const tileHoverScale = isHoveredTile ? 'scale(1.1)' : 'scale(1)';
+      const tileHoverTransition = `transform 0.2s ${OPPONENT_MOVE_EASING}`;
+
+      const fillLeft = hexX + tileInnerOffsetX;
+      const fillTop = hexY + tileInnerOffsetY;
+
+      tileFills.push(
         <div
-          key={cid}
+          key={`board-fill-${cid}`}
+          style={{
+            position: 'absolute',
+            left: `${fillLeft}px`,
+            top: `${fillTop}px`,
+            width: `${tileInnerWidth}px`,
+            height: `${tileInnerHeight}px`,
+            clipPath: hexClipPath,
+            background: tileColor,
+            zIndex: zFill,
+            pointerEvents: 'none',
+            transform: tileHoverScale,
+            transformOrigin: '50% 50%',
+            transition: tileHoverTransition,
+          }}
+        />,
+      );
+
+      tileRings.push(
+        <div
+          key={`board-ring-${cid}`}
+          style={{
+            position: 'absolute',
+            left: `${hexX}px`,
+            top: `${hexY}px`,
+            width: `${outerHexWidth}px`,
+            height: `${outerHexHeight}px`,
+            zIndex: zRing,
+            pointerEvents: 'none',
+            transform: tileHoverScale,
+            transformOrigin: '50% 50%',
+            transition: tileHoverTransition,
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 0,
+              width: '100%',
+              height: '100%',
+              clipPath: hexClipPath,
+              background: tileRingColor,
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              left: `${tileInnerOffsetX}px`,
+              top: `${tileInnerOffsetY}px`,
+              width: `${tileInnerWidth}px`,
+              height: `${tileInnerHeight}px`,
+              clipPath: hexClipPath,
+              // Must match tile fill: transparent would not reveal the global fill layer (composites within this subtree only).
+              background: tileColor,
+            }}
+          />
+        </div>,
+      );
+
+      tileUnits.push(
+        <div
+          key={`board-unit-${cid}`}
+          style={{
+            position: 'absolute',
+            left: `${fillLeft}px`,
+            top: `${fillTop}px`,
+            width: `${tileInnerWidth}px`,
+            height: `${tileInnerHeight}px`,
+            clipPath: hexClipPath,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: zUnit,
+            pointerEvents: 'none',
+            transform: tileHoverScale,
+            transformOrigin: '50% 50%',
+            transition: tileHoverTransition,
+          }}
+        >
+          {unit ? renderVisualUnit(unit, shouldShowNumbersForOwnUnit(cid, unit.color) ? 'number' : 'icon') : null}
+        </div>,
+      );
+
+      tileHits.push(
+        <div
+          key={`board-hit-${cid}`}
           style={{
             position: 'absolute',
             left: `${hexX}px`,
@@ -2790,19 +2973,18 @@ export default function Game() {
             width: `${outerHexWidth}px`,
             height: `${outerHexHeight}px`,
             clipPath: hexClipPath,
-            background: '#222',
+            backgroundColor: 'transparent',
             cursor: isClickable ? 'pointer' : 'default',
-            transition: `all 0.2s ${OPPONENT_MOVE_EASING}`,
+            zIndex: zHit,
+            transform: tileHoverScale,
+            transformOrigin: '50% 50%',
+            transition: tileHoverTransition,
           }}
-          onMouseEnter={(e) => {
-            if (isClickable) {
-              e.currentTarget.style.transform = 'scale(1.1)';
-              e.currentTarget.style.zIndex = '10';
-            }
+          onMouseEnter={() => {
+            if (isClickable) setHoveredBoardCid(cid);
           }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.transform = 'scale(1)';
-            e.currentTarget.style.zIndex = '1';
+          onMouseLeave={() => {
+            setHoveredBoardCid((prev) => (prev === cid ? null : prev));
           }}
           onClick={() => {
             if (isClickable) {
@@ -2841,33 +3023,7 @@ export default function Game() {
               commitUiState({ type: 'idle' }, { idleReason: 'cancel' });
             }
           }}
-        >
-          <div style={{
-            position: 'absolute',
-            left: `${innerOffsetX}px`,
-            top: `${innerOffsetY}px`,
-            width: `${innerHexWidth}px`,
-            height: `${innerHexHeight}px`,
-            clipPath: hexClipPath,
-            background: tileColor,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '10px',
-          }}>
-          {unit && renderVisualUnit(unit, shouldShowNumbersForOwnUnit(cid, unit.color) ? 'number' : 'icon')}
-          <div style={{
-            position: 'absolute',
-            bottom: '4px',
-            fontSize: '9px',
-            color: '#222',
-            fontWeight: '500',
-          }}>
-            {cid}
-          </div>
-          </div>
-        </div>
+        />,
       );
     });
 
@@ -2913,7 +3069,7 @@ export default function Game() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 pointerEvents: 'none',
-                zIndex: 18,
+                zIndex: 24,
               }}
             >
               {primitive.value}
@@ -2932,7 +3088,7 @@ export default function Game() {
               transform: `translate(-50%, -50%) scale(${scaleValue})`,
               opacity: opacityValue,
               pointerEvents: 'none',
-              zIndex: 16,
+              zIndex: 22,
             }}
           >
             {renderVisualUnit(primitive.unit, 'icon')}
@@ -2972,7 +3128,10 @@ export default function Game() {
           transform: `translate(-50%, -50%) scale(${scale})`,
           transformOrigin: 'center',
         }}>
-          {tiles}
+          {tileFills}
+          {tileRings}
+          {tileUnits}
+          {tileHits}
           {animatedPrimitives}
         </div>
       </div>
@@ -3194,18 +3353,14 @@ export default function Game() {
   const canOfferRematch =
     roomStatus === 'ended' && role !== 'spectator' && playersReady && !rematchOfferedByMe;
   const filteredLibraryItems = useMemo(() => {
-    const minArmy = libraryArmyMin === '' ? null : libraryArmyMin;
-    const maxArmy = libraryArmyMax === '' ? null : libraryArmyMax;
-    return libraryItems.filter((item) => {
-      const queryMatch =
-        isSubsequenceMatch(libraryQuery, item.name) || isSubsequenceMatch(libraryQuery, item.hash);
-      if (!queryMatch) return false;
-      if (minArmy !== null && item.armySize < minArmy) return false;
-      if (maxArmy !== null && item.armySize > maxArmy) return false;
-      if (libraryTribunHeight !== 0 && item.tribunHeight !== libraryTribunHeight) return false;
-      return true;
+    return filterSetupLibraryItems(libraryItems, {
+      query: libraryQuery,
+      searchMode: librarySearchMode,
+      armyMin: libraryArmyMin,
+      armyMax: libraryArmyMax,
+      tribunHeight: libraryTribunHeight,
     });
-  }, [libraryItems, libraryQuery, libraryArmyMin, libraryArmyMax, libraryTribunHeight]);
+  }, [libraryItems, libraryQuery, librarySearchMode, libraryArmyMin, libraryArmyMax, libraryTribunHeight]);
 
   const formatOption = (value?: string) => {
     if (!value) return 'Unknown';
@@ -3594,7 +3749,7 @@ export default function Game() {
         </div>
       )}
 
-      {libraryOpenTarget && (
+      {libraryOpenTarget && libraryEnabled && (
         <div
           onClick={() => setLibraryOpenTarget(null)}
           style={{
@@ -3640,105 +3795,236 @@ export default function Game() {
               </button>
             </div>
 
-            <div style={{ display: 'grid', gap: '8px', gridTemplateColumns: '1fr 130px 130px 160px auto' }}>
-              <input
-                type="text"
-                value={libraryQuery}
-                onChange={(event) => setLibraryQuery(event.target.value)}
-                placeholder="Search by name/hash subsequence"
-                style={{
-                  border: '1px solid #bda98b',
-                  borderRadius: '10px',
-                  padding: '8px 10px',
-                  background: '#fff9ef',
-                }}
-              />
-              <input
-                type="number"
-                min={0}
-                step={1}
-                value={libraryArmyMin}
-                onChange={(event) => {
-                  if (event.target.value === '') {
-                    setLibraryArmyMin('');
-                    return;
-                  }
-                  setLibraryArmyMin(Math.max(0, Number(event.target.value)));
-                }}
-                placeholder="Army min"
-                style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
-              />
-              <input
-                type="number"
-                min={0}
-                step={1}
-                value={libraryArmyMax}
-                onChange={(event) => {
-                  if (event.target.value === '') {
-                    setLibraryArmyMax('');
-                    return;
-                  }
-                  setLibraryArmyMax(Math.max(0, Number(event.target.value)));
-                }}
-                placeholder="Army max"
-                style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
-              />
-              <select
-                value={libraryTribunHeight}
-                onChange={(event) => setLibraryTribunHeight(Number(event.target.value) as 0 | 1 | 2 | 3)}
-                style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
-              >
-                <option value={0}>Any tribun</option>
-                <option value={1}>Tribun 1</option>
-                <option value={2}>Tribun 2</option>
-                <option value={3}>Tribun 3</option>
-              </select>
-              <button
-                type="button"
-                onClick={() => void openSetupLibrary(libraryOpenTarget)}
-                style={{
-                  border: '2px solid #6f5a38',
-                  borderRadius: '10px',
-                  background: '#f2d9b2',
-                  padding: '8px 10px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                Refresh
-              </button>
+            <div style={{ display: 'grid', gap: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <div style={{ fontSize: '13px', color: '#5a4630', fontWeight: 700 }}>
+                  Currently shown: {filteredLibraryItems.length}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void openSetupLibrary(libraryOpenTarget)}
+                  style={{
+                    border: '2px solid #6f5a38',
+                    borderRadius: '10px',
+                    background: '#f2d9b2',
+                    padding: '8px 10px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div style={{ display: 'grid', gap: '8px', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  value={libraryQuery}
+                  onChange={(event) => setLibraryQuery(event.target.value)}
+                  placeholder="Search..."
+                  style={{
+                    border: '1px solid #bda98b',
+                    borderRadius: '10px',
+                    padding: '8px 10px',
+                    background: '#fff9ef',
+                    minWidth: 0,
+                  }}
+                />
+                <div role="radiogroup" aria-label="Search mode" style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <label style={{ display: 'flex', gap: '5px', alignItems: 'center', fontSize: '13px', color: '#5a4630', fontWeight: 700 }}>
+                    <input
+                      type="radio"
+                      name="game-setup-library-search-mode"
+                      checked={librarySearchMode === 'name'}
+                      onChange={() => setLibrarySearchMode('name')}
+                    />
+                    Name
+                  </label>
+                  <label style={{ display: 'flex', gap: '5px', alignItems: 'center', fontSize: '13px', color: '#5a4630', fontWeight: 700 }}>
+                    <input
+                      type="radio"
+                      name="game-setup-library-search-mode"
+                      checked={librarySearchMode === 'hash'}
+                      onChange={() => setLibrarySearchMode('hash')}
+                    />
+                    Hash
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gap: '8px', gridTemplateColumns: '120px 120px minmax(0, 1fr)' }}>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={libraryArmyMin}
+                  onChange={(event) => {
+                    if (event.target.value === '') {
+                      setLibraryArmyMin('');
+                      return;
+                    }
+                    setLibraryArmyMin(Math.max(0, Number(event.target.value)));
+                  }}
+                  placeholder="Army min"
+                  style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={libraryArmyMax}
+                  onChange={(event) => {
+                    if (event.target.value === '') {
+                      setLibraryArmyMax('');
+                      return;
+                    }
+                    setLibraryArmyMax(Math.max(0, Number(event.target.value)));
+                  }}
+                  placeholder="Army max"
+                  style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
+                />
+                <div role="radiogroup" aria-label="Tribun height filter" style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  {([0, 1, 2, 3] as const).map((value) => (
+                    <label key={`game-tribun-filter-${value}`} style={{ display: 'flex', gap: '4px', alignItems: 'center', fontSize: '13px', color: '#5a4630', fontWeight: 700 }}>
+                      <input
+                        type="radio"
+                        name="game-setup-library-tribun-filter"
+                        checked={libraryTribunHeight === value}
+                        onChange={() => setLibraryTribunHeight(value)}
+                      />
+                      {value === 0 ? 'All' : `${value}`}
+                    </label>
+                  ))}
+                </div>
+              </div>
             </div>
 
             {libraryLoading && <div style={{ fontSize: '13px', color: '#5a4630' }}>Loading setup library...</div>}
             {libraryError && <div style={{ fontSize: '13px', color: '#7a2020' }}>{libraryError}</div>}
 
             <div style={{ display: 'grid', gap: '8px', maxHeight: '52vh', overflow: 'auto', paddingRight: '4px' }}>
-              {filteredLibraryItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    setLobbySetupHashInput(item.hash);
-                    setLibraryOpenTarget(null);
-                  }}
-                  style={{
-                    border: '1px solid #ccb89b',
-                    borderRadius: '10px',
-                    background: '#fff9ef',
-                    padding: '10px',
-                    textAlign: 'left',
-                    display: 'grid',
-                    gap: '4px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ fontSize: '14px', fontWeight: 700, color: '#2a2218' }}>{item.name}</div>
-                  <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '12px', color: '#5a4630' }}>{item.hash}</div>
-                  <div style={{ fontSize: '12px', color: '#5a4630' }}>
-                    Army {item.armySize} · Tribun {item.tribunHeight}
+              {filteredLibraryItems.map((item) => {
+                const isEditing = editingLibraryItemId === item.id;
+                const actionBusy = libraryItemActionBusyId === item.id;
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      border: '1px solid #ccb89b',
+                      borderRadius: '10px',
+                      background: '#fff9ef',
+                      padding: '10px',
+                      display: 'grid',
+                      gap: '8px',
+                    }}
+                  >
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '10px', alignItems: 'start' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLobbySetupHashInput(item.hash);
+                          setLibraryOpenTarget(null);
+                        }}
+                        style={{
+                          border: 'none',
+                          padding: 0,
+                          margin: 0,
+                          background: 'transparent',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          minWidth: 0,
+                        }}
+                      >
+                        <div style={{ fontSize: '14px', fontWeight: 700, color: '#2a2218' }}>{item.name}</div>
+                        <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '12px', color: '#5a4630', wordBreak: 'break-all' }}>{item.hash}</div>
+                        <div style={{ fontSize: '12px', color: '#5a4630' }}>
+                          Army {item.armySize} | Tribun {item.tribunHeight}
+                        </div>
+                      </button>
+                      <div style={{ display: 'grid', gap: '6px', justifyItems: 'end' }}>
+                        <button
+                          type="button"
+                          onClick={() => startEditingLibraryItem(item)}
+                          disabled={actionBusy}
+                          style={{
+                            border: '1px solid #6f5a38',
+                            borderRadius: '8px',
+                            background: '#f2d9b2',
+                            padding: '4px 8px',
+                            fontWeight: 700,
+                            cursor: actionBusy ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void removeLibraryItem(item)}
+                          disabled={actionBusy}
+                          style={{
+                            border: '1px solid #8b3b3b',
+                            borderRadius: '8px',
+                            background: '#f7d7d5',
+                            color: '#5c1c16',
+                            padding: '4px 8px',
+                            fontWeight: 700,
+                            cursor: actionBusy ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    {isEditing && (
+                      <div style={{ display: 'grid', gap: '6px', gridTemplateColumns: 'minmax(0, 1fr) auto auto', alignItems: 'center' }}>
+                        <input
+                          type="text"
+                          value={editingLibraryName}
+                          onChange={(event) => setEditingLibraryName(event.target.value)}
+                          placeholder="Setup name"
+                          style={{
+                            border: '1px solid #bda98b',
+                            borderRadius: '8px',
+                            padding: '6px 8px',
+                            background: '#fff',
+                            minWidth: 0,
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void commitEditingLibraryItem(item.id)}
+                          disabled={actionBusy}
+                          style={{
+                            border: '1px solid #6f5a38',
+                            borderRadius: '8px',
+                            background: '#f2d9b2',
+                            padding: '6px 8px',
+                            fontWeight: 700,
+                            cursor: actionBusy ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEditingLibraryItem}
+                          disabled={actionBusy}
+                          style={{
+                            border: '1px solid #6f5a38',
+                            borderRadius: '8px',
+                            background: '#fff6e8',
+                            padding: '6px 8px',
+                            fontWeight: 700,
+                            cursor: actionBusy ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
                   </div>
-                </button>
-              ))}
+                );
+              })}
               {!libraryLoading && filteredLibraryItems.length === 0 && (
                 <div style={{ fontSize: '13px', color: '#5a4630' }}>No matching setups found.</div>
               )}
@@ -3927,122 +4213,123 @@ export default function Game() {
                   </div>
                 )}
               </div>
-              <div
-                style={{
-                  gridColumn: '1 / -1',
-                  padding: '16px',
-                  borderRadius: '12px',
-                  border: '1px solid #d8cbb8',
-                  background: '#fffaf0',
-                  display: 'grid',
-                  gap: '10px',
-                }}
-              >
+              {roomSetup.config.enabled && (
                 <div
                   style={{
-                    fontSize: '11px',
-                    letterSpacing: '1.2px',
-                    textTransform: 'uppercase',
-                    color: '#7a6543',
-                    fontWeight: 700,
+                    gridColumn: '1 / -1',
+                    padding: '16px',
+                    borderRadius: '12px',
+                    border: '1px solid #d8cbb8',
+                    background: '#fffaf0',
+                    display: 'grid',
+                    gap: '10px',
                   }}
                 >
-                  Setup Inputs
-                </div>
-                {roomSetup.config.enabled && roomSetup.config.mode === 'shared' && (
-                  <div style={{ display: 'grid', gap: '8px' }}>
-                    <div style={{ fontSize: '12px', fontWeight: 700, color: '#5a4630' }}>Shared setup selection</div>
-                    {role === 'black' ? (
-                      <>
-                        <SetupHashInput
-                          value={lobbySetupHashInput}
-                          onChange={(next) => setLobbySetupHashInput(normalizeSetupHashInput(next))}
-                          onOpenLibrary={() => void openSetupLibrary('shared')}
-                          onFlipHash={flipLobbySetupHashInput}
-                          placeholder="Enter shared setup hash"
-                        />
-                        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#5a4630' }}>
-                            <input
-                              type="checkbox"
-                              checked={sharedOpponentFlip}
-                              onChange={(event) => setSharedOpponentFlip(event.target.checked)}
-                            />
-                            Flip for opponent
-                          </label>
+                  <div
+                    style={{
+                      fontSize: '11px',
+                      letterSpacing: '1.2px',
+                      textTransform: 'uppercase',
+                      color: '#7a6543',
+                      fontWeight: 700,
+                    }}
+                  >
+                    Setup Inputs
+                  </div>
+                  {roomSetup.config.mode === 'shared' && (
+                    <div style={{ display: 'grid', gap: '8px' }}>
+                      <div style={{ fontSize: '12px', fontWeight: 700, color: '#5a4630' }}>Shared setup selection</div>
+                      {role === 'black' ? (
+                        <>
+                          <SetupHashInput
+                            value={lobbySetupHashInput}
+                            onChange={(next) => setLobbySetupHashInput(normalizeSetupHashInput(next))}
+                            onOpenLibrary={() => void openSetupLibrary('shared')}
+                            onFlipHash={flipLobbySetupHashInput}
+                            placeholder="Enter shared setup hash"
+                            showLibraryButton={libraryEnabled}
+                          />
+                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#5a4630' }}>
+                              <input
+                                type="checkbox"
+                                checked={sharedOpponentFlip}
+                                onChange={(event) => setSharedOpponentFlip(event.target.checked)}
+                              />
+                              Flip for opponent
+                            </label>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              sendSharedSetupSelection({
+                                hash: lobbySetupHashInput,
+                                flipHost: false,
+                                flipOpponent: sharedOpponentFlip,
+                              })
+                            }
+                            style={{
+                              padding: '8px 12px',
+                              borderRadius: '10px',
+                              border: '2px solid #6f5a38',
+                              background: '#f2d9b2',
+                              color: '#2a2218',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Save shared setup
+                          </button>
+                        </>
+                      ) : (
+                        <div style={{ fontSize: '12px', color: '#5a4630' }}>
+                          Waiting for host to choose the shared setup.
                         </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            sendSharedSetupSelection({
-                              hash: lobbySetupHashInput,
-                              flipHost: false,
-                              flipOpponent: sharedOpponentFlip,
-                            })
-                          }
-                          style={{
-                            padding: '8px 12px',
-                            borderRadius: '10px',
-                            border: '2px solid #6f5a38',
-                            background: '#f2d9b2',
-                            color: '#2a2218',
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          Save shared setup
-                        </button>
-                      </>
-                    ) : (
-                      <div style={{ fontSize: '12px', color: '#5a4630' }}>
-                        Waiting for host to choose the shared setup.
-                      </div>
-                    )}
-                  </div>
-                )}
-                {roomSetup.config.enabled && roomSetup.config.mode === 'free' && (role === 'black' || role === 'white') && (
-                  <div style={{ display: 'grid', gap: '8px' }}>
-                    <div style={{ fontSize: '12px', fontWeight: 700, color: '#5a4630' }}>
-                      {role === 'black' ? 'Black' : 'White'} setup
+                      )}
                     </div>
-                    <SetupHashInput
-                      value={lobbySetupHashInput}
-                      onChange={(next) => setLobbySetupHashInput(normalizeSetupHashInput(next))}
-                      onOpenLibrary={() => void openSetupLibrary('free')}
-                      onFlipHash={flipLobbySetupHashInput}
-                      placeholder="Enter setup hash"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => sendSetupSelection(lobbySetupHashInput, false)}
-                      style={{
-                        padding: '8px 12px',
-                        borderRadius: '10px',
-                        border: '2px solid #6f5a38',
-                        background: '#f2d9b2',
-                        color: '#2a2218',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Save setup
-                    </button>
-                  </div>
-                )}
-                {roomSetup.config.enabled && roomSetup.config.mode === 'free' && role === 'spectator' && (
-                  <div style={{ fontSize: '12px', color: '#5a4630' }}>Players choose their setups in this section.</div>
-                )}
-                {!roomSetup.config.enabled && (
-                  <div style={{ fontSize: '12px', color: '#5a4630' }}>Custom setups are disabled for this room.</div>
-                )}
-                {setupIssues.length > 0 && (
-                  <div style={{ marginTop: '4px', color: '#7a2020', fontSize: '12px', display: 'grid', gap: '4px' }}>
-                    {setupIssues.map((issue, idx) => (
-                      <div key={`${issue.code}-${idx}`}>{issue.message}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
+                  )}
+                  {roomSetup.config.mode === 'free' && (role === 'black' || role === 'white') && (
+                    <div style={{ display: 'grid', gap: '8px' }}>
+                      <div style={{ fontSize: '12px', fontWeight: 700, color: '#5a4630' }}>
+                        {role === 'black' ? 'Black' : 'White'} setup
+                      </div>
+                      <SetupHashInput
+                        value={lobbySetupHashInput}
+                        onChange={(next) => setLobbySetupHashInput(normalizeSetupHashInput(next))}
+                        onOpenLibrary={() => void openSetupLibrary('free')}
+                        onFlipHash={flipLobbySetupHashInput}
+                        placeholder="Enter setup hash"
+                        showLibraryButton={libraryEnabled}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => sendSetupSelection(lobbySetupHashInput, false)}
+                        style={{
+                          padding: '8px 12px',
+                          borderRadius: '10px',
+                          border: '2px solid #6f5a38',
+                          background: '#f2d9b2',
+                          color: '#2a2218',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Save setup
+                      </button>
+                    </div>
+                  )}
+                  {roomSetup.config.mode === 'free' && role === 'spectator' && (
+                    <div style={{ fontSize: '12px', color: '#5a4630' }}>Players choose their setups in this section.</div>
+                  )}
+                  {setupIssues.length > 0 && (
+                    <div style={{ marginTop: '4px', color: '#7a2020', fontSize: '12px', display: 'grid', gap: '4px' }}>
+                      {setupIssues.map((issue, idx) => (
+                        <div key={`${issue.code}-${idx}`}>{issue.message}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <div
                 style={{
                   padding: '16px',
@@ -4331,4 +4618,5 @@ function formatTime(ms: number): string {
   const seconds = totalSeconds % 60;
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
+
 

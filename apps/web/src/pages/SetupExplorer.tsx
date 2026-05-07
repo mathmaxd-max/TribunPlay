@@ -15,8 +15,16 @@ import {
   SETUP_REGION_RED,
   SETUP_REGION_YELLOW,
 } from "@tribunplay/engine";
-import { addSetupToLibrary, loadSetupLibrary } from "../setupLibrary";
+import {
+  addSetupToLibrary,
+  deleteSetupLibraryItem,
+  findSetupLibraryIdentityMatch,
+  isSetupLibraryAvailable,
+  loadSetupLibrary,
+  renameSetupLibraryItem,
+} from "../setupLibrary";
 import { getFlippedSetupHash, normalizeSetupHashInput } from "../setupHashFlip";
+import { filterSetupLibraryItems, type SetupLibrarySearchMode } from "../ui/setupLibraryFilters";
 
 type Brush = "1" | "2" | "3" | "eraser";
 type TileCell = { height: 0 | 1 | 2 | 3; tribun: boolean };
@@ -145,17 +153,6 @@ const validCids = (() => {
 
 function makeEmptyCells(): TileCell[] {
   return Array.from({ length: SETUP_REGION_LIME }, () => ({ ...EMPTY_CELL }));
-}
-
-function isSubsequenceMatch(needleRaw: string, haystackRaw: string): boolean {
-  const needle = needleRaw.trim().toLowerCase();
-  if (!needle) return true;
-  const haystack = haystackRaw.toLowerCase();
-  let j = 0;
-  for (let i = 0; i < haystack.length && j < needle.length; i++) {
-    if (haystack[i] === needle[j]) j += 1;
-  }
-  return j === needle.length;
 }
 
 function isBase37Code16(value: string): boolean {
@@ -392,10 +389,20 @@ export default function SetupExplorer() {
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [librarySearchTarget, setLibrarySearchTarget] = useState<UnitSide | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
+  const [librarySearchMode, setLibrarySearchMode] = useState<SetupLibrarySearchMode>("name");
   const [libraryArmyMin, setLibraryArmyMin] = useState<number | "">("");
   const [libraryArmyMax, setLibraryArmyMax] = useState<number | "">("");
   const [libraryTribunHeight, setLibraryTribunHeight] = useState<0 | 1 | 2 | 3>(0);
+  const [editingLibraryItemId, setEditingLibraryItemId] = useState<string | null>(null);
+  const [editingLibraryName, setEditingLibraryName] = useState("");
+  const [libraryItemActionBusyId, setLibraryItemActionBusyId] = useState<string | null>(null);
+  const [saveModalOpen, setSaveModalOpen] = useState(false);
+  const [saveModalName, setSaveModalName] = useState("");
+  const [saveModalBusy, setSaveModalBusy] = useState(false);
+  /** Shown inside the save overlay — `librarySaveMessage` sits beneath it and stays hidden while the modal is open. */
+  const [saveModalError, setSaveModalError] = useState<string | null>(null);
   const [librarySaveMessage, setLibrarySaveMessage] = useState<string | null>(null);
+  const libraryEnabled = isSetupLibraryAvailable();
 
   useEffect(() => {
     let active = true;
@@ -416,6 +423,12 @@ export default function SetupExplorer() {
   }, []);
 
   const refreshLibrary = async () => {
+    if (!libraryEnabled) {
+      setLibraryItems([]);
+      setLibraryLoaded(false);
+      setLibraryError("Setup library is only available for signed-in accounts.");
+      return;
+    }
     setLibraryLoading(true);
     setLibraryError(null);
     try {
@@ -430,11 +443,20 @@ export default function SetupExplorer() {
   };
 
   const openLibrarySearch = async (target: UnitSide) => {
+    if (!libraryEnabled) return;
+    setEditingLibraryItemId(null);
+    setEditingLibraryName("");
     setLibrarySearchTarget(target);
     if (!libraryLoaded && !libraryLoading) {
       await refreshLibrary();
     }
   };
+
+  useEffect(() => {
+    if (!libraryEnabled) return;
+    if (libraryLoaded || libraryLoading) return;
+    void refreshLibrary();
+  }, [libraryEnabled, libraryLoaded, libraryLoading]);
 
   // Mapping between setup-index space and board CIDs depends on which player perspective we are displaying.
   // Important: we keep the underlying `ownCells[]` indexing/hash encoding stable; only which CID each index
@@ -536,7 +558,7 @@ export default function SetupExplorer() {
       const ok3Pay = tH === 1 ? ok3PayVariantA || ok3PayVariantB : ok3PayVariantA;
       if (!ok3Pay) {
         const requiredTwos = 2 * counts.threes;
-        // 1T only: Variant A treats one 2-unit as “free” (effectively #2-1), Variant B does not.
+        // 1T only: Variant A treats one 2-unit as "free" (effectively #2-1), Variant B does not.
         const needMore2VariantA = tH === 1 ? Math.max(0, (requiredTwos + 1) - counts.twos) : Math.max(0, requiredTwos - counts.twos);
         const needMore2VariantB = Math.max(0, requiredTwos - counts.twos);
         problems.push({
@@ -667,21 +689,27 @@ export default function SetupExplorer() {
     };
   }, [ownCells, rotate180, playerColor]);
 
-  const filteredLibraryItems = useMemo(() => {
-    const query = libraryQuery.trim();
-    const minArmy = libraryArmyMin === "" ? null : libraryArmyMin;
-    const maxArmy = libraryArmyMax === "" ? null : libraryArmyMax;
+  const saveCandidateHash = ownValidation.problems.length === 0 ? ownValidation.hash : null;
+  const saveCandidateArmySize = ownValidation.armySize.ok ? ownValidation.armySize.armySize : null;
+  const saveCandidateTribunHeight =
+    ownValidation.tribunHeight === 1 || ownValidation.tribunHeight === 2 || ownValidation.tribunHeight === 3
+      ? ownValidation.tribunHeight
+      : null;
+  const existingLibraryIdentityMatch = useMemo(
+    () => (saveCandidateHash ? findSetupLibraryIdentityMatch(libraryItems, saveCandidateHash) : null),
+    [libraryItems, saveCandidateHash],
+  );
+  const addOrRenameLabel = existingLibraryIdentityMatch ? "Rename" : "Add to library";
 
-    return libraryItems.filter((item) => {
-      const matchesQuery =
-        query.length === 0 || isSubsequenceMatch(query, item.name) || isSubsequenceMatch(query, item.hash);
-      if (!matchesQuery) return false;
-      if (minArmy !== null && item.armySize < minArmy) return false;
-      if (maxArmy !== null && item.armySize > maxArmy) return false;
-      if (libraryTribunHeight !== 0 && item.tribunHeight !== libraryTribunHeight) return false;
-      return true;
+  const filteredLibraryItems = useMemo(() => {
+    return filterSetupLibraryItems(libraryItems, {
+      query: libraryQuery,
+      searchMode: librarySearchMode,
+      armyMin: libraryArmyMin,
+      armyMax: libraryArmyMax,
+      tribunHeight: libraryTribunHeight,
     });
-  }, [libraryItems, libraryQuery, libraryArmyMin, libraryArmyMax, libraryTribunHeight]);
+  }, [libraryItems, libraryQuery, librarySearchMode, libraryArmyMin, libraryArmyMax, libraryTribunHeight]);
 
   const ownBoardContext = useMemo(() => {
     const board = new Uint8Array(121);
@@ -941,33 +969,97 @@ export default function SetupExplorer() {
     }
   };
 
-  const addOwnSetupToLibrary = async () => {
-    const hash = ownValidation.problems.length === 0 ? ownValidation.hash : null;
-    const armySize = ownValidation.armySize.ok ? ownValidation.armySize.armySize : null;
-    const tribunHeight = ownValidation.tribunHeight;
-    if (!hash || armySize === null || (tribunHeight !== 1 && tribunHeight !== 2 && tribunHeight !== 3)) {
+  const closeSaveModal = () => {
+    setSaveModalOpen(false);
+    setSaveModalError(null);
+  };
+
+  const addOwnSetupToLibrary = () => {
+    if (!libraryEnabled) return;
+    if (!saveCandidateHash || saveCandidateArmySize === null || saveCandidateTribunHeight === null) {
       setLibrarySaveMessage("Save failed: setup hash or metadata is not valid yet.");
       return;
     }
-    const defaultName = `Setup ${hash.slice(0, 6)}`;
-    const maybeName = window.prompt("Name this setup:", defaultName);
-    if (maybeName === null) return;
-    const name = maybeName.trim();
-    if (!name) {
-      setLibrarySaveMessage("Save canceled: name cannot be empty.");
+    const suggestedName = existingLibraryIdentityMatch?.name ?? `Setup ${saveCandidateHash.slice(0, 6)}`;
+    setSaveModalName(suggestedName);
+    setSaveModalError(null);
+    setSaveModalOpen(true);
+  };
+
+  const commitOwnSetupToLibrary = async () => {
+    if (!saveCandidateHash || saveCandidateArmySize === null || saveCandidateTribunHeight === null) {
+      setLibrarySaveMessage("Save failed: setup hash or metadata is not valid yet.");
+      closeSaveModal();
       return;
     }
+    const name = saveModalName.trim();
+    if (!name) {
+      setSaveModalError("Name cannot be empty.");
+      return;
+    }
+    setSaveModalError(null);
+    setSaveModalBusy(true);
     try {
       await addSetupToLibrary({
         name,
-        hash,
-        armySize,
-        tribunHeight,
+        hash: saveCandidateHash,
+        armySize: saveCandidateArmySize,
+        tribunHeight: saveCandidateTribunHeight,
       });
-      setLibrarySaveMessage(`Saved "${name}" to your setup library.`);
+      setLibrarySaveMessage(`${existingLibraryIdentityMatch ? "Renamed" : "Saved"} "${name}" in your setup library.`);
+      closeSaveModal();
       await refreshLibrary();
     } catch (error) {
-      setLibrarySaveMessage(error instanceof Error ? error.message : "Failed to save setup.");
+      const message = error instanceof Error ? error.message : "Failed to save setup.";
+      setSaveModalError(message);
+    } finally {
+      setSaveModalBusy(false);
+    }
+  };
+
+  const startEditingLibraryItem = (item: engine.SetupLibraryItem) => {
+    setEditingLibraryItemId(item.id);
+    setEditingLibraryName(item.name);
+  };
+
+  const cancelEditingLibraryItem = () => {
+    setEditingLibraryItemId(null);
+    setEditingLibraryName("");
+  };
+
+  const commitEditingLibraryItem = async (itemId: string) => {
+    const nextName = editingLibraryName.trim();
+    if (!nextName) {
+      setLibrarySaveMessage("Name cannot be empty.");
+      return;
+    }
+    setLibraryItemActionBusyId(itemId);
+    try {
+      await renameSetupLibraryItem({ itemId, name: nextName });
+      setLibrarySaveMessage(`Renamed to "${nextName}".`);
+      cancelEditingLibraryItem();
+      await refreshLibrary();
+    } catch (error) {
+      setLibrarySaveMessage(error instanceof Error ? error.message : "Failed to rename setup.");
+    } finally {
+      setLibraryItemActionBusyId(null);
+    }
+  };
+
+  const removeLibraryItem = async (item: engine.SetupLibraryItem) => {
+    if (!window.confirm(`Are you sure you want to delete "${item.name}"?`)) return;
+    setLibraryItemActionBusyId(item.id);
+    try {
+      await deleteSetupLibraryItem(item.id);
+      setLibrarySaveMessage(`Deleted "${item.name}".`);
+      if (editingLibraryItemId === item.id) {
+        cancelEditingLibraryItem();
+      }
+      await refreshLibrary();
+    } catch (error) {
+      setLibrarySaveMessage(error instanceof Error ? error.message : "Failed to delete setup.");
+    } finally {
+      setLibraryItemActionBusyId(null);
     }
   };
 
@@ -1042,7 +1134,7 @@ export default function SetupExplorer() {
   const overlayTextFill = ownIsBlack ? "#000" : "#fff";
   const overlayTextShadow = ownIsBlack ? "#fff" : "#000";
   const armySizeOverlayValue =
-    ownValidation.problems.length === 0 && ownValidation.armySize.ok ? `${ownValidation.armySize.armySize}` : "—";
+    ownValidation.problems.length === 0 && ownValidation.armySize.ok ? `${ownValidation.armySize.armySize}` : "-";
 
   const tribunSituationWellDefined =
     ownValidation.problems.length === 0 ||
@@ -1118,7 +1210,7 @@ export default function SetupExplorer() {
         </div>
       </header>
 
-      {librarySearchTarget && (
+      {librarySearchTarget && libraryEnabled && (
         <div
           onClick={() => setLibrarySearchTarget(null)}
           style={{
@@ -1166,105 +1258,320 @@ export default function SetupExplorer() {
               </button>
             </div>
 
-            <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 130px 130px 160px auto" }}>
-              <input
-                type="text"
-                value={libraryQuery}
-                onChange={(event) => setLibraryQuery(event.target.value)}
-                placeholder="Search by name or hash (case-insensitive subsequence)"
-                style={{
-                  border: "1px solid #bda98b",
-                  borderRadius: "10px",
-                  padding: "8px 10px",
-                  background: "#fff9ef",
-                }}
-              />
-              <input
-                type="number"
-                min={0}
-                step={1}
-                value={libraryArmyMin}
-                onChange={(event) => {
-                  if (event.target.value === "") {
-                    setLibraryArmyMin("");
-                    return;
-                  }
-                  setLibraryArmyMin(Math.max(0, Number(event.target.value)));
-                }}
-                placeholder="Army min"
-                style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
-              />
-              <input
-                type="number"
-                min={0}
-                step={1}
-                value={libraryArmyMax}
-                onChange={(event) => {
-                  if (event.target.value === "") {
-                    setLibraryArmyMax("");
-                    return;
-                  }
-                  setLibraryArmyMax(Math.max(0, Number(event.target.value)));
-                }}
-                placeholder="Army max"
-                style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
-              />
-              <select
-                value={libraryTribunHeight}
-                onChange={(event) => setLibraryTribunHeight(Number(event.target.value) as 0 | 1 | 2 | 3)}
-                style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
-              >
-                <option value={0}>Any tribun</option>
-                <option value={1}>Tribun 1</option>
-                <option value={2}>Tribun 2</option>
-                <option value={3}>Tribun 3</option>
-              </select>
-              <button
-                type="button"
-                onClick={() => void refreshLibrary()}
-                style={{
-                  border: "2px solid #6f5a38",
-                  borderRadius: "10px",
-                  background: "#f2d9b2",
-                  padding: "8px 10px",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                Refresh
-              </button>
+            <div style={{ display: "grid", gap: "8px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                <div style={{ fontSize: "13px", color: "#5a4630", fontWeight: 700 }}>
+                  Currently shown: {filteredLibraryItems.length}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void refreshLibrary()}
+                  style={{
+                    border: "2px solid #6f5a38",
+                    borderRadius: "10px",
+                    background: "#f2d9b2",
+                    padding: "8px 10px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "minmax(0, 1fr) auto", alignItems: "center" }}>
+                <input
+                  type="text"
+                  value={libraryQuery}
+                  onChange={(event) => setLibraryQuery(event.target.value)}
+                  placeholder="Search..."
+                  style={{
+                    border: "1px solid #bda98b",
+                    borderRadius: "10px",
+                    padding: "8px 10px",
+                    background: "#fff9ef",
+                    minWidth: 0,
+                  }}
+                />
+                <div role="radiogroup" aria-label="Search mode" style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                  <label style={{ display: "flex", gap: "5px", alignItems: "center", fontSize: "13px", color: "#5a4630", fontWeight: 700 }}>
+                    <input
+                      type="radio"
+                      name="setup-library-search-mode"
+                      checked={librarySearchMode === "name"}
+                      onChange={() => setLibrarySearchMode("name")}
+                    />
+                    Name
+                  </label>
+                  <label style={{ display: "flex", gap: "5px", alignItems: "center", fontSize: "13px", color: "#5a4630", fontWeight: 700 }}>
+                    <input
+                      type="radio"
+                      name="setup-library-search-mode"
+                      checked={librarySearchMode === "hash"}
+                      onChange={() => setLibrarySearchMode("hash")}
+                    />
+                    Hash
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "120px 120px minmax(0, 1fr)" }}>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={libraryArmyMin}
+                  onChange={(event) => {
+                    if (event.target.value === "") {
+                      setLibraryArmyMin("");
+                      return;
+                    }
+                    setLibraryArmyMin(Math.max(0, Number(event.target.value)));
+                  }}
+                  placeholder="Army min"
+                  style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={libraryArmyMax}
+                  onChange={(event) => {
+                    if (event.target.value === "") {
+                      setLibraryArmyMax("");
+                      return;
+                    }
+                    setLibraryArmyMax(Math.max(0, Number(event.target.value)));
+                  }}
+                  placeholder="Army max"
+                  style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
+                />
+                <div role="radiogroup" aria-label="Tribun height filter" style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                  {([0, 1, 2, 3] as const).map((value) => (
+                    <label key={`tribun-filter-${value}`} style={{ display: "flex", gap: "4px", alignItems: "center", fontSize: "13px", color: "#5a4630", fontWeight: 700 }}>
+                      <input
+                        type="radio"
+                        name="setup-library-tribun-filter"
+                        checked={libraryTribunHeight === value}
+                        onChange={() => setLibraryTribunHeight(value)}
+                      />
+                      {value === 0 ? "All" : `${value}`}
+                    </label>
+                  ))}
+                </div>
+              </div>
             </div>
 
             {libraryLoading && <div style={{ fontSize: "13px", color: "#5a4630" }}>Loading setup library...</div>}
             {libraryError && <div style={{ fontSize: "13px", color: "#7a2020" }}>{libraryError}</div>}
 
             <div style={{ display: "grid", gap: "8px", maxHeight: "52vh", overflow: "auto", paddingRight: "4px" }}>
-              {filteredLibraryItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => applyLibraryHash(librarySearchTarget, item.hash)}
-                  style={{
-                    border: "1px solid #ccb89b",
-                    borderRadius: "10px",
-                    background: "#fff9ef",
-                    padding: "10px",
-                    textAlign: "left",
-                    display: "grid",
-                    gap: "4px",
-                    cursor: "pointer",
-                  }}
-                >
-                  <div style={{ fontSize: "14px", fontWeight: 700, color: "#2a2218" }}>{item.name}</div>
-                  <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: "12px", color: "#5a4630" }}>{item.hash}</div>
-                  <div style={{ fontSize: "12px", color: "#5a4630" }}>
-                    Army {item.armySize} · Tribun {item.tribunHeight}
+              {filteredLibraryItems.map((item) => {
+                const isEditing = editingLibraryItemId === item.id;
+                const actionBusy = libraryItemActionBusyId === item.id;
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      border: "1px solid #ccb89b",
+                      borderRadius: "10px",
+                      background: "#fff9ef",
+                      padding: "10px",
+                      display: "grid",
+                      gap: "8px",
+                    }}
+                  >
+                    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "10px", alignItems: "start" }}>
+                      <button
+                        type="button"
+                        onClick={() => applyLibraryHash(librarySearchTarget, item.hash)}
+                        style={{
+                          border: "none",
+                          padding: 0,
+                          margin: 0,
+                          background: "transparent",
+                          textAlign: "left",
+                          cursor: "pointer",
+                          minWidth: 0,
+                        }}
+                      >
+                        <div style={{ fontSize: "14px", fontWeight: 700, color: "#2a2218" }}>{item.name}</div>
+                        <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: "12px", color: "#5a4630", wordBreak: "break-all" }}>{item.hash}</div>
+                        <div style={{ fontSize: "12px", color: "#5a4630" }}>
+                          Army {item.armySize} | Tribun {item.tribunHeight}
+                        </div>
+                      </button>
+                      <div style={{ display: "grid", gap: "6px", justifyItems: "end" }}>
+                        <button
+                          type="button"
+                          onClick={() => startEditingLibraryItem(item)}
+                          disabled={actionBusy}
+                          style={{
+                            border: "1px solid #6f5a38",
+                            borderRadius: "8px",
+                            background: "#f2d9b2",
+                            padding: "4px 8px",
+                            fontWeight: 700,
+                            cursor: actionBusy ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void removeLibraryItem(item)}
+                          disabled={actionBusy}
+                          style={{
+                            border: "1px solid #8b3b3b",
+                            borderRadius: "8px",
+                            background: "#f7d7d5",
+                            color: "#5c1c16",
+                            padding: "4px 8px",
+                            fontWeight: 700,
+                            cursor: actionBusy ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    {isEditing && (
+                      <div style={{ display: "grid", gap: "6px", gridTemplateColumns: "minmax(0, 1fr) auto auto", alignItems: "center" }}>
+                        <input
+                          type="text"
+                          value={editingLibraryName}
+                          onChange={(event) => setEditingLibraryName(event.target.value)}
+                          placeholder="Setup name"
+                          style={{
+                            border: "1px solid #bda98b",
+                            borderRadius: "8px",
+                            padding: "6px 8px",
+                            background: "#fff",
+                            minWidth: 0,
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void commitEditingLibraryItem(item.id)}
+                          disabled={actionBusy}
+                          style={{
+                            border: "1px solid #6f5a38",
+                            borderRadius: "8px",
+                            background: "#f2d9b2",
+                            padding: "6px 8px",
+                            fontWeight: 700,
+                            cursor: actionBusy ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEditingLibraryItem}
+                          disabled={actionBusy}
+                          style={{
+                            border: "1px solid #6f5a38",
+                            borderRadius: "8px",
+                            background: "#fff6e8",
+                            padding: "6px 8px",
+                            fontWeight: 700,
+                            cursor: actionBusy ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
                   </div>
-                </button>
-              ))}
+                );
+              })}
               {!libraryLoading && filteredLibraryItems.length === 0 && (
                 <div style={{ fontSize: "13px", color: "#5a4630" }}>No matching setups found.</div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {saveModalOpen && (
+        <div
+          onClick={() => {
+            if (!saveModalBusy) closeSaveModal();
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(14, 10, 6, 0.58)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 82,
+            padding: "14px",
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: "min(420px, 100%)",
+              borderRadius: "16px",
+              border: "2px solid #3c3226",
+              background: "#fffaf0",
+              padding: "14px",
+              display: "grid",
+              gap: "10px",
+            }}
+          >
+            <div style={{ fontSize: "18px", fontWeight: 700, color: "#2a2218" }}>
+              {addOrRenameLabel}
+            </div>
+            <input
+              type="text"
+              value={saveModalName}
+              onChange={(event) => setSaveModalName(event.target.value)}
+              placeholder="Setup name"
+              maxLength={80}
+              autoFocus
+              style={{
+                border: "1px solid #bda98b",
+                borderRadius: "10px",
+                padding: "8px 10px",
+                background: "#fff9ef",
+              }}
+            />
+            {saveModalError && (
+              <div style={{ fontSize: "13px", fontWeight: 600, color: "#7c1e1e", lineHeight: 1.35 }}>{saveModalError}</div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => closeSaveModal()}
+                disabled={saveModalBusy}
+                style={{
+                  border: "1px solid #6f5a38",
+                  borderRadius: "8px",
+                  background: "#fff6e8",
+                  padding: "6px 10px",
+                  fontWeight: 700,
+                  cursor: saveModalBusy ? "not-allowed" : "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void commitOwnSetupToLibrary()}
+                disabled={saveModalBusy}
+                style={{
+                  border: "2px solid #6f5a38",
+                  borderRadius: "8px",
+                  background: "#f2d9b2",
+                  padding: "6px 10px",
+                  fontWeight: 700,
+                  cursor: saveModalBusy ? "not-allowed" : "pointer",
+                }}
+              >
+                {saveModalBusy ? "Saving..." : "Save"}
+              </button>
             </div>
           </div>
         </div>
@@ -1284,6 +1591,7 @@ export default function SetupExplorer() {
                 onFlipHash={flipOwnHashInput}
                 placeholder="16-char base37 code"
                 invalid={ownHashStatus === "invalid"}
+                showLibraryButton={libraryEnabled}
               />
               <div style={{ fontSize: "12px", color: ownHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
                 {ownHashStatus === "invalid" ? "Invalid hash." : ownHashStatus === "valid" ? "Loaded." : "Paste a hash to load."}
@@ -1312,6 +1620,7 @@ export default function SetupExplorer() {
                     onFlipHash={flipEnemyHashInput}
                     placeholder="16-char base37 code"
                     invalid={enemyHashStatus === "invalid"}
+                    showLibraryButton={libraryEnabled}
                   />
                   <div style={{ fontSize: "12px", color: enemyHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
                     {enemyHashStatus === "invalid" ? "Invalid hash." : enemyHashStatus === "valid" ? "Preview on." : "Paste a hash."}
@@ -1733,24 +2042,26 @@ export default function SetupExplorer() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
             <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Hash</div>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={addOwnSetupToLibrary}
-                disabled={ownValidation.problems.length !== 0 || !ownValidation.hash}
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: "10px",
-                  border: "2px solid #6f5a38",
-                  background: "#fff6e8",
-                  fontWeight: 700,
-                  cursor: ownValidation.problems.length !== 0 || !ownValidation.hash ? "not-allowed" : "pointer",
-                  opacity: ownValidation.problems.length !== 0 || !ownValidation.hash ? 0.55 : 1,
-                  height: "34px",
-                }}
-                title="Save this setup to your library"
-              >
-                Add to library
-              </button>
+              {libraryEnabled && (
+                <button
+                  type="button"
+                  onClick={addOwnSetupToLibrary}
+                  disabled={!saveCandidateHash || saveCandidateArmySize === null || saveCandidateTribunHeight === null}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: "10px",
+                    border: "2px solid #6f5a38",
+                    background: "#fff6e8",
+                    fontWeight: 700,
+                    cursor: !saveCandidateHash || saveCandidateArmySize === null || saveCandidateTribunHeight === null ? "not-allowed" : "pointer",
+                    opacity: !saveCandidateHash || saveCandidateArmySize === null || saveCandidateTribunHeight === null ? 0.55 : 1,
+                    height: "34px",
+                  }}
+                  title={`${addOrRenameLabel} this setup in your library`}
+                >
+                  {addOrRenameLabel}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={copyOwnHashToClipboard}
@@ -1787,7 +2098,7 @@ export default function SetupExplorer() {
               wordBreak: "break-all",
             }}
           >
-            {ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : "—"}
+            {ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : "-"}
           </div>
           <div style={{ fontSize: "12px", color: "#5a4630" }}>
             You can click and drag to select the hash, or use the Copy button.
@@ -1807,16 +2118,16 @@ export default function SetupExplorer() {
             <div>
               Army size:{" "}
               <span style={{ fontFamily: '"JetBrains Mono", monospace', fontWeight: 700 }}>
-                {ownValidation.problems.length === 0 && ownValidation.armySize.ok ? ownValidation.armySize.armySize : "—"}
+                {ownValidation.problems.length === 0 && ownValidation.armySize.ok ? ownValidation.armySize.armySize : "-"}
               </span>
             </div>
-            <div>Tribun height: {ownValidation.tribunHeight > 0 ? ownValidation.tribunHeight : "—"}</div>
+            <div>Tribun height: {ownValidation.tribunHeight > 0 ? ownValidation.tribunHeight : "-"}</div>
             <div style={{ display: "grid", gap: "2px" }}>
               <div style={{ fontWeight: 700 }}>Move generation</div>
-              <div>Move: {moveStats ? moveStats.move : "—"}</div>
-              <div>Split: {moveStats ? moveStats.split : "—"}</div>
-              <div>Combination: {moveStats ? moveStats.combination : "—"}</div>
-              <div>Total: {moveStats ? moveStats.total : "—"}</div>
+              <div>Move: {moveStats ? moveStats.move : "-"}</div>
+              <div>Split: {moveStats ? moveStats.split : "-"}</div>
+              <div>Combination: {moveStats ? moveStats.combination : "-"}</div>
+              <div>Total: {moveStats ? moveStats.total : "-"}</div>
             </div>
           </div>
         </section>
@@ -1824,3 +2135,5 @@ export default function SetupExplorer() {
     </div>
   );
 }
+
+

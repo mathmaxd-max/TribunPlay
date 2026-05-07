@@ -11,6 +11,7 @@ type SetupHashInputProps = {
   placeholder?: string;
   invalid?: boolean;
   disabled?: boolean;
+  showLibraryButton?: boolean;
 };
 
 const ICON_SIZE = 24;
@@ -78,19 +79,37 @@ function IconWithOutline(props: { fillUrl: string; outlineUrl: string; size: num
 }
 
 export default function SetupHashInput(props: SetupHashInputProps) {
-  const { value, onChange, onOpenLibrary, onFlipHash, placeholder, invalid = false, disabled = false } = props;
+  const {
+    value,
+    onChange,
+    onOpenLibrary,
+    onFlipHash,
+    placeholder,
+    invalid = false,
+    disabled = false,
+    showLibraryButton = true,
+  } = props;
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", gap: "8px", alignItems: "center" }}>
-      <button
-        type="button"
-        onClick={onOpenLibrary}
-        disabled={disabled}
-        title="Open setup library"
-        style={{ ...buttonStyle, opacity: disabled ? 0.6 : 1, cursor: disabled ? "not-allowed" : "pointer" }}
-      >
-        <IconWithOutline fillUrl={LIBRARY_ICON_URL} outlineUrl={LIBRARY_OUTLINE_ICON_URL} size={ICON_SIZE} />
-      </button>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: showLibraryButton ? "auto minmax(0, 1fr) auto" : "minmax(0, 1fr) auto",
+        gap: "8px",
+        alignItems: "center",
+      }}
+    >
+      {showLibraryButton && (
+        <button
+          type="button"
+          onClick={onOpenLibrary}
+          disabled={disabled}
+          title="Open setup library"
+          style={{ ...buttonStyle, opacity: disabled ? 0.6 : 1, cursor: disabled ? "not-allowed" : "pointer" }}
+        >
+          <IconWithOutline fillUrl={LIBRARY_ICON_URL} outlineUrl={LIBRARY_OUTLINE_ICON_URL} size={ICON_SIZE} />
+        </button>
+      )}
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
