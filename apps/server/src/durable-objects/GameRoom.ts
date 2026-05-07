@@ -13,6 +13,7 @@ type RoomSettings = {
 	hostColor: "black" | "white" | "random";
 	startColor: "black" | "white" | "random";
 	nextStartColor: "same" | "other" | "random";
+	setupConfig: engine.SetupConfig;
 };
 
 const DEFAULT_TIME_CONTROL: TimeControl = {
@@ -25,6 +26,7 @@ const DEFAULT_ROOM_SETTINGS: RoomSettings = {
 	hostColor: "random",
 	startColor: "random",
 	nextStartColor: "other",
+	setupConfig: engine.normalizeSetupConfig(undefined),
 };
 
 const readColorClock = (raw: any, fallback: ColorClock): ColorClock => {
@@ -81,6 +83,23 @@ const normalizeRoomSettings = (raw: any): RoomSettings => {
 		hostColor,
 		startColor,
 		nextStartColor,
+		setupConfig: engine.normalizeSetupConfig(raw.setupConfig),
+	};
+};
+
+const normalizeSetupSelections = (raw: any): engine.SetupSelectionsBySide => {
+	const readSelection = (value: any): engine.SetupSelection | null => {
+		if (!value || typeof value !== "object" || typeof value.hash !== "string") {
+			return null;
+		}
+		return {
+			hash: engine.normalizeSetupHash(value.hash),
+			flip: Boolean(value.flip),
+		};
+	};
+	return {
+		black: readSelection(raw?.black),
+		white: readSelection(raw?.white),
 	};
 };
 
@@ -123,6 +142,7 @@ export class GameRoom implements DurableObject {
 	private gameStartTime: number | null = null;
 	private roomStatus: RoomStatus = "lobby";
 	private roomSettings: RoomSettings = { ...DEFAULT_ROOM_SETTINGS };
+	private setupSelections: engine.SetupSelectionsBySide = { black: null, white: null };
 	private initialBoard: Uint8Array | null = null;
 	private currentStartColor: engine.Color | null = null;
 	private rematchOffers: { black: boolean; white: boolean } = { black: false, white: false };
@@ -380,10 +400,10 @@ export class GameRoom implements DurableObject {
 		const game = await this.env.DB.prepare(
 			supportsBlocked
 				? `SELECT status, initial_board, initial_turn, turn, ply, draw_offer_by, draw_offer_blocked,
-			        time_control_json, room_settings_json, clock_black_ms, clock_white_ms, created_at, started_at
+			        time_control_json, room_settings_json, setup_state_json, clock_black_ms, clock_white_ms, created_at, started_at
 			 FROM games WHERE id = ?`
 				: `SELECT status, initial_board, initial_turn, turn, ply, draw_offer_by,
-			        time_control_json, room_settings_json, clock_black_ms, clock_white_ms, created_at, started_at
+			        time_control_json, room_settings_json, setup_state_json, clock_black_ms, clock_white_ms, created_at, started_at
 			 FROM games WHERE id = ?`
 		).bind(gameId).first<{
 			status: string;
@@ -395,6 +415,7 @@ export class GameRoom implements DurableObject {
 			draw_offer_blocked?: number | null;
 			time_control_json: string | null;
 			room_settings_json: string | null;
+			setup_state_json: string | null;
 			clock_black_ms: number | null;
 			clock_white_ms: number | null;
 			created_at: string;
@@ -417,6 +438,15 @@ export class GameRoom implements DurableObject {
 			}
 		} else {
 			this.roomSettings = { ...DEFAULT_ROOM_SETTINGS };
+		}
+		if (game.setup_state_json) {
+			try {
+				this.setupSelections = normalizeSetupSelections(JSON.parse(game.setup_state_json));
+			} catch {
+				this.setupSelections = { black: null, white: null };
+			}
+		} else {
+			this.setupSelections = { black: null, white: null };
 		}
 		if (this.roomStatus !== "ended") {
 			this.rematchOffers = { black: false, white: false };
@@ -594,6 +624,7 @@ export class GameRoom implements DurableObject {
 			winner: this.gameState.winner ?? null,
 			roomStatus: this.roomStatus,
 			roomSettings: this.roomSettings,
+			setupSelections: this.getEffectiveLobbySelections(),
 		};
 		
 		// Include clock and buffer state in snapshot
@@ -649,9 +680,51 @@ export class GameRoom implements DurableObject {
 		return counts.black > 0 && counts.white > 0;
 	}
 
+	private getEffectiveLobbySelections(): engine.SetupSelectionsBySide {
+		const setupConfig = this.roomSettings.setupConfig;
+		if (setupConfig.enabled && setupConfig.mode === "shared" && setupConfig.sharedSelection) {
+			return {
+				black: {
+					hash: setupConfig.sharedSelection.hash,
+					flip: setupConfig.sharedSelection.flipBlack,
+				},
+				white: {
+					hash: setupConfig.sharedSelection.hash,
+					flip: setupConfig.sharedSelection.flipWhite,
+				},
+			};
+		}
+		return this.setupSelections;
+	}
+
+	private validateLobbySetupState(): {
+		ok: boolean;
+		issues: engine.SetupValidationIssue[];
+		selections: engine.SetupSelectionsBySide;
+	} {
+		const setupConfig = this.roomSettings.setupConfig;
+		const effectiveSelections = this.getEffectiveLobbySelections();
+		if (!setupConfig.enabled) {
+			return { ok: true, issues: [], selections: effectiveSelections };
+		}
+		const built = engine.buildBoardFromSetups({
+			config: setupConfig,
+			freeSelections: effectiveSelections,
+		});
+		if ("issues" in built) {
+			return {
+				ok: false,
+				issues: built.issues,
+				selections: effectiveSelections,
+			};
+		}
+		return { ok: true, issues: [], selections: built.selections };
+	}
+
 	private broadcastRoomUpdate(): void {
 		const counts = this.getConnectionCounts();
-		const canStart = this.roomStatus === "lobby" && counts.black > 0 && counts.white > 0;
+		const setupValidation = this.validateLobbySetupState();
+		const canStart = this.roomStatus === "lobby" && counts.black > 0 && counts.white > 0 && setupValidation.ok;
 		const rematchReady = this.rematchOffers.black && this.rematchOffers.white;
 		const message = JSON.stringify({
 			t: "room",
@@ -661,6 +734,11 @@ export class GameRoom implements DurableObject {
 			canStart,
 			rematch: { ...this.rematchOffers },
 			rematchReady,
+			setup: {
+				config: this.roomSettings.setupConfig,
+				selections: setupValidation.selections,
+				issues: setupValidation.issues,
+			},
 		});
 		for (const { ws } of this.connections.values()) {
 			if (ws.readyState === 1) {
@@ -691,7 +769,7 @@ export class GameRoom implements DurableObject {
 		if (!this.timeControl) {
 			throw new Error("Time control not loaded");
 		}
-		if (!this.initialBoard) {
+		if (!this.initialBoard && !this.roomSettings.setupConfig.enabled) {
 			throw new Error("Initial board not loaded");
 		}
 		if (!this.gameId) {
@@ -705,9 +783,28 @@ export class GameRoom implements DurableObject {
 		this.currentStartColor = startColor;
 		const nowIso = new Date().toISOString();
 		const nowMs = Date.parse(nowIso);
+		const setupConfig = this.roomSettings.setupConfig;
+		let effectiveSetupSelections = this.getEffectiveLobbySelections();
+		let nextInitialBoard: Uint8Array;
+		if (setupConfig.enabled) {
+			const built = engine.buildBoardFromSetups({
+				config: setupConfig,
+				freeSelections: effectiveSetupSelections,
+			});
+			if ("issues" in built) {
+				const firstIssue = built.issues[0];
+				throw new Error(firstIssue?.message ?? "Invalid setup configuration");
+			}
+			effectiveSetupSelections = built.selections;
+			nextInitialBoard = built.board;
+		} else {
+			nextInitialBoard = new Uint8Array(this.initialBoard!);
+		}
+		this.initialBoard = new Uint8Array(nextInitialBoard);
+		this.setupSelections = effectiveSetupSelections;
 
 		this.gameState = {
-			board: new Uint8Array(this.initialBoard),
+			board: new Uint8Array(nextInitialBoard),
 			turn: startColor,
 			ply: 0,
 			drawOfferBy: null,
@@ -736,7 +833,7 @@ export class GameRoom implements DurableObject {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, initial_turn = ?, draw_offer_by = ?, draw_offer_blocked = ?,
 				   clock_black_ms = ?, clock_white_ms = ?, status = ?, winner_color = ?, end_opcode = ?, end_reason = ?,
-				   started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
+				   initial_board = ?, setup_state_json = ?, started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
 			).bind(
 				this.gameState.ply,
 				this.gameState.turn,
@@ -749,6 +846,8 @@ export class GameRoom implements DurableObject {
 				null,
 				null,
 				null,
+				nextInitialBoard,
+				JSON.stringify(this.setupSelections),
 				nowIso,
 				startColor,
 				this.gameId
@@ -757,7 +856,7 @@ export class GameRoom implements DurableObject {
 			await this.env.DB.prepare(
 				`UPDATE games SET ply = ?, turn = ?, initial_turn = ?, draw_offer_by = ?,
 				   clock_black_ms = ?, clock_white_ms = ?, status = ?, winner_color = ?, end_opcode = ?, end_reason = ?,
-				   started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
+				   initial_board = ?, setup_state_json = ?, started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
 			).bind(
 				this.gameState.ply,
 				this.gameState.turn,
@@ -769,6 +868,8 @@ export class GameRoom implements DurableObject {
 				null,
 				null,
 				null,
+				nextInitialBoard,
+				JSON.stringify(this.setupSelections),
 				nowIso,
 				startColor,
 				this.gameId
@@ -818,7 +919,104 @@ export class GameRoom implements DurableObject {
 				this.sendError(ws, "Both players must be connected");
 				return;
 			}
+			const setupValidation = this.validateLobbySetupState();
+			if (!setupValidation.ok) {
+				this.sendError(ws, setupValidation.issues[0]?.message ?? "Setup configuration is incomplete");
+				return;
+			}
 			await this.startNewGame("start");
+		} else if (message.t === "set_setup_selection") {
+			const conn = this.connections.get(connectionId);
+			if (!conn || conn.role === "spectator") {
+				this.sendError(ws, "Only players can set setup selections");
+				return;
+			}
+			if (this.roomStatus !== "lobby") {
+				this.sendError(ws, "Setups can only be changed in the lobby");
+				return;
+			}
+			const setupConfig = this.roomSettings.setupConfig;
+			if (!setupConfig.enabled) {
+				this.sendError(ws, "Custom setups are disabled");
+				return;
+			}
+			if (setupConfig.mode !== "free") {
+				this.sendError(ws, "Setup selections are host-controlled in shared mode");
+				return;
+			}
+			if (typeof message.hash !== "string") {
+				this.sendError(ws, "Missing setup hash");
+				return;
+			}
+			const side: "black" | "white" = conn.role === "black" ? "black" : "white";
+			const validation = engine.validateSetupSelection(
+				{ hash: message.hash, flip: Boolean(message.flip) },
+				setupConfig,
+				side,
+			);
+			if ("issues" in validation) {
+				this.sendError(ws, validation.issues[0]?.message ?? "Invalid setup selection");
+				return;
+			}
+			this.setupSelections = {
+				...this.setupSelections,
+				[side]: validation.selection,
+			};
+			if (!this.gameId) {
+				this.gameId = (this.state.id as any).name || this.state.id.toString();
+			}
+			await this.env.DB
+				.prepare("UPDATE games SET setup_state_json = ? WHERE id = ?")
+				.bind(JSON.stringify(this.setupSelections), this.gameId)
+				.run();
+			this.broadcastRoomUpdate();
+		} else if (message.t === "set_shared_setup") {
+			const conn = this.connections.get(connectionId);
+			if (!conn || conn.role !== "black") {
+				this.sendError(ws, "Only the host can set shared setup");
+				return;
+			}
+			if (this.roomStatus !== "lobby") {
+				this.sendError(ws, "Setups can only be changed in the lobby");
+				return;
+			}
+			const setupConfig = this.roomSettings.setupConfig;
+			if (!setupConfig.enabled || setupConfig.mode !== "shared") {
+				this.sendError(ws, "Shared setup mode is not enabled");
+				return;
+			}
+			if (typeof message.hash !== "string") {
+				this.sendError(ws, "Missing shared setup hash");
+				return;
+			}
+			const normalizedHash = engine.normalizeSetupHash(message.hash);
+			const nextConfig = engine.normalizeSetupConfig({
+				...setupConfig,
+				sharedSelection: {
+					hash: normalizedHash,
+					flipBlack: Boolean(message.flipHost),
+					flipWhite: Boolean(message.flipOpponent),
+				},
+			});
+			const built = engine.buildBoardFromSetups({ config: nextConfig });
+			if ("issues" in built) {
+				this.sendError(ws, built.issues[0]?.message ?? "Invalid shared setup");
+				return;
+			}
+			this.roomSettings = {
+				...this.roomSettings,
+				setupConfig: nextConfig,
+			};
+			this.setupSelections = built.selections;
+			if (!this.gameId) {
+				this.gameId = (this.state.id as any).name || this.state.id.toString();
+			}
+			await this.env.DB.batch([
+				this.env.DB
+					.prepare("UPDATE games SET room_settings_json = ?, setup_state_json = ? WHERE id = ?")
+					.bind(JSON.stringify(this.roomSettings), JSON.stringify(this.setupSelections), this.gameId),
+			]);
+			this.broadcastRoomUpdate();
 		} else if (message.t === "rematch_offer") {
 			const conn = this.connections.get(connectionId);
 			if (!conn || conn.role === "spectator") {

@@ -1,4 +1,5 @@
 import defaultPosition from './default-position.json';
+import { type SetupDecoded, type SetupMasks } from './setup/TribunSetupCodec';
 export type Color = 0 | 1;
 export type Height = 0 | 1 | 2 | 3 | 4 | 6 | 8;
 export interface Unit {
@@ -60,6 +61,74 @@ export declare function deriveBoardDelta(beforeBoard: Uint8Array, afterBoard: Ui
 export declare function getAttackReachableTiles(fromCid: number, height: Height, color: Color, isTribun: boolean, board: Uint8Array): number[];
 export declare function generateLegalActions(state: State): Uint32Array;
 export declare function applyAction(state: State, action: number): State;
+export type SetupMode = 'shared' | 'free';
+export interface SetupSelection {
+    hash: string;
+    flip: boolean;
+}
+export interface SetupConfig {
+    enabled: boolean;
+    mode: SetupMode;
+    sharedSelection: {
+        hash: string;
+        flipBlack: boolean;
+        flipWhite: boolean;
+    } | null;
+    allowedTribunHeights: Array<1 | 2 | 3>;
+    armySize: {
+        min: number | null;
+        max: number | null;
+    };
+}
+export type SetupSelectionsBySide = {
+    black: SetupSelection | null;
+    white: SetupSelection | null;
+};
+export interface SetupLibraryItem {
+    id: string;
+    name: string;
+    hash: string;
+    armySize: number;
+    tribunHeight: 1 | 2 | 3;
+    createdAt: string;
+    updatedAt: string;
+}
+export type SetupValidationErrorCode = 'INVALID_HASH' | 'TRIBUN_HEIGHT_NOT_ALLOWED' | 'ARMY_SIZE_TOO_SMALL' | 'ARMY_SIZE_TOO_LARGE' | 'SETUP_OVERLAP' | 'SETUP_REQUIRED';
+export interface SetupValidationIssue {
+    code: SetupValidationErrorCode;
+    message: string;
+    side?: 'black' | 'white';
+}
+export type SetupBoardBuildResult = {
+    ok: true;
+    board: Uint8Array;
+    selections: {
+        black: SetupSelection;
+        white: SetupSelection;
+    };
+    decoded: {
+        black: SetupDecoded;
+        white: SetupDecoded;
+    };
+} | {
+    ok: false;
+    issues: SetupValidationIssue[];
+};
+export declare function flipSetup(setup: SetupMasks): SetupMasks;
+export declare function normalizeSetupHash(hash: string): string;
+export declare function normalizeSetupConfig(raw?: Partial<SetupConfig> | null): SetupConfig;
+export declare function validateSetupSelection(selection: SetupSelection | null, config: SetupConfig, side: 'black' | 'white'): {
+    ok: true;
+    selection: SetupSelection;
+    decoded: SetupDecoded;
+} | {
+    ok: false;
+    issues: SetupValidationIssue[];
+};
+export declare function buildBoardFromSetups(params: {
+    config: SetupConfig;
+    freeSelections?: SetupSelectionsBySide | null;
+}): SetupBoardBuildResult;
 export interface DefaultPosition {
     black: {
         [unitType: string]: number[][];

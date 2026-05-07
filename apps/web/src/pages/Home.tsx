@@ -1,5 +1,6 @@
 import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import * as engine from '@tribunplay/engine';
 import {
   buildIdentityPayload,
   getStoredIdentity,
@@ -16,6 +17,7 @@ import { useHealthCheck } from '../utils/useHealthCheck';
 
 type RoomColorOption = 'black' | 'white' | 'random';
 type NextStartOption = 'same' | 'other' | 'random';
+type SetupMode = 'shared' | 'free';
 type ClockInput = {
   initialSeconds: number | '';
   bufferSeconds: number | '';
@@ -167,6 +169,11 @@ export default function Home() {
   const [hostColor, setHostColor] = useState<RoomColorOption>('random');
   const [startColor, setStartColor] = useState<RoomColorOption>('random');
   const [nextStartColor, setNextStartColor] = useState<NextStartOption>('other');
+  const [customSetupsEnabled, setCustomSetupsEnabled] = useState(false);
+  const [setupMode, setSetupMode] = useState<SetupMode>('shared');
+  const [allowedTribunHeights, setAllowedTribunHeights] = useState<Array<1 | 2 | 3>>([1, 2, 3]);
+  const [armyMin, setArmyMin] = useState<number | ''>('');
+  const [armyMax, setArmyMax] = useState<number | ''>('');
   const [sameClockSettings, setSameClockSettings] = useState(true);
   const [sharedClock, setSharedClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
   const [blackClock, setBlackClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
@@ -311,6 +318,30 @@ export default function Home() {
     };
   };
 
+  const toggleTribunHeight = (height: 1 | 2 | 3) => {
+    setAllowedTribunHeights((prev) => {
+      if (prev.includes(height)) {
+        const next = prev.filter((item) => item !== height);
+        return next.length > 0 ? next : prev;
+      }
+      return [...prev, height].sort((a, b) => a - b);
+    });
+  };
+
+  const buildSetupConfig = (): engine.SetupConfig => {
+    const config = engine.normalizeSetupConfig({
+      enabled: customSetupsEnabled,
+      mode: setupMode,
+      sharedSelection: null,
+      allowedTribunHeights,
+      armySize: {
+        min: armyMin === '' ? null : clampNumber(armyMin, 0),
+        max: armyMax === '' ? null : clampNumber(armyMax, 0),
+      },
+    });
+    return config;
+  };
+
   const requireIdentityPayload = () => {
     const current = getStoredIdentity();
     if (!current) {
@@ -412,6 +443,17 @@ export default function Home() {
       );
       return;
     }
+    if (customSetupsEnabled) {
+      if (armyMin !== '' && armyMax !== '' && armyMin > armyMax) {
+        setError('Setup constraints invalid: minimum army size cannot exceed maximum.');
+        return;
+      }
+      const config = buildSetupConfig();
+      if (config.allowedTribunHeights.length === 0) {
+        setError('Setup constraints invalid: at least one tribun height must be allowed.');
+        return;
+      }
+    }
 
     setLoadingAction('create');
     setError(null);
@@ -422,7 +464,9 @@ export default function Home() {
       const { current, payload: identityPayload } = requireIdentityPayload();
       const captchaToken = getCaptchaTokenOrThrow();
       const timeControl = buildTimeControl();
-      const roomSettings = { hostColor, startColor, nextStartColor };
+      const setupConfig = buildSetupConfig();
+      const setupSelections: engine.SetupSelectionsBySide = { black: null, white: null };
+      const roomSettings = { hostColor, startColor, nextStartColor, setupConfig, setupSelections };
       const turnstilePart = captchaToken ? { turnstileToken: captchaToken } : {};
       const doCreate = async (payload: unknown) =>
         fetch(`${API_BASE}/api/game/create`, {
@@ -843,6 +887,131 @@ export default function Home() {
                   <option value="random">Random</option>
                 </select>
               </div>
+            </div>
+
+            <div
+              style={{
+                padding: '14px',
+                borderRadius: '12px',
+                border: '1px solid #d7c5ab',
+                background: '#fff7ea',
+                display: 'grid',
+                gap: '10px',
+              }}
+            >
+              <div style={sectionLabelStyle}>Setup Rules</div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 700 }}>
+                <input
+                  type="checkbox"
+                  checked={customSetupsEnabled}
+                  onChange={(event) => setCustomSetupsEnabled(event.target.checked)}
+                />
+                Custom setups enabled
+              </label>
+
+              {customSetupsEnabled && (
+                <div style={{ display: 'grid', gap: '10px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setSetupMode('shared')}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '10px',
+                        border: '2px solid #6f5a38',
+                        background: setupMode === 'shared' ? '#f2d9b2' : '#fff6e8',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Shared setup
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSetupMode('free')}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '10px',
+                        border: '2px solid #6f5a38',
+                        background: setupMode === 'free' ? '#f2d9b2' : '#fff6e8',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Free setups
+                    </button>
+                  </div>
+
+                  <div style={{ fontSize: '13px', color: '#5a4630' }}>
+                    Setup hashes are selected in the game lobby after both players join.
+                    {setupMode === 'shared'
+                      ? ' In shared mode only the host chooses the shared setup and opponent flip there.'
+                      : ' In free mode each player chooses their own setup there.'}
+                  </div>
+
+                  <div style={{ display: 'grid', gap: '6px' }}>
+                    <div style={fieldLabelStyle}>Allowed Tribun Heights</div>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {[1, 2, 3].map((height) => (
+                        <button
+                          key={height}
+                          type="button"
+                          onClick={() => toggleTribunHeight(height as 1 | 2 | 3)}
+                          style={{
+                            padding: '6px 10px',
+                            borderRadius: '8px',
+                            border: '2px solid #6f5a38',
+                            background: allowedTribunHeights.includes(height as 1 | 2 | 3) ? '#f2d9b2' : '#fff6e8',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {height}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    <div>
+                      <div style={fieldLabelStyle}>Army Size Min</div>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={armyMin}
+                        onChange={(event) => {
+                          if (event.target.value === '') {
+                            setArmyMin('');
+                            return;
+                          }
+                          setArmyMin(clampNumber(Number(event.target.value), 0));
+                        }}
+                        placeholder="No min"
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div>
+                      <div style={fieldLabelStyle}>Army Size Max</div>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={armyMax}
+                        onChange={(event) => {
+                          if (event.target.value === '') {
+                            setArmyMax('');
+                            return;
+                          }
+                          setArmyMax(clampNumber(Number(event.target.value), 0));
+                        }}
+                        placeholder="No max"
+                        style={inputStyle}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div

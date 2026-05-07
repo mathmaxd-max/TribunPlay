@@ -10,6 +10,7 @@ const distIndexPath = join(distDir, 'index.js');
 const distPositionPath = join(distDir, 'default-position.json');
 const distSetupDirPath = join(distDir, 'setup');
 const importLine = "import defaultPosition from './default-position.json';";
+const setupImportLine = "from './setup/TribunSetupCodec';";
 const uiBackendExportLine = "export * from './ui-backend';";
 const setupExportLine = "export * from \"./setup/TribunSetupCodec\";";
 
@@ -29,6 +30,9 @@ async function loadEngineForTest() {
   const patchedSource = indexSource.replace(
     importLine,
     `const defaultPosition = ${defaultPositionSource.trim()};`
+  ).replace(
+    setupImportLine,
+    "from './setup/TribunSetupCodec.js';"
   ).replace(
     setupExportLine,
     "export * from \"./setup/TribunSetupCodec.js\";"
@@ -124,6 +128,28 @@ async function run() {
   assert.equal(defaultDecoded.ok, true);
   assert.ok(defaultDecoded.setup);
   assert.equal(engine.encodePosition(defaultDecoded.setup), "TRADITIONALSETUP");
+  const flippedOnce = engine.flipSetup(defaultDecoded.setup);
+  const flippedTwice = engine.flipSetup(flippedOnce);
+  assert.equal(flippedTwice.tribTile, defaultDecoded.setup.tribTile);
+  assert.equal(flippedTwice.mask1, defaultDecoded.setup.mask1);
+  assert.equal(flippedTwice.mask2, defaultDecoded.setup.mask2);
+  assert.equal(flippedTwice.mask3, defaultDecoded.setup.mask3);
+
+  const builtBoard = engine.buildBoardFromSetups({
+    config: engine.normalizeSetupConfig({
+      enabled: true,
+      mode: "shared",
+      sharedSelection: {
+        hash: "TRADITIONALSETUP",
+        flipBlack: false,
+        flipWhite: true,
+      },
+      allowedTribunHeights: [1, 2, 3],
+      armySize: { min: null, max: null },
+    }),
+  });
+  assert.equal(builtBoard.ok, true);
+  assert.equal(builtBoard.board.length, 121);
 
   const invalidDecoded = engine.decodeCodeDetailed("!!!!!!!!!!!!!!!!");
   assert.equal(invalidDecoded.ok, false);

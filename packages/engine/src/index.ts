@@ -1,5 +1,10 @@
 // Core types
 import defaultPosition from './default-position.json';
+import {
+  decodeCodeDetailed,
+  type SetupDecoded,
+  type SetupMasks,
+} from './setup/TribunSetupCodec';
 
 export type Color = 0 | 1;
 export type Height = 0 | 1 | 2 | 3 | 4 | 6 | 8;
@@ -1831,6 +1836,334 @@ export function applyAction(state: State, action: number): State {
     drawOfferBlocked: newDrawOfferBlocked,
     status: newStatus,
     winner: newWinner,
+  };
+}
+
+export type SetupMode = 'shared' | 'free';
+
+export interface SetupSelection {
+  hash: string;
+  flip: boolean;
+}
+
+export interface SetupConfig {
+  enabled: boolean;
+  mode: SetupMode;
+  sharedSelection: {
+    hash: string;
+    flipBlack: boolean;
+    flipWhite: boolean;
+  } | null;
+  allowedTribunHeights: Array<1 | 2 | 3>;
+  armySize: {
+    min: number | null;
+    max: number | null;
+  };
+}
+
+export type SetupSelectionsBySide = {
+  black: SetupSelection | null;
+  white: SetupSelection | null;
+};
+
+export interface SetupLibraryItem {
+  id: string;
+  name: string;
+  hash: string;
+  armySize: number;
+  tribunHeight: 1 | 2 | 3;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SetupValidationErrorCode =
+  | 'INVALID_HASH'
+  | 'TRIBUN_HEIGHT_NOT_ALLOWED'
+  | 'ARMY_SIZE_TOO_SMALL'
+  | 'ARMY_SIZE_TOO_LARGE'
+  | 'SETUP_OVERLAP'
+  | 'SETUP_REQUIRED';
+
+export interface SetupValidationIssue {
+  code: SetupValidationErrorCode;
+  message: string;
+  side?: 'black' | 'white';
+}
+
+export type SetupBoardBuildResult =
+  | {
+      ok: true;
+      board: Uint8Array;
+      selections: { black: SetupSelection; white: SetupSelection };
+      decoded: { black: SetupDecoded; white: SetupDecoded };
+    }
+  | { ok: false; issues: SetupValidationIssue[] };
+
+const CANONICAL_SETUP_CIDS = [
+  120, 119, 109, 118, 108, 98, 117, 107, 97, 87, 116, 106, 96, 86, 76, 115, 105, 95, 85, 75, 65,
+  104, 94, 84, 74, 64, 103, 93, 83, 73, 63, 53, 92, 82, 72, 62, 52,
+] as const;
+
+const setupIndexToCoord = CANONICAL_SETUP_CIDS.map((cid) => ({
+  x: Math.floor(cid / 11) - 5,
+  y: (cid % 11) - 5,
+}));
+
+const setupCoordToIndex = new Map<string, number>();
+for (let i = 0; i < setupIndexToCoord.length; i += 1) {
+  const coord = setupIndexToCoord[i];
+  setupCoordToIndex.set(`${coord.x},${coord.y}`, i);
+}
+
+const getSetupBit = (mask: bigint, idx: number): boolean => ((mask >> BigInt(idx)) & 1n) === 1n;
+
+const setSetupBit = (mask: bigint, idx: number): bigint => mask | (1n << BigInt(idx));
+
+const flipSetupIndex = (index: number): number => {
+  const coord = setupIndexToCoord[index];
+  if (!coord) {
+    throw new Error(`Invalid setup index: ${index}`);
+  }
+  const flipped = setupCoordToIndex.get(`${coord.y},${coord.x}`);
+  if (flipped === undefined) {
+    throw new Error(`Setup flip failed for coordinate (${coord.x}, ${coord.y})`);
+  }
+  return flipped;
+};
+
+export function flipSetup(setup: SetupMasks): SetupMasks {
+  let mask1 = 0n;
+  let mask2 = 0n;
+  let mask3 = 0n;
+
+  for (let idx = 0; idx < setupIndexToCoord.length; idx += 1) {
+    const flipped = flipSetupIndex(idx);
+    if (getSetupBit(setup.mask1, idx)) mask1 = setSetupBit(mask1, flipped);
+    if (idx < 26 && getSetupBit(setup.mask2, idx)) mask2 = setSetupBit(mask2, flipped);
+    if (idx < 15 && getSetupBit(setup.mask3, idx)) mask3 = setSetupBit(mask3, flipped);
+  }
+
+  return {
+    tribTile: flipSetupIndex(setup.tribTile),
+    mask1,
+    mask2,
+    mask3,
+  };
+}
+
+export function normalizeSetupHash(hash: string): string {
+  return hash.replace(/\s+/g, '').trim().toUpperCase();
+}
+
+export function normalizeSetupConfig(raw?: Partial<SetupConfig> | null): SetupConfig {
+  const mode = raw?.mode === 'shared' ? 'shared' : 'free';
+  const enabled = Boolean(raw?.enabled);
+  const allowedHeights = (raw?.allowedTribunHeights ?? [1, 2, 3]).filter((height): height is 1 | 2 | 3 =>
+    height === 1 || height === 2 || height === 3,
+  );
+  const armyMin = raw?.armySize?.min ?? null;
+  const armyMax = raw?.armySize?.max ?? null;
+  const sharedSelection =
+    raw?.sharedSelection && typeof raw.sharedSelection.hash === 'string'
+      ? {
+          hash: normalizeSetupHash(raw.sharedSelection.hash),
+          flipBlack: Boolean(raw.sharedSelection.flipBlack),
+          flipWhite: Boolean(raw.sharedSelection.flipWhite),
+        }
+      : null;
+
+  return {
+    enabled,
+    mode,
+    sharedSelection,
+    allowedTribunHeights: allowedHeights.length > 0 ? allowedHeights : [1, 2, 3],
+    armySize: {
+      min: Number.isFinite(armyMin) ? Math.max(0, Math.floor(armyMin as number)) : null,
+      max: Number.isFinite(armyMax) ? Math.max(0, Math.floor(armyMax as number)) : null,
+    },
+  };
+}
+
+const validateSetupConstraints = (
+  decoded: SetupDecoded,
+  config: SetupConfig,
+  side: 'black' | 'white',
+): SetupValidationIssue[] => {
+  const issues: SetupValidationIssue[] = [];
+  if (config.allowedTribunHeights.length > 0 && !config.allowedTribunHeights.includes(decoded.tribunHeight)) {
+    issues.push({
+      code: 'TRIBUN_HEIGHT_NOT_ALLOWED',
+      side,
+      message: `${side} tribun height ${decoded.tribunHeight} is not allowed`,
+    });
+  }
+  if (config.armySize.min !== null && decoded.armySize < config.armySize.min) {
+    issues.push({
+      code: 'ARMY_SIZE_TOO_SMALL',
+      side,
+      message: `${side} army size ${decoded.armySize} is below minimum ${config.armySize.min}`,
+    });
+  }
+  if (config.armySize.max !== null && decoded.armySize > config.armySize.max) {
+    issues.push({
+      code: 'ARMY_SIZE_TOO_LARGE',
+      side,
+      message: `${side} army size ${decoded.armySize} exceeds maximum ${config.armySize.max}`,
+    });
+  }
+  return issues;
+};
+
+const decodeSelection = (
+  selection: SetupSelection | null,
+  side: 'black' | 'white',
+): { ok: true; decoded: SetupDecoded; selection: SetupSelection } | { ok: false; issues: SetupValidationIssue[] } => {
+  if (!selection || !selection.hash) {
+    return {
+      ok: false,
+      issues: [{ code: 'SETUP_REQUIRED', side, message: `${side} setup is required` }],
+    };
+  }
+  const normalizedHash = normalizeSetupHash(selection.hash);
+  const decodedResult = decodeCodeDetailed(normalizedHash);
+  if (!decodedResult.ok || !decodedResult.setup) {
+    return {
+      ok: false,
+      issues: [{ code: 'INVALID_HASH', side, message: `${side} setup hash is invalid` }],
+    };
+  }
+  return {
+    ok: true,
+    decoded: decodedResult.setup,
+    selection: { hash: normalizedHash, flip: Boolean(selection.flip) },
+  };
+};
+
+export function validateSetupSelection(
+  selection: SetupSelection | null,
+  config: SetupConfig,
+  side: 'black' | 'white',
+): { ok: true; selection: SetupSelection; decoded: SetupDecoded } | { ok: false; issues: SetupValidationIssue[] } {
+  const decoded = decodeSelection(selection, side);
+  if (!decoded.ok) {
+    return decoded;
+  }
+  const normalizedConfig = normalizeSetupConfig(config);
+  const issues = validateSetupConstraints(decoded.decoded, normalizedConfig, side);
+  if (issues.length > 0) {
+    return { ok: false, issues };
+  }
+  return {
+    ok: true,
+    selection: decoded.selection,
+    decoded: decoded.decoded,
+  };
+}
+
+const mapSetupIndexToBoardCid = (index: number, side: 'black' | 'white', flip: boolean): number => {
+  const base = setupIndexToCoord[index];
+  if (!base) {
+    throw new Error(`Invalid setup index ${index}`);
+  }
+  let x = side === 'white' ? base.x : -base.x;
+  let y = side === 'white' ? base.y : -base.y;
+  if (flip) {
+    const tmp = x;
+    x = y;
+    y = tmp;
+  }
+  return encodeCoord(x, y);
+};
+
+const applySetupToBoard = (
+  board: Uint8Array,
+  decoded: SetupDecoded,
+  side: 'black' | 'white',
+  flip: boolean,
+): SetupValidationIssue[] => {
+  const issues: SetupValidationIssue[] = [];
+  const color: Color = side === 'black' ? 0 : 1;
+
+  for (let idx = 0; idx < setupIndexToCoord.length; idx += 1) {
+    const is1 = getSetupBit(decoded.mask1, idx);
+    const is2 = idx < 26 ? getSetupBit(decoded.mask2, idx) : false;
+    const is3 = idx < 15 ? getSetupBit(decoded.mask3, idx) : false;
+    if (!is1 && !is2 && !is3) continue;
+
+    const p: Height = is3 ? 3 : is2 ? 2 : 1;
+    const tribun = decoded.tribTile === idx;
+    const cid = mapSetupIndexToBoardCid(idx, side, flip);
+    if (board[cid] !== 0) {
+      issues.push({
+        code: 'SETUP_OVERLAP',
+        message: `Setup overlap on cid ${cid}`,
+      });
+      continue;
+    }
+    board[cid] = unitToUnitByte({ color, tribun, p, s: 0 });
+  }
+
+  return issues;
+};
+
+export function buildBoardFromSetups(params: {
+  config: SetupConfig;
+  freeSelections?: SetupSelectionsBySide | null;
+}): SetupBoardBuildResult {
+  const config = normalizeSetupConfig(params.config);
+  if (!config.enabled) {
+    return { ok: false, issues: [{ code: 'SETUP_REQUIRED', message: 'Custom setups are disabled' }] };
+  }
+
+  const blackSelection: SetupSelection | null =
+    config.mode === 'shared'
+      ? config.sharedSelection
+        ? { hash: config.sharedSelection.hash, flip: config.sharedSelection.flipBlack }
+        : null
+      : params.freeSelections?.black ?? null;
+  const whiteSelection: SetupSelection | null =
+    config.mode === 'shared'
+      ? config.sharedSelection
+        ? { hash: config.sharedSelection.hash, flip: config.sharedSelection.flipWhite }
+        : null
+      : params.freeSelections?.white ?? null;
+
+  const decodedBlack = decodeSelection(blackSelection, 'black');
+  const decodedWhite = decodeSelection(whiteSelection, 'white');
+  if (!decodedBlack.ok || !decodedWhite.ok) {
+    return {
+      ok: false,
+      issues: [...(decodedBlack.ok ? [] : decodedBlack.issues), ...(decodedWhite.ok ? [] : decodedWhite.issues)],
+    };
+  }
+
+  const issues: SetupValidationIssue[] = [
+    ...validateSetupConstraints(decodedBlack.decoded, config, 'black'),
+    ...validateSetupConstraints(decodedWhite.decoded, config, 'white'),
+  ];
+  if (issues.length > 0) {
+    return { ok: false, issues };
+  }
+
+  const board = new Uint8Array(121);
+  const blackPlacementIssues = applySetupToBoard(board, decodedBlack.decoded, 'black', decodedBlack.selection.flip);
+  const whitePlacementIssues = applySetupToBoard(board, decodedWhite.decoded, 'white', decodedWhite.selection.flip);
+  const placementIssues = [...blackPlacementIssues, ...whitePlacementIssues];
+  if (placementIssues.length > 0) {
+    return { ok: false, issues: placementIssues };
+  }
+
+  return {
+    ok: true,
+    board,
+    selections: {
+      black: decodedBlack.selection,
+      white: decodedWhite.selection,
+    },
+    decoded: {
+      black: decodedBlack.decoded,
+      white: decodedWhite.decoded,
+    },
   };
 }
 

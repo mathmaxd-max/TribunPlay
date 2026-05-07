@@ -1,5 +1,6 @@
 // Core types
 import defaultPosition from './default-position.json';
+import { decodeCodeDetailed, } from './setup/TribunSetupCodec';
 // Coordinate encoding/decoding
 const R = 5;
 export function onBoard(x, y) {
@@ -1597,6 +1598,228 @@ export function applyAction(state, action) {
         drawOfferBlocked: newDrawOfferBlocked,
         status: newStatus,
         winner: newWinner,
+    };
+}
+const CANONICAL_SETUP_CIDS = [
+    120, 119, 109, 118, 108, 98, 117, 107, 97, 87, 116, 106, 96, 86, 76, 115, 105, 95, 85, 75, 65,
+    104, 94, 84, 74, 64, 103, 93, 83, 73, 63, 53, 92, 82, 72, 62, 52,
+];
+const setupIndexToCoord = CANONICAL_SETUP_CIDS.map((cid) => ({
+    x: Math.floor(cid / 11) - 5,
+    y: (cid % 11) - 5,
+}));
+const setupCoordToIndex = new Map();
+for (let i = 0; i < setupIndexToCoord.length; i += 1) {
+    const coord = setupIndexToCoord[i];
+    setupCoordToIndex.set(`${coord.x},${coord.y}`, i);
+}
+const getSetupBit = (mask, idx) => ((mask >> BigInt(idx)) & 1n) === 1n;
+const setSetupBit = (mask, idx) => mask | (1n << BigInt(idx));
+const flipSetupIndex = (index) => {
+    const coord = setupIndexToCoord[index];
+    if (!coord) {
+        throw new Error(`Invalid setup index: ${index}`);
+    }
+    const flipped = setupCoordToIndex.get(`${coord.y},${coord.x}`);
+    if (flipped === undefined) {
+        throw new Error(`Setup flip failed for coordinate (${coord.x}, ${coord.y})`);
+    }
+    return flipped;
+};
+export function flipSetup(setup) {
+    let mask1 = 0n;
+    let mask2 = 0n;
+    let mask3 = 0n;
+    for (let idx = 0; idx < setupIndexToCoord.length; idx += 1) {
+        const flipped = flipSetupIndex(idx);
+        if (getSetupBit(setup.mask1, idx))
+            mask1 = setSetupBit(mask1, flipped);
+        if (idx < 26 && getSetupBit(setup.mask2, idx))
+            mask2 = setSetupBit(mask2, flipped);
+        if (idx < 15 && getSetupBit(setup.mask3, idx))
+            mask3 = setSetupBit(mask3, flipped);
+    }
+    return {
+        tribTile: flipSetupIndex(setup.tribTile),
+        mask1,
+        mask2,
+        mask3,
+    };
+}
+export function normalizeSetupHash(hash) {
+    return hash.replace(/\s+/g, '').trim().toUpperCase();
+}
+export function normalizeSetupConfig(raw) {
+    const mode = raw?.mode === 'shared' ? 'shared' : 'free';
+    const enabled = Boolean(raw?.enabled);
+    const allowedHeights = (raw?.allowedTribunHeights ?? [1, 2, 3]).filter((height) => height === 1 || height === 2 || height === 3);
+    const armyMin = raw?.armySize?.min ?? null;
+    const armyMax = raw?.armySize?.max ?? null;
+    const sharedSelection = raw?.sharedSelection && typeof raw.sharedSelection.hash === 'string'
+        ? {
+            hash: normalizeSetupHash(raw.sharedSelection.hash),
+            flipBlack: Boolean(raw.sharedSelection.flipBlack),
+            flipWhite: Boolean(raw.sharedSelection.flipWhite),
+        }
+        : null;
+    return {
+        enabled,
+        mode,
+        sharedSelection,
+        allowedTribunHeights: allowedHeights.length > 0 ? allowedHeights : [1, 2, 3],
+        armySize: {
+            min: Number.isFinite(armyMin) ? Math.max(0, Math.floor(armyMin)) : null,
+            max: Number.isFinite(armyMax) ? Math.max(0, Math.floor(armyMax)) : null,
+        },
+    };
+}
+const validateSetupConstraints = (decoded, config, side) => {
+    const issues = [];
+    if (config.allowedTribunHeights.length > 0 && !config.allowedTribunHeights.includes(decoded.tribunHeight)) {
+        issues.push({
+            code: 'TRIBUN_HEIGHT_NOT_ALLOWED',
+            side,
+            message: `${side} tribun height ${decoded.tribunHeight} is not allowed`,
+        });
+    }
+    if (config.armySize.min !== null && decoded.armySize < config.armySize.min) {
+        issues.push({
+            code: 'ARMY_SIZE_TOO_SMALL',
+            side,
+            message: `${side} army size ${decoded.armySize} is below minimum ${config.armySize.min}`,
+        });
+    }
+    if (config.armySize.max !== null && decoded.armySize > config.armySize.max) {
+        issues.push({
+            code: 'ARMY_SIZE_TOO_LARGE',
+            side,
+            message: `${side} army size ${decoded.armySize} exceeds maximum ${config.armySize.max}`,
+        });
+    }
+    return issues;
+};
+const decodeSelection = (selection, side) => {
+    if (!selection || !selection.hash) {
+        return {
+            ok: false,
+            issues: [{ code: 'SETUP_REQUIRED', side, message: `${side} setup is required` }],
+        };
+    }
+    const normalizedHash = normalizeSetupHash(selection.hash);
+    const decodedResult = decodeCodeDetailed(normalizedHash);
+    if (!decodedResult.ok || !decodedResult.setup) {
+        return {
+            ok: false,
+            issues: [{ code: 'INVALID_HASH', side, message: `${side} setup hash is invalid` }],
+        };
+    }
+    return {
+        ok: true,
+        decoded: decodedResult.setup,
+        selection: { hash: normalizedHash, flip: Boolean(selection.flip) },
+    };
+};
+export function validateSetupSelection(selection, config, side) {
+    const decoded = decodeSelection(selection, side);
+    if (!decoded.ok) {
+        return decoded;
+    }
+    const normalizedConfig = normalizeSetupConfig(config);
+    const issues = validateSetupConstraints(decoded.decoded, normalizedConfig, side);
+    if (issues.length > 0) {
+        return { ok: false, issues };
+    }
+    return {
+        ok: true,
+        selection: decoded.selection,
+        decoded: decoded.decoded,
+    };
+}
+const mapSetupIndexToBoardCid = (index, side, flip) => {
+    const base = setupIndexToCoord[index];
+    if (!base) {
+        throw new Error(`Invalid setup index ${index}`);
+    }
+    let x = side === 'white' ? base.x : -base.x;
+    let y = side === 'white' ? base.y : -base.y;
+    if (flip) {
+        const tmp = x;
+        x = y;
+        y = tmp;
+    }
+    return encodeCoord(x, y);
+};
+const applySetupToBoard = (board, decoded, side, flip) => {
+    const issues = [];
+    const color = side === 'black' ? 0 : 1;
+    for (let idx = 0; idx < setupIndexToCoord.length; idx += 1) {
+        const is1 = getSetupBit(decoded.mask1, idx);
+        const is2 = idx < 26 ? getSetupBit(decoded.mask2, idx) : false;
+        const is3 = idx < 15 ? getSetupBit(decoded.mask3, idx) : false;
+        if (!is1 && !is2 && !is3)
+            continue;
+        const p = is3 ? 3 : is2 ? 2 : 1;
+        const tribun = decoded.tribTile === idx;
+        const cid = mapSetupIndexToBoardCid(idx, side, flip);
+        if (board[cid] !== 0) {
+            issues.push({
+                code: 'SETUP_OVERLAP',
+                message: `Setup overlap on cid ${cid}`,
+            });
+            continue;
+        }
+        board[cid] = unitToUnitByte({ color, tribun, p, s: 0 });
+    }
+    return issues;
+};
+export function buildBoardFromSetups(params) {
+    const config = normalizeSetupConfig(params.config);
+    if (!config.enabled) {
+        return { ok: false, issues: [{ code: 'SETUP_REQUIRED', message: 'Custom setups are disabled' }] };
+    }
+    const blackSelection = config.mode === 'shared'
+        ? config.sharedSelection
+            ? { hash: config.sharedSelection.hash, flip: config.sharedSelection.flipBlack }
+            : null
+        : params.freeSelections?.black ?? null;
+    const whiteSelection = config.mode === 'shared'
+        ? config.sharedSelection
+            ? { hash: config.sharedSelection.hash, flip: config.sharedSelection.flipWhite }
+            : null
+        : params.freeSelections?.white ?? null;
+    const decodedBlack = decodeSelection(blackSelection, 'black');
+    const decodedWhite = decodeSelection(whiteSelection, 'white');
+    if (!decodedBlack.ok || !decodedWhite.ok) {
+        return {
+            ok: false,
+            issues: [...(decodedBlack.ok ? [] : decodedBlack.issues), ...(decodedWhite.ok ? [] : decodedWhite.issues)],
+        };
+    }
+    const issues = [
+        ...validateSetupConstraints(decodedBlack.decoded, config, 'black'),
+        ...validateSetupConstraints(decodedWhite.decoded, config, 'white'),
+    ];
+    if (issues.length > 0) {
+        return { ok: false, issues };
+    }
+    const board = new Uint8Array(121);
+    const blackPlacementIssues = applySetupToBoard(board, decodedBlack.decoded, 'black', decodedBlack.selection.flip);
+    const whitePlacementIssues = applySetupToBoard(board, decodedWhite.decoded, 'white', decodedWhite.selection.flip);
+    const placementIssues = [...blackPlacementIssues, ...whitePlacementIssues];
+    if (placementIssues.length > 0) {
+        return { ok: false, issues: placementIssues };
+    }
+    return {
+        ok: true,
+        board,
+        selections: {
+            black: decodedBlack.selection,
+            white: decodedWhite.selection,
+        },
+        decoded: {
+            black: decodedBlack.decoded,
+            white: decodedWhite.decoded,
+        },
     };
 }
 // Create initial board from default position

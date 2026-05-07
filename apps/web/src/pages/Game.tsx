@@ -6,6 +6,7 @@ import { LegalBloomValidator, type LegalValidatorMessage } from '../net/LegalBlo
 import { buildCache } from '../ui/cache/buildCache';
 import type { UiMoveCache } from '../ui/cache/UiMoveCache';
 import { SplitUnitGlyph, UnitGlyph } from '../ui/UnitGlyph';
+import SetupHashInput from '../ui/SetupHashInput';
 import {
   OPPONENT_MOVE_EASING,
   buildOpponentMoveTimeline,
@@ -23,6 +24,8 @@ import {
   type AuthSuccessResponse,
 } from '../auth/identityStore';
 import { API_BASE, WS_BASE } from '../config';
+import { loadSetupLibrary } from '../setupLibrary';
+import { getFlippedSetupHash, normalizeSetupHashInput } from '../setupHashFlip';
 import { type BoardSfxEvent, useBoardSfx } from '../audio/boardSfx';
 import { getAccountSettings } from '../settings/accountSettings';
 import { areAllUnitIconsReady, preloadAllUnitIcons } from '../ui/unitIcons';
@@ -36,6 +39,12 @@ type RoomSettings = {
   hostColor: 'black' | 'white' | 'random';
   startColor: 'black' | 'white' | 'random';
   nextStartColor: 'same' | 'other' | 'random';
+  setupConfig: engine.SetupConfig;
+};
+type RoomSetupState = {
+  config: engine.SetupConfig;
+  selections: engine.SetupSelectionsBySide;
+  issues: engine.SetupValidationIssue[];
 };
 type RoomPresence = {
   players: { black: number; white: number };
@@ -162,6 +171,7 @@ interface GameSnapshot {
   winner?: engine.Color | null;
   roomStatus?: RoomStatus;
   roomSettings?: RoomSettings;
+  setupSelections?: engine.SetupSelectionsBySide;
 }
 
 const NEIGHBOR_VECTORS = [
@@ -186,7 +196,15 @@ const DEFAULT_ROOM_SETTINGS: RoomSettings = {
   hostColor: 'random',
   startColor: 'random',
   nextStartColor: 'other',
+  setupConfig: engine.normalizeSetupConfig(undefined),
 };
+
+const normalizeRoomSettings = (raw?: Partial<RoomSettings> | null): RoomSettings => ({
+  hostColor: raw?.hostColor === 'black' || raw?.hostColor === 'white' ? raw.hostColor : 'random',
+  startColor: raw?.startColor === 'black' || raw?.startColor === 'white' ? raw.startColor : 'random',
+  nextStartColor: raw?.nextStartColor === 'same' || raw?.nextStartColor === 'random' ? raw.nextStartColor : 'other',
+  setupConfig: engine.normalizeSetupConfig(raw?.setupConfig),
+});
 
 const readColorClock = (raw: number | ColorClock | undefined, fallback: ColorClock): ColorClock => {
   if (typeof raw === 'number' && Number.isFinite(raw)) {
@@ -357,6 +375,17 @@ const digestBoard = (board: Uint8Array): { sum: number; xor: number; len: number
 
 const toHex32 = (value: number): string => `0x${(value >>> 0).toString(16).padStart(8, '0')}`;
 
+const isSubsequenceMatch = (needleRaw: string, haystackRaw: string): boolean => {
+  const needle = needleRaw.trim().toLowerCase();
+  if (!needle) return true;
+  const haystack = haystackRaw.toLowerCase();
+  let j = 0;
+  for (let i = 0; i < haystack.length && j < needle.length; i += 1) {
+    if (haystack[i] === needle[j]) j += 1;
+  }
+  return j === needle.length;
+};
+
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
@@ -369,6 +398,21 @@ export default function Game() {
   const roleRef = useRef<Role | null>(null);
   const [roomStatus, setRoomStatus] = useState<RoomStatus>('lobby');
   const [roomSettings, setRoomSettings] = useState<RoomSettings>({ ...DEFAULT_ROOM_SETTINGS });
+  const [roomSetup, setRoomSetup] = useState<RoomSetupState>({
+    config: engine.normalizeSetupConfig(undefined),
+    selections: { black: null, white: null },
+    issues: [],
+  });
+  const [lobbySetupHashInput, setLobbySetupHashInput] = useState('');
+  const [sharedOpponentFlip, setSharedOpponentFlip] = useState(false);
+  const [libraryItems, setLibraryItems] = useState<engine.SetupLibraryItem[]>([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [libraryQuery, setLibraryQuery] = useState('');
+  const [libraryArmyMin, setLibraryArmyMin] = useState<number | ''>('');
+  const [libraryArmyMax, setLibraryArmyMax] = useState<number | ''>('');
+  const [libraryTribunHeight, setLibraryTribunHeight] = useState<0 | 1 | 2 | 3>(0);
+  const [libraryOpenTarget, setLibraryOpenTarget] = useState<'free' | 'shared' | null>(null);
   const [roomPresence, setRoomPresence] = useState<RoomPresence>({
     players: { black: 0, white: 0 },
     spectators: 0,
@@ -456,6 +500,19 @@ export default function Game() {
   useEffect(() => {
     uiStateRef.current = uiState;
   }, [uiState]);
+
+  useEffect(() => {
+    if (role !== 'black' && role !== 'white') return;
+    if (roomSetup.config.mode === 'shared') {
+      const shared = roomSetup.config.sharedSelection;
+      const oppFlip = role === 'black' ? Boolean(shared?.flipWhite) : Boolean(shared?.flipBlack);
+      setLobbySetupHashInput(shared?.hash ?? '');
+      setSharedOpponentFlip(oppFlip);
+      return;
+    }
+    const sideSelection = roomSetup.selections[role];
+    setLobbySetupHashInput(sideSelection?.hash ?? '');
+  }, [role, roomSetup.selections, roomSetup.config]);
 
   useEffect(() => {
     let active = true;
@@ -1159,6 +1216,14 @@ export default function Game() {
                 players: message.players ?? null,
                 spectators: message.spectators ?? null,
               });
+              const incomingSetupConfig = engine.normalizeSetupConfig(message.setup?.config ?? roomSettings.setupConfig);
+              const incomingSelections: engine.SetupSelectionsBySide = {
+                black: message.setup?.selections?.black ?? null,
+                white: message.setup?.selections?.white ?? null,
+              };
+              const incomingIssues: engine.SetupValidationIssue[] = Array.isArray(message.setup?.issues)
+                ? message.setup.issues
+                : [];
               const players = message.players ?? { black: 0, white: 0 };
               const spectators = Number.isFinite(message.spectators) ? message.spectators : 0;
               setRoomPresence({
@@ -1171,11 +1236,17 @@ export default function Game() {
               if (message.roomStatus === 'lobby' || message.roomStatus === 'active' || message.roomStatus === 'ended') {
                 setRoomStatus(message.roomStatus);
               }
+              setRoomSetup({
+                config: incomingSetupConfig,
+                selections: incomingSelections,
+                issues: incomingIssues,
+              });
             } else if (message.t === 'start') {
               // Initial sync
               const snapshot: GameSnapshot = message.snapshot;
               const nextRoomStatus = snapshot.roomStatus ?? 'active';
-              const nextRoomSettings = snapshot.roomSettings ?? DEFAULT_ROOM_SETTINGS;
+              const nextRoomSettings = normalizeRoomSettings(snapshot.roomSettings ?? DEFAULT_ROOM_SETTINGS);
+              const nextSetupSelections = snapshot.setupSelections ?? { black: null, white: null };
               const board = engine.unpackBoard(snapshot.boardB64);
               const boardDigest = digestBoard(board);
               logGame('start.recv', {
@@ -1215,6 +1286,11 @@ export default function Game() {
               lastTurnRef.current = snapshot.turn;
               setRoomStatus(nextRoomStatus);
               setRoomSettings(nextRoomSettings);
+              setRoomSetup({
+                config: engine.normalizeSetupConfig(nextRoomSettings.setupConfig),
+                selections: nextSetupSelections,
+                issues: [],
+              });
 
               const normalizedTimeControl = normalizeTimeControl(snapshot.timeControl);
               setTimeControl(normalizedTimeControl);
@@ -1561,6 +1637,91 @@ export default function Game() {
       return;
     }
     wsRef.current.send(JSON.stringify({ t: type }));
+  };
+
+  const sendSetupSelection = (hash: string, flip: boolean) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+    if (role !== 'black' && role !== 'white') {
+      setError('Spectators cannot set setups');
+      return;
+    }
+    const normalizedHash = normalizeSetupHashInput(hash);
+    const validation = engine.validateSetupSelection(
+      { hash: normalizedHash, flip },
+      roomSetup.config,
+      role,
+    );
+    if (!validation.ok) {
+      setError(validation.issues[0]?.message ?? 'Invalid setup selection');
+      return;
+    }
+    wsRef.current.send(
+      JSON.stringify({
+        t: 'set_setup_selection',
+        hash: normalizedHash,
+        flip,
+      }),
+    );
+  };
+
+  const sendSharedSetupSelection = (params: { hash: string; flipHost: boolean; flipOpponent: boolean }) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+    if (role !== 'black') {
+      setError('Only the host can choose shared setup.');
+      return;
+    }
+    const normalizedHash = normalizeSetupHashInput(params.hash);
+    if (!normalizedHash) {
+      setError('Shared setup hash is required.');
+      return;
+    }
+    const config = engine.normalizeSetupConfig({
+      ...roomSetup.config,
+      sharedSelection: {
+        hash: normalizedHash,
+        flipBlack: params.flipHost,
+        flipWhite: params.flipOpponent,
+      },
+    });
+    const built = engine.buildBoardFromSetups({ config });
+    if ('issues' in built) {
+      setError(built.issues[0]?.message ?? 'Invalid shared setup selection');
+      return;
+    }
+    wsRef.current.send(
+      JSON.stringify({
+        t: 'set_shared_setup',
+        hash: normalizedHash,
+        flipHost: params.flipHost,
+        flipOpponent: params.flipOpponent,
+      }),
+    );
+  };
+
+  const flipLobbySetupHashInput = () => {
+    const flipped = getFlippedSetupHash(lobbySetupHashInput);
+    if (!flipped) return;
+    setLobbySetupHashInput(flipped);
+  };
+
+  const openSetupLibrary = async (target: 'free' | 'shared') => {
+    setLibraryOpenTarget(target);
+    setLibraryLoading(true);
+    setLibraryError(null);
+    try {
+      const items = await loadSetupLibrary();
+      setLibraryItems(items);
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : 'Failed to load setup library.');
+    } finally {
+      setLibraryLoading(false);
+    }
   };
 
   const handleCancelLobby = async () => {
@@ -3020,13 +3181,31 @@ export default function Game() {
   };
 
   const playersReady = roomPresence.players.black > 0 && roomPresence.players.white > 0;
-  const canHostStart = roomStatus === 'lobby' && role === 'black' && playersReady;
+  const setupIssues = roomSetup.issues ?? [];
+  const canHostStart =
+    roomStatus === 'lobby' &&
+    role === 'black' &&
+    playersReady &&
+    Boolean(roomPresence.canStart ?? setupIssues.length === 0);
   const rematchOffers = roomPresence.rematch ?? { black: false, white: false };
   const rematchReady = Boolean(roomPresence.rematchReady ?? (rematchOffers.black && rematchOffers.white));
   const rematchOfferedByMe =
     role === 'black' ? rematchOffers.black : role === 'white' ? rematchOffers.white : false;
   const canOfferRematch =
     roomStatus === 'ended' && role !== 'spectator' && playersReady && !rematchOfferedByMe;
+  const filteredLibraryItems = useMemo(() => {
+    const minArmy = libraryArmyMin === '' ? null : libraryArmyMin;
+    const maxArmy = libraryArmyMax === '' ? null : libraryArmyMax;
+    return libraryItems.filter((item) => {
+      const queryMatch =
+        isSubsequenceMatch(libraryQuery, item.name) || isSubsequenceMatch(libraryQuery, item.hash);
+      if (!queryMatch) return false;
+      if (minArmy !== null && item.armySize < minArmy) return false;
+      if (maxArmy !== null && item.armySize > maxArmy) return false;
+      if (libraryTribunHeight !== 0 && item.tribunHeight !== libraryTribunHeight) return false;
+      return true;
+    });
+  }, [libraryItems, libraryQuery, libraryArmyMin, libraryArmyMax, libraryTribunHeight]);
 
   const formatOption = (value?: string) => {
     if (!value) return 'Unknown';
@@ -3415,6 +3594,159 @@ export default function Game() {
         </div>
       )}
 
+      {libraryOpenTarget && (
+        <div
+          onClick={() => setLibraryOpenTarget(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(14, 10, 6, 0.58)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 80,
+            padding: '14px',
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 'min(760px, 100%)',
+              maxHeight: '85vh',
+              overflow: 'auto',
+              borderRadius: '16px',
+              border: '2px solid #3c3226',
+              background: '#fffaf0',
+              padding: '14px',
+              display: 'grid',
+              gap: '10px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+              <div style={{ fontSize: '18px', fontWeight: 700, color: '#2a2218' }}>Setup library</div>
+              <button
+                type="button"
+                onClick={() => setLibraryOpenTarget(null)}
+                style={{
+                  border: '1px solid #6f5a38',
+                  borderRadius: '8px',
+                  background: '#f2d9b2',
+                  padding: '4px 8px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div style={{ display: 'grid', gap: '8px', gridTemplateColumns: '1fr 130px 130px 160px auto' }}>
+              <input
+                type="text"
+                value={libraryQuery}
+                onChange={(event) => setLibraryQuery(event.target.value)}
+                placeholder="Search by name/hash subsequence"
+                style={{
+                  border: '1px solid #bda98b',
+                  borderRadius: '10px',
+                  padding: '8px 10px',
+                  background: '#fff9ef',
+                }}
+              />
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={libraryArmyMin}
+                onChange={(event) => {
+                  if (event.target.value === '') {
+                    setLibraryArmyMin('');
+                    return;
+                  }
+                  setLibraryArmyMin(Math.max(0, Number(event.target.value)));
+                }}
+                placeholder="Army min"
+                style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
+              />
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={libraryArmyMax}
+                onChange={(event) => {
+                  if (event.target.value === '') {
+                    setLibraryArmyMax('');
+                    return;
+                  }
+                  setLibraryArmyMax(Math.max(0, Number(event.target.value)));
+                }}
+                placeholder="Army max"
+                style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
+              />
+              <select
+                value={libraryTribunHeight}
+                onChange={(event) => setLibraryTribunHeight(Number(event.target.value) as 0 | 1 | 2 | 3)}
+                style={{ border: '1px solid #bda98b', borderRadius: '10px', padding: '8px 10px', background: '#fff9ef' }}
+              >
+                <option value={0}>Any tribun</option>
+                <option value={1}>Tribun 1</option>
+                <option value={2}>Tribun 2</option>
+                <option value={3}>Tribun 3</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => void openSetupLibrary(libraryOpenTarget)}
+                style={{
+                  border: '2px solid #6f5a38',
+                  borderRadius: '10px',
+                  background: '#f2d9b2',
+                  padding: '8px 10px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+
+            {libraryLoading && <div style={{ fontSize: '13px', color: '#5a4630' }}>Loading setup library...</div>}
+            {libraryError && <div style={{ fontSize: '13px', color: '#7a2020' }}>{libraryError}</div>}
+
+            <div style={{ display: 'grid', gap: '8px', maxHeight: '52vh', overflow: 'auto', paddingRight: '4px' }}>
+              {filteredLibraryItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setLobbySetupHashInput(item.hash);
+                    setLibraryOpenTarget(null);
+                  }}
+                  style={{
+                    border: '1px solid #ccb89b',
+                    borderRadius: '10px',
+                    background: '#fff9ef',
+                    padding: '10px',
+                    textAlign: 'left',
+                    display: 'grid',
+                    gap: '4px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ fontSize: '14px', fontWeight: 700, color: '#2a2218' }}>{item.name}</div>
+                  <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '12px', color: '#5a4630' }}>{item.hash}</div>
+                  <div style={{ fontSize: '12px', color: '#5a4630' }}>
+                    Army {item.armySize} · Tribun {item.tribunHeight}
+                  </div>
+                </button>
+              ))}
+              {!libraryLoading && filteredLibraryItems.length === 0 && (
+                <div style={{ fontSize: '13px', color: '#5a4630' }}>No matching setups found.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div
         style={{
           flex: 1,
@@ -3587,7 +3919,127 @@ export default function Game() {
                 )}
                 {!canHostStart && (
                   <div style={{ fontSize: '12px', color: '#7a6543' }}>
-                    {role === 'black' ? 'Both players must connect before starting.' : 'Waiting for the host to start.'}
+                    {role === 'black'
+                      ? setupIssues.length > 0
+                        ? `Resolve setup issues before starting: ${setupIssues[0]?.message ?? 'invalid setup'}`
+                        : 'Both players must connect before starting.'
+                      : 'Waiting for the host to start.'}
+                  </div>
+                )}
+              </div>
+              <div
+                style={{
+                  gridColumn: '1 / -1',
+                  padding: '16px',
+                  borderRadius: '12px',
+                  border: '1px solid #d8cbb8',
+                  background: '#fffaf0',
+                  display: 'grid',
+                  gap: '10px',
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: '11px',
+                    letterSpacing: '1.2px',
+                    textTransform: 'uppercase',
+                    color: '#7a6543',
+                    fontWeight: 700,
+                  }}
+                >
+                  Setup Inputs
+                </div>
+                {roomSetup.config.enabled && roomSetup.config.mode === 'shared' && (
+                  <div style={{ display: 'grid', gap: '8px' }}>
+                    <div style={{ fontSize: '12px', fontWeight: 700, color: '#5a4630' }}>Shared setup selection</div>
+                    {role === 'black' ? (
+                      <>
+                        <SetupHashInput
+                          value={lobbySetupHashInput}
+                          onChange={(next) => setLobbySetupHashInput(normalizeSetupHashInput(next))}
+                          onOpenLibrary={() => void openSetupLibrary('shared')}
+                          onFlipHash={flipLobbySetupHashInput}
+                          placeholder="Enter shared setup hash"
+                        />
+                        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#5a4630' }}>
+                            <input
+                              type="checkbox"
+                              checked={sharedOpponentFlip}
+                              onChange={(event) => setSharedOpponentFlip(event.target.checked)}
+                            />
+                            Flip for opponent
+                          </label>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            sendSharedSetupSelection({
+                              hash: lobbySetupHashInput,
+                              flipHost: false,
+                              flipOpponent: sharedOpponentFlip,
+                            })
+                          }
+                          style={{
+                            padding: '8px 12px',
+                            borderRadius: '10px',
+                            border: '2px solid #6f5a38',
+                            background: '#f2d9b2',
+                            color: '#2a2218',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Save shared setup
+                        </button>
+                      </>
+                    ) : (
+                      <div style={{ fontSize: '12px', color: '#5a4630' }}>
+                        Waiting for host to choose the shared setup.
+                      </div>
+                    )}
+                  </div>
+                )}
+                {roomSetup.config.enabled && roomSetup.config.mode === 'free' && (role === 'black' || role === 'white') && (
+                  <div style={{ display: 'grid', gap: '8px' }}>
+                    <div style={{ fontSize: '12px', fontWeight: 700, color: '#5a4630' }}>
+                      {role === 'black' ? 'Black' : 'White'} setup
+                    </div>
+                    <SetupHashInput
+                      value={lobbySetupHashInput}
+                      onChange={(next) => setLobbySetupHashInput(normalizeSetupHashInput(next))}
+                      onOpenLibrary={() => void openSetupLibrary('free')}
+                      onFlipHash={flipLobbySetupHashInput}
+                      placeholder="Enter setup hash"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => sendSetupSelection(lobbySetupHashInput, false)}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '10px',
+                        border: '2px solid #6f5a38',
+                        background: '#f2d9b2',
+                        color: '#2a2218',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Save setup
+                    </button>
+                  </div>
+                )}
+                {roomSetup.config.enabled && roomSetup.config.mode === 'free' && role === 'spectator' && (
+                  <div style={{ fontSize: '12px', color: '#5a4630' }}>Players choose their setups in this section.</div>
+                )}
+                {!roomSetup.config.enabled && (
+                  <div style={{ fontSize: '12px', color: '#5a4630' }}>Custom setups are disabled for this room.</div>
+                )}
+                {setupIssues.length > 0 && (
+                  <div style={{ marginTop: '4px', color: '#7a2020', fontSize: '12px', display: 'grid', gap: '4px' }}>
+                    {setupIssues.map((issue, idx) => (
+                      <div key={`${issue.code}-${idx}`}>{issue.message}</div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -3621,6 +4073,35 @@ export default function Game() {
                   <div>Buffer: {formatClockPair(timeControl.bufferMs)}</div>
                   <div>Increment: {formatClockPair(timeControl.incrementMs)}</div>
                   <div>Max game time: {maxGameLabel}</div>
+                  <div>
+                    Custom setups:{' '}
+                    {roomSetup.config.enabled ? `${roomSetup.config.mode === 'shared' ? 'Shared' : 'Free'}` : 'Disabled'}
+                  </div>
+                  {roomSetup.config.enabled && (
+                    <>
+                      <div>
+                        Allowed tribun heights:{' '}
+                        {roomSetup.config.allowedTribunHeights.length > 0
+                          ? roomSetup.config.allowedTribunHeights.join(', ')
+                          : 'Any'}
+                      </div>
+                      <div>
+                        Army size:{' '}
+                        {roomSetup.config.armySize.min === null && roomSetup.config.armySize.max === null
+                          ? 'Any'
+                          : `${roomSetup.config.armySize.min ?? 0}-${roomSetup.config.armySize.max ?? 'max'}`}
+                      </div>
+                      {roomSetup.config.mode === 'shared' && roomSetup.config.sharedSelection && (
+                        <>
+                          <div>Shared hash: {roomSetup.config.sharedSelection.hash}</div>
+                          <div>
+                            Flips: black {roomSetup.config.sharedSelection.flipBlack ? 'on' : 'off'}, white{' '}
+                            {roomSetup.config.sharedSelection.flipWhite ? 'on' : 'off'}
+                          </div>
+                        </>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -3850,3 +4331,4 @@ function formatTime(ms: number): string {
   const seconds = totalSeconds % 60;
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
+

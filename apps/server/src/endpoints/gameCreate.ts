@@ -20,6 +20,45 @@ const createGameBodySchema = z.object({
       hostColor: z.enum(["black", "white", "random"]).optional(),
       startColor: z.enum(["black", "white", "random"]).optional(),
       nextStartColor: z.enum(["same", "other", "random"]).optional(),
+      setupConfig: z
+        .object({
+          enabled: z.boolean().optional(),
+          mode: z.enum(["shared", "free"]).optional(),
+          sharedSelection: z
+            .object({
+              hash: z.string(),
+              flipBlack: z.boolean().optional(),
+              flipWhite: z.boolean().optional(),
+            })
+            .nullable()
+            .optional(),
+          allowedTribunHeights: z.array(z.union([z.literal(1), z.literal(2), z.literal(3)])).optional(),
+          armySize: z
+            .object({
+              min: z.number().nullable().optional(),
+              max: z.number().nullable().optional(),
+            })
+            .optional(),
+        })
+        .optional(),
+      setupSelections: z
+        .object({
+          black: z
+            .object({
+              hash: z.string(),
+              flip: z.boolean().optional(),
+            })
+            .nullable()
+            .optional(),
+          white: z
+            .object({
+              hash: z.string(),
+              flip: z.boolean().optional(),
+            })
+            .nullable()
+            .optional(),
+        })
+        .optional(),
     })
     .optional(),
   customPosition: z
@@ -153,12 +192,80 @@ export class GameCreate extends OpenAPIRoute {
       rawSettings && ["same", "other", "random"].includes(rawSettings.nextStartColor)
         ? rawSettings.nextStartColor
         : "other";
+    const rawSetupConfig = rawSettings?.setupConfig;
+    const setupConfigInput: Partial<engine.SetupConfig> = {
+      enabled: Boolean(rawSetupConfig?.enabled),
+      mode: rawSetupConfig?.mode === "shared" ? "shared" : "free",
+      sharedSelection:
+        rawSetupConfig?.sharedSelection && typeof rawSetupConfig.sharedSelection.hash === "string"
+          ? {
+              hash: engine.normalizeSetupHash(rawSetupConfig.sharedSelection.hash),
+              flipBlack: Boolean(rawSetupConfig.sharedSelection.flipBlack),
+              flipWhite: Boolean(rawSetupConfig.sharedSelection.flipWhite),
+            }
+          : null,
+      allowedTribunHeights: rawSetupConfig?.allowedTribunHeights?.filter(
+        (height): height is 1 | 2 | 3 => height === 1 || height === 2 || height === 3,
+      ),
+      armySize: {
+        min: Number.isFinite(rawSetupConfig?.armySize?.min) ? Math.max(0, rawSetupConfig!.armySize!.min!) : null,
+        max: Number.isFinite(rawSetupConfig?.armySize?.max) ? Math.max(0, rawSetupConfig!.armySize!.max!) : null,
+      },
+    };
 
     const roomSettings = {
       hostColor,
       startColor,
       nextStartColor,
+      setupConfig: engine.normalizeSetupConfig(setupConfigInput),
     };
+    const setupSelections: engine.SetupSelectionsBySide = {
+      black: rawSettings?.setupSelections?.black
+        ? {
+            hash: engine.normalizeSetupHash(rawSettings.setupSelections.black.hash),
+            flip: Boolean(rawSettings.setupSelections.black.flip),
+          }
+        : null,
+      white: rawSettings?.setupSelections?.white
+        ? {
+            hash: engine.normalizeSetupHash(rawSettings.setupSelections.white.hash),
+            flip: Boolean(rawSettings.setupSelections.white.flip),
+          }
+        : null,
+    };
+    if (roomSettings.setupConfig.enabled) {
+      if (roomSettings.setupConfig.mode === "shared") {
+        if (roomSettings.setupConfig.sharedSelection?.hash) {
+          const builtShared = engine.buildBoardFromSetups({
+            config: roomSettings.setupConfig,
+          });
+          if ("issues" in builtShared) {
+            return c.json({ error: builtShared.issues[0]?.message ?? "Invalid shared setup configuration" }, 400);
+          }
+        }
+      } else {
+        if (setupSelections.black) {
+          const blackValidation = engine.validateSetupSelection(
+            setupSelections.black,
+            roomSettings.setupConfig,
+            "black",
+          );
+          if ("issues" in blackValidation) {
+            return c.json({ error: blackValidation.issues[0]?.message ?? "Invalid black setup selection" }, 400);
+          }
+        }
+        if (setupSelections.white) {
+          const whiteValidation = engine.validateSetupSelection(
+            setupSelections.white,
+            roomSettings.setupConfig,
+            "white",
+          );
+          if ("issues" in whiteValidation) {
+            return c.json({ error: whiteValidation.issues[0]?.message ?? "Invalid white setup selection" }, 400);
+          }
+        }
+      }
+    }
 
     const nowIso = new Date().toISOString();
 
@@ -167,8 +274,8 @@ export class GameCreate extends OpenAPIRoute {
         .prepare(
           `INSERT INTO games (
             id, code, status, created_at, initial_turn, turn, initial_board, ply,
-            time_control_json, room_settings_json, starting_player_color, black_player_id, black_token
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            time_control_json, room_settings_json, setup_state_json, starting_player_color, black_player_id, black_token
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           gameId,
@@ -181,6 +288,7 @@ export class GameCreate extends OpenAPIRoute {
           0,
           JSON.stringify(body.timeControl || {}),
           JSON.stringify(roomSettings),
+          JSON.stringify(setupSelections),
           0,
           resolvedIdentity.accountId,
           token,

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
 import { UnitGlyph as SharedUnitGlyph } from "../ui/UnitGlyph";
+import SetupHashInput from "../ui/SetupHashInput";
 import { areAllUnitIconsReady, preloadAllUnitIcons } from "../ui/unitIcons";
 import { useBoardSfx } from "../audio/boardSfx";
 import {
@@ -14,6 +15,8 @@ import {
   SETUP_REGION_RED,
   SETUP_REGION_YELLOW,
 } from "@tribunplay/engine";
+import { addSetupToLibrary, loadSetupLibrary } from "../setupLibrary";
+import { getFlippedSetupHash, normalizeSetupHashInput } from "../setupHashFlip";
 
 type Brush = "1" | "2" | "3" | "eraser";
 type TileCell = { height: 0 | 1 | 2 | 3; tribun: boolean };
@@ -32,8 +35,8 @@ type ValidationProblem = {
 type ArmySizeStatus = { ok: true; armySize: number } | { ok: false };
 
 const EMPTY_CELL: TileCell = { height: 0, tribun: false };
-const TRASH_ICON_URL = new URL("../assets/game/units/icons/Trash.webp", import.meta.url).href;
-const TRASH_OUTLINE_URL = new URL("../assets/game/units/icons/_Trash.webp", import.meta.url).href;
+const TRASH_ICON_URL = new URL("../assets/game/setup/Trash.webp", import.meta.url).href;
+const TRASH_OUTLINE_URL = new URL("../assets/game/setup/_Trash.webp", import.meta.url).href;
 const OPCODE_MOVE = 0;
 const OPCODE_COMBINE = 5;
 const OPCODE_SPLIT = 7;
@@ -144,9 +147,15 @@ function makeEmptyCells(): TileCell[] {
   return Array.from({ length: SETUP_REGION_LIME }, () => ({ ...EMPTY_CELL }));
 }
 
-function normalizeHashInput(input: string): string {
-  // Allow grouped codes like "TRAD ITIO NALS ETUP" by stripping whitespace.
-  return input.replace(/\s+/g, "").trim().toUpperCase();
+function isSubsequenceMatch(needleRaw: string, haystackRaw: string): boolean {
+  const needle = needleRaw.trim().toLowerCase();
+  if (!needle) return true;
+  const haystack = haystackRaw.toLowerCase();
+  let j = 0;
+  for (let i = 0; i < haystack.length && j < needle.length; i++) {
+    if (haystack[i] === needle[j]) j += 1;
+  }
+  return j === needle.length;
 }
 
 function isBase37Code16(value: string): boolean {
@@ -377,6 +386,16 @@ export default function SetupExplorer() {
   const [enemyCells, setEnemyCells] = useState<TileCell[]>(makeEmptyCells);
   const [enemyHashInput, setEnemyHashInput] = useState("");
   const [enemyHashStatus, setEnemyHashStatus] = useState<HashStatus>("idle");
+  const [libraryItems, setLibraryItems] = useState<engine.SetupLibraryItem[]>([]);
+  const [libraryLoaded, setLibraryLoaded] = useState(false);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [librarySearchTarget, setLibrarySearchTarget] = useState<UnitSide | null>(null);
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryArmyMin, setLibraryArmyMin] = useState<number | "">("");
+  const [libraryArmyMax, setLibraryArmyMax] = useState<number | "">("");
+  const [libraryTribunHeight, setLibraryTribunHeight] = useState<0 | 1 | 2 | 3>(0);
+  const [librarySaveMessage, setLibrarySaveMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -395,6 +414,27 @@ export default function SetupExplorer() {
       active = false;
     };
   }, []);
+
+  const refreshLibrary = async () => {
+    setLibraryLoading(true);
+    setLibraryError(null);
+    try {
+      const items = await loadSetupLibrary();
+      setLibraryItems(items);
+      setLibraryLoaded(true);
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : "Failed to load setup library.");
+    } finally {
+      setLibraryLoading(false);
+    }
+  };
+
+  const openLibrarySearch = async (target: UnitSide) => {
+    setLibrarySearchTarget(target);
+    if (!libraryLoaded && !libraryLoading) {
+      await refreshLibrary();
+    }
+  };
 
   // Mapping between setup-index space and board CIDs depends on which player perspective we are displaying.
   // Important: we keep the underlying `ownCells[]` indexing/hash encoding stable; only which CID each index
@@ -627,6 +667,22 @@ export default function SetupExplorer() {
     };
   }, [ownCells, rotate180, playerColor]);
 
+  const filteredLibraryItems = useMemo(() => {
+    const query = libraryQuery.trim();
+    const minArmy = libraryArmyMin === "" ? null : libraryArmyMin;
+    const maxArmy = libraryArmyMax === "" ? null : libraryArmyMax;
+
+    return libraryItems.filter((item) => {
+      const matchesQuery =
+        query.length === 0 || isSubsequenceMatch(query, item.name) || isSubsequenceMatch(query, item.hash);
+      if (!matchesQuery) return false;
+      if (minArmy !== null && item.armySize < minArmy) return false;
+      if (maxArmy !== null && item.armySize > maxArmy) return false;
+      if (libraryTribunHeight !== 0 && item.tribunHeight !== libraryTribunHeight) return false;
+      return true;
+    });
+  }, [libraryItems, libraryQuery, libraryArmyMin, libraryArmyMax, libraryTribunHeight]);
+
   const ownBoardContext = useMemo(() => {
     const board = new Uint8Array(121);
     const occupiedHeightByCid = new Uint8Array(121);
@@ -842,8 +898,21 @@ export default function SetupExplorer() {
     return () => window.clearTimeout(t);
   }, [hashCopyStatus]);
 
+  useEffect(() => {
+    if (!librarySaveMessage) return;
+    const t = window.setTimeout(() => setLibrarySaveMessage(null), 2400);
+    return () => window.clearTimeout(t);
+  }, [librarySaveMessage]);
+
+  useEffect(() => {
+    const hash = ownValidation.hash;
+    if (!hash) return;
+    setOwnHashInput((prev) => (prev === hash ? prev : hash));
+    setOwnHashStatus("valid");
+  }, [ownValidation.hash]);
+
   const onOwnHashChange = (raw: string) => {
-    const value = normalizeHashInput(raw);
+    const value = normalizeSetupHashInput(raw);
     setOwnHashInput(value);
     const status = deriveHashStatus(value);
     setOwnHashStatus(status);
@@ -853,6 +922,12 @@ export default function SetupExplorer() {
         setOwnCells(setupToCells(decoded.setup));
       }
     }
+  };
+
+  const flipOwnHashInput = () => {
+    const flipped = getFlippedSetupHash(ownHashInput);
+    if (!flipped) return;
+    onOwnHashChange(flipped);
   };
 
   const copyOwnHashToClipboard = async () => {
@@ -866,8 +941,49 @@ export default function SetupExplorer() {
     }
   };
 
+  const addOwnSetupToLibrary = async () => {
+    const hash = ownValidation.problems.length === 0 ? ownValidation.hash : null;
+    const armySize = ownValidation.armySize.ok ? ownValidation.armySize.armySize : null;
+    const tribunHeight = ownValidation.tribunHeight;
+    if (!hash || armySize === null || (tribunHeight !== 1 && tribunHeight !== 2 && tribunHeight !== 3)) {
+      setLibrarySaveMessage("Save failed: setup hash or metadata is not valid yet.");
+      return;
+    }
+    const defaultName = `Setup ${hash.slice(0, 6)}`;
+    const maybeName = window.prompt("Name this setup:", defaultName);
+    if (maybeName === null) return;
+    const name = maybeName.trim();
+    if (!name) {
+      setLibrarySaveMessage("Save canceled: name cannot be empty.");
+      return;
+    }
+    try {
+      await addSetupToLibrary({
+        name,
+        hash,
+        armySize,
+        tribunHeight,
+      });
+      setLibrarySaveMessage(`Saved "${name}" to your setup library.`);
+      await refreshLibrary();
+    } catch (error) {
+      setLibrarySaveMessage(error instanceof Error ? error.message : "Failed to save setup.");
+    }
+  };
+
+  const applyLibraryHash = (target: UnitSide, hash: string) => {
+    const normalized = normalizeSetupHashInput(hash);
+    if (target === "own") {
+      onOwnHashChange(normalized);
+    } else {
+      setPreviewMode("hash");
+      onEnemyHashChange(normalized);
+    }
+    setLibrarySearchTarget(null);
+  };
+
   const onEnemyHashChange = (raw: string) => {
-    const value = normalizeHashInput(raw);
+    const value = normalizeSetupHashInput(raw);
     setEnemyHashInput(value);
     const status = deriveHashStatus(value);
     setEnemyHashStatus(status);
@@ -877,6 +993,12 @@ export default function SetupExplorer() {
     } else if (status === "invalid") {
       setEnemyCells(makeEmptyCells());
     }
+  };
+
+  const flipEnemyHashInput = () => {
+    const flipped = getFlippedSetupHash(enemyHashInput);
+    if (!flipped) return;
+    onEnemyHashChange(flipped);
   };
 
   const applyPaint = (cid: number, button: 0 | 2) => {
@@ -996,6 +1118,158 @@ export default function SetupExplorer() {
         </div>
       </header>
 
+      {librarySearchTarget && (
+        <div
+          onClick={() => setLibrarySearchTarget(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(14, 10, 6, 0.58)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 80,
+            padding: "14px",
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: "min(760px, 100%)",
+              maxHeight: "85vh",
+              overflow: "auto",
+              borderRadius: "16px",
+              border: "2px solid #3c3226",
+              background: "#fffaf0",
+              padding: "14px",
+              display: "grid",
+              gap: "10px",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+              <div style={{ fontSize: "18px", fontWeight: 700, color: "#2a2218" }}>
+                Setup library search ({librarySearchTarget === "own" ? "Own" : "Enemy"} hash)
+              </div>
+              <button
+                type="button"
+                onClick={() => setLibrarySearchTarget(null)}
+                style={{
+                  border: "1px solid #6f5a38",
+                  borderRadius: "8px",
+                  background: "#f2d9b2",
+                  padding: "4px 8px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 130px 130px 160px auto" }}>
+              <input
+                type="text"
+                value={libraryQuery}
+                onChange={(event) => setLibraryQuery(event.target.value)}
+                placeholder="Search by name or hash (case-insensitive subsequence)"
+                style={{
+                  border: "1px solid #bda98b",
+                  borderRadius: "10px",
+                  padding: "8px 10px",
+                  background: "#fff9ef",
+                }}
+              />
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={libraryArmyMin}
+                onChange={(event) => {
+                  if (event.target.value === "") {
+                    setLibraryArmyMin("");
+                    return;
+                  }
+                  setLibraryArmyMin(Math.max(0, Number(event.target.value)));
+                }}
+                placeholder="Army min"
+                style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
+              />
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={libraryArmyMax}
+                onChange={(event) => {
+                  if (event.target.value === "") {
+                    setLibraryArmyMax("");
+                    return;
+                  }
+                  setLibraryArmyMax(Math.max(0, Number(event.target.value)));
+                }}
+                placeholder="Army max"
+                style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
+              />
+              <select
+                value={libraryTribunHeight}
+                onChange={(event) => setLibraryTribunHeight(Number(event.target.value) as 0 | 1 | 2 | 3)}
+                style={{ border: "1px solid #bda98b", borderRadius: "10px", padding: "8px 10px", background: "#fff9ef" }}
+              >
+                <option value={0}>Any tribun</option>
+                <option value={1}>Tribun 1</option>
+                <option value={2}>Tribun 2</option>
+                <option value={3}>Tribun 3</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => void refreshLibrary()}
+                style={{
+                  border: "2px solid #6f5a38",
+                  borderRadius: "10px",
+                  background: "#f2d9b2",
+                  padding: "8px 10px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+
+            {libraryLoading && <div style={{ fontSize: "13px", color: "#5a4630" }}>Loading setup library...</div>}
+            {libraryError && <div style={{ fontSize: "13px", color: "#7a2020" }}>{libraryError}</div>}
+
+            <div style={{ display: "grid", gap: "8px", maxHeight: "52vh", overflow: "auto", paddingRight: "4px" }}>
+              {filteredLibraryItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => applyLibraryHash(librarySearchTarget, item.hash)}
+                  style={{
+                    border: "1px solid #ccb89b",
+                    borderRadius: "10px",
+                    background: "#fff9ef",
+                    padding: "10px",
+                    textAlign: "left",
+                    display: "grid",
+                    gap: "4px",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ fontSize: "14px", fontWeight: 700, color: "#2a2218" }}>{item.name}</div>
+                  <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: "12px", color: "#5a4630" }}>{item.hash}</div>
+                  <div style={{ fontSize: "12px", color: "#5a4630" }}>
+                    Army {item.armySize} · Tribun {item.tribunHeight}
+                  </div>
+                </button>
+              ))}
+              {!libraryLoading && filteredLibraryItems.length === 0 && (
+                <div style={{ fontSize: "13px", color: "#5a4630" }}>No matching setups found.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <main style={{ width: "100%", maxWidth: "1180px", margin: "0 auto", padding: "16px 12px 20px", display: "grid", gap: "12px" }}>
         <section style={{ display: "grid", gap: "10px" }}>
           <div style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "10px" }}>
@@ -1003,20 +1277,13 @@ export default function SetupExplorer() {
 
             <div style={{ display: "grid", gap: "6px" }}>
               <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Own hash</div>
-              <input
+              <SetupHashInput
                 value={ownHashInput}
-                onChange={(e) => onOwnHashChange(e.target.value)}
+                onChange={onOwnHashChange}
+                onOpenLibrary={() => void openLibrarySearch("own")}
+                onFlipHash={flipOwnHashInput}
                 placeholder="16-char base37 code"
-                maxLength={19}
-                style={{
-                  border: ownHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
-                  borderRadius: "10px",
-                  padding: "10px 12px",
-                  fontFamily: '"JetBrains Mono", monospace',
-                  letterSpacing: "1px",
-                  fontWeight: 700,
-                  background: "#fff9ef",
-                }}
+                invalid={ownHashStatus === "invalid"}
               />
               <div style={{ fontSize: "12px", color: ownHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
                 {ownHashStatus === "invalid" ? "Invalid hash." : ownHashStatus === "valid" ? "Loaded." : "Paste a hash to load."}
@@ -1038,20 +1305,13 @@ export default function SetupExplorer() {
               {previewMode === "hash" && (
                 <>
                   <div style={{ fontSize: "12px", fontWeight: 700, color: "#5a4630" }}>Enemy hash</div>
-                  <input
+                  <SetupHashInput
                     value={enemyHashInput}
-                    onChange={(e) => onEnemyHashChange(e.target.value)}
+                    onChange={onEnemyHashChange}
+                    onOpenLibrary={() => void openLibrarySearch("enemy")}
+                    onFlipHash={flipEnemyHashInput}
                     placeholder="16-char base37 code"
-                    maxLength={19}
-                    style={{
-                      border: enemyHashStatus === "invalid" ? "2px solid #9f3030" : "1px solid #bda98b",
-                      borderRadius: "10px",
-                      padding: "10px 12px",
-                      fontFamily: '"JetBrains Mono", monospace',
-                      letterSpacing: "1px",
-                      fontWeight: 700,
-                      background: "#fff9ef",
-                    }}
+                    invalid={enemyHashStatus === "invalid"}
                   />
                   <div style={{ fontSize: "12px", color: enemyHashStatus === "invalid" ? "#7c1e1e" : "#5a4630" }}>
                     {enemyHashStatus === "invalid" ? "Invalid hash." : enemyHashStatus === "valid" ? "Preview on." : "Paste a hash."}
@@ -1472,24 +1732,44 @@ export default function SetupExplorer() {
         <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "10px" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
             <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Hash</div>
-            <button
-              type="button"
-              onClick={copyOwnHashToClipboard}
-              disabled={ownValidation.problems.length !== 0 || !ownValidation.hash}
-              style={{
-                padding: "6px 10px",
-                borderRadius: "10px",
-                border: "2px solid #6f5a38",
-                background: "#fff6e8",
-                fontWeight: 700,
-                cursor: ownValidation.problems.length !== 0 || !ownValidation.hash ? "not-allowed" : "pointer",
-                opacity: ownValidation.problems.length !== 0 || !ownValidation.hash ? 0.55 : 1,
-                height: "34px",
-              }}
-              title="Copy hash to clipboard"
-            >
-              {hashCopyStatus === "copied" ? "Copied" : hashCopyStatus === "failed" ? "Copy failed" : "Copy"}
-            </button>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={addOwnSetupToLibrary}
+                disabled={ownValidation.problems.length !== 0 || !ownValidation.hash}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: "10px",
+                  border: "2px solid #6f5a38",
+                  background: "#fff6e8",
+                  fontWeight: 700,
+                  cursor: ownValidation.problems.length !== 0 || !ownValidation.hash ? "not-allowed" : "pointer",
+                  opacity: ownValidation.problems.length !== 0 || !ownValidation.hash ? 0.55 : 1,
+                  height: "34px",
+                }}
+                title="Save this setup to your library"
+              >
+                Add to library
+              </button>
+              <button
+                type="button"
+                onClick={copyOwnHashToClipboard}
+                disabled={ownValidation.problems.length !== 0 || !ownValidation.hash}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: "10px",
+                  border: "2px solid #6f5a38",
+                  background: "#fff6e8",
+                  fontWeight: 700,
+                  cursor: ownValidation.problems.length !== 0 || !ownValidation.hash ? "not-allowed" : "pointer",
+                  opacity: ownValidation.problems.length !== 0 || !ownValidation.hash ? 0.55 : 1,
+                  height: "34px",
+                }}
+                title="Copy hash to clipboard"
+              >
+                {hashCopyStatus === "copied" ? "Copied" : hashCopyStatus === "failed" ? "Copy failed" : "Copy"}
+              </button>
+            </div>
           </div>
           <div
             style={{
@@ -1512,6 +1792,7 @@ export default function SetupExplorer() {
           <div style={{ fontSize: "12px", color: "#5a4630" }}>
             You can click and drag to select the hash, or use the Copy button.
           </div>
+          {librarySaveMessage && <div style={{ fontSize: "12px", color: "#2f6b3f", fontWeight: 700 }}>{librarySaveMessage}</div>}
         </section>
 
         <section style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "8px" }}>
