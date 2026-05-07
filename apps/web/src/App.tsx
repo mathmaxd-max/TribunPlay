@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { DocumentHead } from "./DocumentHead";
 import Home from "./pages/Home";
 import Game from "./pages/Game";
 import Landing from "./pages/Landing";
@@ -35,6 +36,7 @@ function RedirectIfIdentity({ children }: { children: ReactNode }) {
 function App() {
   return (
     <BrowserRouter>
+      <DocumentHead />
       <Routes>
         <Route
           path="/"

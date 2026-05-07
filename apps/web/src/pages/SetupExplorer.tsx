@@ -25,6 +25,7 @@ import {
 } from "../setupLibrary";
 import { getFlippedSetupHash, normalizeSetupHashInput } from "../setupHashFlip";
 import { filterSetupLibraryItems, type SetupLibrarySearchMode } from "../ui/setupLibraryFilters";
+import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
 type Brush = "1" | "2" | "3" | "eraser";
 type TileCell = { height: 0 | 1 | 2 | 3; tribun: boolean };
@@ -1183,12 +1184,7 @@ export default function SetupExplorer() {
           borderBottom: "2px solid #3a2f22",
         }}
       >
-        <div>
-          <div style={{ fontSize: "10px", letterSpacing: "2px", textTransform: "uppercase", color: "#ccb896", fontWeight: 700 }}>
-            Tribun Play
-          </div>
-          <div style={{ fontSize: "20px", fontWeight: 400 }}>Setup Explorer</div>
-        </div>
+        <PageHeaderBrand title="Setup Explorer" />
         <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
           <Link
             to="/hub"

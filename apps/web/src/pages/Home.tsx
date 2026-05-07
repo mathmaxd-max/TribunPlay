@@ -14,6 +14,7 @@ import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
 import { renderTurnstile } from '../auth/turnstile';
 import { formatDurationHms } from '../utils/formatDuration';
 import { useHealthCheck } from '../utils/useHealthCheck';
+import { PageHeaderBrand } from '../ui/PageHeaderBrand';
 
 type RoomColorOption = 'black' | 'white' | 'random';
 type NextStartOption = 'same' | 'other' | 'random';
@@ -607,20 +608,7 @@ export default function Home() {
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ minWidth: '140px' }}>
-          <div
-            style={{
-              fontSize: '10px',
-              letterSpacing: '2px',
-              textTransform: 'uppercase',
-              color: '#ccb896',
-              fontWeight: 700,
-            }}
-          >
-            Tribun Play
-          </div>
-          <div style={{ fontSize: '20px', fontWeight: 400 }}>Play with a Friend</div>
-        </div>
+        <PageHeaderBrand title="Play with a Friend" textColumnStyle={{ minWidth: '140px' }} />
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginLeft: 'auto' }}>
           <div

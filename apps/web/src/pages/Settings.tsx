@@ -3,6 +3,7 @@ import { useState } from "react";
 import { BoardSfxControls } from "../audio/BoardSfxControls";
 import { useBoardSfx } from "../audio/boardSfx";
 import { getAccountSettings, updateAccountSettings } from "../settings/accountSettings";
+import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
 export default function Settings() {
   const [accountSettings, setAccountSettings] = useState(() => getAccountSettings());
@@ -42,20 +43,7 @@ export default function Settings() {
           borderBottom: "2px solid #3a2f22",
         }}
       >
-        <div>
-          <div
-            style={{
-              fontSize: "10px",
-              letterSpacing: "2px",
-              textTransform: "uppercase",
-              color: "#ccb896",
-              fontWeight: 700,
-            }}
-          >
-            Tribun Play
-          </div>
-          <div style={{ fontSize: "20px", fontWeight: 400 }}>Settings</div>
-        </div>
+        <PageHeaderBrand title="Settings" />
         <Link
           to="/hub"
           style={{

@@ -1,0 +1,8 @@
+# Copy to .dev.vars in this directory for `wrangler dev` (gitignored).
+# Production: use `wrangler secret put AUTH_TOKEN_SECRET` etc., and dashboard
+# Variables / wrangler.jsonc for non-secret vars like TURNSTILE_ENABLED.
+
+# TURNSTILE_ENABLED=true
+# TURNSTILE_SECRET_KEY=
+# GOOGLE_CLIENT_ID=
+AUTH_TOKEN_SECRET=

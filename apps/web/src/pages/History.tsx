@@ -7,6 +7,7 @@ import {
   type AuthSuccessResponse,
   type StoredIdentity,
 } from "../auth/identityStore";
+import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
 type HistoryItem = {
   gameId: string;
@@ -157,12 +158,7 @@ export default function History() {
           flexWrap: "wrap",
         }}
       >
-        <div>
-          <div style={{ fontSize: "10px", letterSpacing: "2px", textTransform: "uppercase", color: "#ccb896", fontWeight: 700 }}>
-            Tribun Play
-          </div>
-          <div style={{ fontSize: "20px", fontWeight: 400 }}>Game History</div>
-        </div>
+        <PageHeaderBrand title="Game History" />
         <button
           type="button"
           onClick={() => navigate("/hub")}

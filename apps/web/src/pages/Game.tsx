@@ -35,6 +35,7 @@ import { type BoardSfxEvent, useBoardSfx } from '../audio/boardSfx';
 import { getAccountSettings } from '../settings/accountSettings';
 import { areAllUnitIconsReady, preloadAllUnitIcons } from '../ui/unitIcons';
 import { filterSetupLibraryItems, type SetupLibrarySearchMode } from '../ui/setupLibraryFilters';
+import { PageHeaderBrand } from '../ui/PageHeaderBrand';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -3443,20 +3444,7 @@ export default function Game() {
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ minWidth: '140px' }}>
-          <div
-            style={{
-              fontSize: '10px',
-              letterSpacing: '2px',
-              textTransform: 'uppercase',
-              color: '#ccb896',
-              fontWeight: 700,
-            }}
-          >
-            Game Code
-          </div>
-          <div style={{ fontSize: '20px', fontWeight: 400 }}>{code}</div>
-        </div>
+        <PageHeaderBrand kicker="Game Code" title={code} textColumnStyle={{ minWidth: '140px' }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
           <div
             style={{

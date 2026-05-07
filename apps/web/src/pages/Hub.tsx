@@ -1,5 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { clearStoredIdentity, getStoredIdentity } from "../auth/identityStore";
+import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
 export default function Hub() {
   const navigate = useNavigate();
@@ -37,20 +38,7 @@ export default function Hub() {
           borderBottom: "2px solid #3a2f22",
         }}
       >
-        <div>
-          <div
-            style={{
-              fontSize: "10px",
-              letterSpacing: "2px",
-              textTransform: "uppercase",
-              color: "#ccb896",
-              fontWeight: 700,
-            }}
-          >
-            Tribun Play
-          </div>
-          <div style={{ fontSize: "20px", fontWeight: 400 }}>Hub</div>
-        </div>
+        <PageHeaderBrand title="Hub" />
       </header>
 
       <main style={{ width: "100%", maxWidth: "940px", margin: "0 auto", padding: "20px 14px 24px", display: "grid", gap: "16px" }}>

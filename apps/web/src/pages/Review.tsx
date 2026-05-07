@@ -22,6 +22,7 @@ import {
 import { useBoardSfx, type BoardSfxEvent } from "../audio/boardSfx";
 import { preloadBoardAssets } from "../audio/boardSfx";
 import { areAllUnitIconsReady, preloadAllUnitIcons } from "../ui/unitIcons";
+import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
 type ReplayAction = {
   ply: number;
@@ -705,12 +706,7 @@ export default function Review() {
           flexWrap: "wrap",
         }}
       >
-        <div>
-          <div style={{ fontSize: "10px", letterSpacing: "2px", textTransform: "uppercase", color: "#ccb896", fontWeight: 700 }}>
-            Tribun Play
-          </div>
-          <div style={{ fontSize: "20px", fontWeight: 400 }}>Review Mode</div>
-        </div>
+        <PageHeaderBrand title="Review Mode" />
         <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
           <Link
             to="/history"

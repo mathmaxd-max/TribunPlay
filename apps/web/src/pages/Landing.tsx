@@ -4,6 +4,7 @@ import GuestPanel from "../components/auth/GuestPanel";
 import { resolveNextPath } from "../auth/redirect";
 import { setIdentityFromAuthSuccess, setStoredIdentity, type AuthSuccessResponse, type StoredIdentity } from "../auth/identityStore";
 import { generateRandomGuestName } from "../auth/guestName";
+import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
 export default function Landing() {
   const navigate = useNavigate();
@@ -56,20 +57,7 @@ export default function Landing() {
           borderBottom: "2px solid #3a2f22",
         }}
       >
-        <div>
-          <div
-            style={{
-              fontSize: "10px",
-              letterSpacing: "2px",
-              textTransform: "uppercase",
-              color: "#ccb896",
-              fontWeight: 700,
-            }}
-          >
-            Tribun Play
-          </div>
-          <div style={{ fontSize: "20px", fontWeight: 400 }}>Choose Identity</div>
-        </div>
+        <PageHeaderBrand title="Choose Identity" />
       </header>
 
       <main style={{ width: "100%", maxWidth: "980px", margin: "0 auto", padding: "20px 14px 24px", display: "grid", gap: "16px" }}>
