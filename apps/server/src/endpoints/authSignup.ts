@@ -74,7 +74,17 @@ export class AuthSignup extends OpenAPIRoute {
       return c.json({ error: normalized.message }, normalized.status as 400 | 500);
     }
 
-    const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
+    const forwardedFor = c.req.header("X-Forwarded-For") ?? c.req.header("x-forwarded-for");
+    const realIp = c.req.header("X-Real-IP") ?? c.req.header("x-real-ip");
+    const clientIp =
+      c.req.header("CF-Connecting-IP") ??
+      forwardedFor?.split(",")[0]?.trim() ??
+      realIp ??
+      "unknown";
+    const clientKey =
+      clientIp !== "unknown"
+        ? clientIp
+        : `ua:${(c.req.header("User-Agent") ?? "unknown").slice(0, 120)}`;
 
     {
       const captcha = await verifyTurnstile({
@@ -88,8 +98,10 @@ export class AuthSignup extends OpenAPIRoute {
       }
     }
 
-    const bucket = `signup:${email}:${clientIp}`;
-    const ipBucket = `signup_ip:${clientIp}`;
+    // In local dev (`wrangler dev`) `CF-Connecting-IP` is often absent; using a hardcoded
+    // "unknown" would make every signup share the same global bucket and immediately hit 429.
+    const bucket = `signup:${email}:${clientKey}`;
+    const ipBucket = `signup_ip:${clientKey}`;
     try {
       await consumeAuthAttempt(env.DB, bucket);
       // M01 additional non-invasive bot protection: a second per-IP bucket complements per-email+IP.

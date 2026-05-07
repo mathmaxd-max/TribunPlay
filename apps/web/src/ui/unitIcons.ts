@@ -30,6 +30,8 @@ const ALL_UNIT_ICON_URLS = [
   outlineT,
 ] as const;
 let preloadPromise: Promise<void> | null = null;
+const decodedIconUrls = new Set<string>();
+const preloadByUrl = new Map<string, Promise<void>>();
 
 export type UnitIconRequest = {
   height: number;
@@ -70,6 +72,60 @@ export function resolveUnitIconUrl(req: UnitIconRequest): string | null {
   }
 }
 
+const preloadAndDecodeImage = (url: string): Promise<void> => {
+  if (decodedIconUrls.has(url)) return Promise.resolve();
+  const pending = preloadByUrl.get(url);
+  if (pending) return pending;
+  const promise = new Promise<void>((resolve) => {
+    if (typeof Image === 'undefined') {
+      resolve();
+      return;
+    }
+    const img = new Image();
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const decodeIfPossible = () => {
+      if (typeof img.decode !== 'function') {
+        decodedIconUrls.add(url);
+        finish();
+        return;
+      }
+      img
+        .decode()
+        .catch(() => undefined)
+        .finally(() => {
+          decodedIconUrls.add(url);
+          finish();
+        });
+    };
+    img.onload = decodeIfPossible;
+    img.onerror = finish;
+    img.src = url;
+    if (img.complete) {
+      decodeIfPossible();
+    }
+  }).finally(() => {
+    preloadByUrl.delete(url);
+  });
+  preloadByUrl.set(url, promise);
+  return promise;
+};
+
+export function areUnitIconLayersReady(req: Omit<UnitIconRequest, 'outline'>): boolean {
+  const fillUrl = resolveUnitIconUrl({ ...req, outline: false });
+  const outlineUrl = resolveUnitIconUrl({ ...req, outline: true });
+  if (!fillUrl || !outlineUrl) return false;
+  return decodedIconUrls.has(fillUrl) && decodedIconUrls.has(outlineUrl);
+}
+
+export function areAllUnitIconsReady(): boolean {
+  return ALL_UNIT_ICON_URLS.every((url) => decodedIconUrls.has(url));
+}
+
 export function preloadAllUnitIcons(): Promise<void> {
   if (preloadPromise) return preloadPromise;
   if (typeof Image === "undefined") {
@@ -78,15 +134,7 @@ export function preloadAllUnitIcons(): Promise<void> {
   }
 
   preloadPromise = Promise.all(
-    ALL_UNIT_ICON_URLS.map(
-      (url) =>
-        new Promise<void>((resolve) => {
-          const img = new Image();
-          img.onload = () => resolve();
-          img.onerror = () => resolve();
-          img.src = url;
-        }),
-    ),
+    ALL_UNIT_ICON_URLS.map((url) => preloadAndDecodeImage(url)),
   ).then(() => undefined);
 
   return preloadPromise;

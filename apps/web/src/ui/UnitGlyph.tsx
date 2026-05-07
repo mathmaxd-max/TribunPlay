@@ -1,4 +1,4 @@
-import { resolveUnitIconUrl } from "./unitIcons";
+import { areUnitIconLayersReady, resolveUnitIconUrl } from "./unitIcons";
 
 export type UnitGlyphMode = "icon" | "number";
 
@@ -106,7 +106,7 @@ function NumberGlyph(props: {
 }
 
 function canRenderAsIcon(unit: UnitGlyphUnit): boolean {
-  return !!resolveUnitIconUrl({ height: unit.height, tribun: unit.tribun, outline: false });
+  return areUnitIconLayersReady({ height: unit.height, tribun: unit.tribun });
 }
 
 export function UnitGlyph(props: {
@@ -187,4 +187,3 @@ export function SplitUnitGlyph(props: {
     </span>
   );
 }
-

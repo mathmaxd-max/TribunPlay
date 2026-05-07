@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
 import { UnitGlyph as SharedUnitGlyph } from "../ui/UnitGlyph";
-import { BoardSfxControls } from "../audio/BoardSfxControls";
+import { areAllUnitIconsReady, preloadAllUnitIcons } from "../ui/unitIcons";
 import { useBoardSfx } from "../audio/boardSfx";
 import {
   decodeCodeDetailed,
@@ -322,14 +322,21 @@ function deriveHashStatus(value: string): HashStatus {
   return decoded.ok ? "valid" : "invalid";
 }
 
-function SetupUnitGlyph(props: { cell: TileCell; viewMode: UnitViewMode; side: UnitSide; playerColor: PlayerCosmetic; size?: "board" | "small" }) {
+function SetupUnitGlyph(props: {
+  cell: TileCell;
+  viewMode: UnitViewMode;
+  side: UnitSide;
+  playerColor: PlayerCosmetic;
+  iconsReady: boolean;
+  size?: "board" | "small";
+}) {
   const { cell, viewMode, side, playerColor, size = "board" } = props;
   if (cell.height === 0) return null;
 
   const ownIsBlack = playerColor === "black";
   const sideIsBlack = side === "own" ? ownIsBlack : !ownIsBlack;
 
-  const mode = viewMode === "icon" ? "icon" : "number";
+  const mode = viewMode === "icon" && props.iconsReady ? "icon" : "number";
   const sizePx = size === "small" ? 22 : 36;
   const fill = cell.tribun ? (sideIsBlack ? "#AE0000" : "#00B4FF") : sideIsBlack ? "#000" : "#fff";
   const stroke = sideIsBlack ? "#fff" : "#000";
@@ -345,7 +352,8 @@ function SetupUnitGlyph(props: { cell: TileCell; viewMode: UnitViewMode; side: U
 }
 
 export default function SetupExplorer() {
-  const { muted: sfxMuted, volume: sfxVolume, playSfx, setVolume: setSfxVolume, toggleMuted: toggleSfxMuted } = useBoardSfx();
+  const { playSfx } = useBoardSfx();
+  const [unitIconsReady, setUnitIconsReady] = useState(() => areAllUnitIconsReady());
   const [brush, setBrush] = useState<Brush>("1");
   const [tribunBrush, setTribunBrush] = useState(false);
   const [onlyEmpty, setOnlyEmpty] = useState(true);
@@ -369,6 +377,24 @@ export default function SetupExplorer() {
   const [enemyCells, setEnemyCells] = useState<TileCell[]>(makeEmptyCells);
   const [enemyHashInput, setEnemyHashInput] = useState("");
   const [enemyHashStatus, setEnemyHashStatus] = useState<HashStatus>("idle");
+
+  useEffect(() => {
+    let active = true;
+    if (areAllUnitIconsReady()) {
+      setUnitIconsReady(true);
+      return () => {
+        active = false;
+      };
+    }
+    void preloadAllUnitIcons().then(() => {
+      if (active) {
+        setUnitIconsReady(true);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Mapping between setup-index space and board CIDs depends on which player perspective we are displaying.
   // Important: we keep the underlying `ownCells[]` indexing/hash encoding stable; only which CID each index
@@ -950,12 +976,6 @@ export default function SetupExplorer() {
           <div style={{ fontSize: "20px", fontWeight: 400 }}>Setup Explorer</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-          <BoardSfxControls
-            muted={sfxMuted}
-            volume={sfxVolume}
-            onToggleMuted={toggleSfxMuted}
-            onVolumeChange={setSfxVolume}
-          />
           <Link
             to="/hub"
             style={{
@@ -1132,7 +1152,14 @@ export default function SetupExplorer() {
                   {b === "eraser" ? (
                     <TrashGlyph sizePx={18} fillColor={fillColor} outlineColor={outlineColor} />
                   ) : (
-                    <SetupUnitGlyph cell={brushCell} viewMode={unitViewMode} side="own" playerColor={playerColor} size="small" />
+                    <SetupUnitGlyph
+                      cell={brushCell}
+                      viewMode={unitViewMode}
+                      side="own"
+                      playerColor={playerColor}
+                      iconsReady={unitIconsReady}
+                      size="small"
+                    />
                   )}
                 </button>
               );
@@ -1335,8 +1362,24 @@ export default function SetupExplorer() {
                           userSelect: "none",
                         }}
                       >
-                        {own.height > 0 && <SetupUnitGlyph cell={own} viewMode={unitViewMode} side="own" playerColor={playerColor} />}
-                        {enemy.height > 0 && <SetupUnitGlyph cell={enemy} viewMode={unitViewMode} side="enemy" playerColor={playerColor} />}
+                        {own.height > 0 && (
+                          <SetupUnitGlyph
+                            cell={own}
+                            viewMode={unitViewMode}
+                            side="own"
+                            playerColor={playerColor}
+                            iconsReady={unitIconsReady}
+                          />
+                        )}
+                        {enemy.height > 0 && (
+                          <SetupUnitGlyph
+                            cell={enemy}
+                            viewMode={unitViewMode}
+                            side="enemy"
+                            playerColor={playerColor}
+                            iconsReady={unitIconsReady}
+                          />
+                        )}
                       </div>
                     </div>
                   );

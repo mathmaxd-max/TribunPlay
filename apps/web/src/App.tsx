@@ -4,6 +4,7 @@ import Game from "./pages/Game";
 import Landing from "./pages/Landing";
 import Hub from "./pages/Hub";
 import SetupExplorer from "./pages/SetupExplorer";
+import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import Datenschutz from "./pages/Datenschutz";
 import Disclaimer from "./pages/Disclaimer";
@@ -63,6 +64,14 @@ function App() {
           element={
             <RequireIdentity>
               <SetupExplorer />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <RequireIdentity>
+              <Settings />
             </RequireIdentity>
           }
         />

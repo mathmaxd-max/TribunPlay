@@ -58,7 +58,7 @@ export function BoardSfxControls(props: BoardSfxControlsProps) {
         <input
           type="range"
           min={0}
-          max={100}
+          max={200}
           step={5}
           value={volumePercent}
           onChange={(event) => onVolumeChange(Number(event.target.value) / 100)}

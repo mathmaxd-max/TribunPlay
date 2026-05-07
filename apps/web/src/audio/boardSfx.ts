@@ -21,7 +21,7 @@ type PlaySfxOptions = {
 const STORAGE_KEY = 'tribun.boardSfx.v1';
 const DEFAULT_SETTINGS: BoardSfxSettings = {
   muted: false,
-  volume: 0.5,
+  volume: 1,
 };
 
 const EVENT_COOLDOWN_MS: Record<BoardSfxEvent, number> = {
@@ -47,7 +47,7 @@ const isContextRunning = (state: AudioContextState): boolean => state === 'runni
 
 const clampVolume = (value: number): number => {
   if (!Number.isFinite(value)) return DEFAULT_SETTINGS.volume;
-  return Math.max(0, Math.min(1, value));
+  return Math.max(0, Math.min(2, value));
 };
 
 const readSettings = (): BoardSfxSettings => {
@@ -202,7 +202,7 @@ const playViaHtmlAudio = (event: BoardSfxEvent, volume: number, delayMs: number)
   const fire = () => {
     const instance = source.cloneNode(true) as HTMLAudioElement;
     instance.preload = 'auto';
-    instance.volume = volume;
+    instance.volume = Math.max(0, Math.min(1, volume));
     instance.muted = false;
     try {
       instance.currentTime = 0;

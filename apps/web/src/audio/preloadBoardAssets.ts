@@ -14,9 +14,18 @@ const preloadImage = (url: string): Promise<void> =>
       return;
     }
     const img = new Image();
-    img.onload = () => resolve();
+    img.onload = () => {
+      if (typeof img.decode !== 'function') {
+        resolve();
+        return;
+      }
+      img.decode().catch(() => undefined).finally(() => resolve());
+    };
     img.onerror = () => resolve();
     img.src = url;
+    if (img.complete && typeof img.decode === 'function') {
+      img.decode().catch(() => undefined).finally(() => resolve());
+    }
   });
 
 const preloadExtraBoardImages = (): Promise<void> => {

@@ -23,8 +23,9 @@ import {
   type AuthSuccessResponse,
 } from '../auth/identityStore';
 import { API_BASE, WS_BASE } from '../config';
-import { BoardSfxControls } from '../audio/BoardSfxControls';
 import { type BoardSfxEvent, useBoardSfx } from '../audio/boardSfx';
+import { getAccountSettings } from '../settings/accountSettings';
+import { areAllUnitIconsReady, preloadAllUnitIcons } from '../ui/unitIcons';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -80,6 +81,8 @@ type UIState =
   | { type: 'empty'; centerCid: number; donors: Map<number, number>; optionIndex: number; symmetry?: EmptySymmetryState }
   | { type: 'own_primary'; originCid: number; targetCid: number | null; optionIndex: number }
   | { type: 'own_secondary'; originCid: number; allocations: number[] };
+
+type IdleTransitionReason = 'none' | 'cancel';
 
 type TilePixelData = {
   cid: number;
@@ -385,8 +388,8 @@ export default function Game() {
     typeof window !== 'undefined' ? window.innerWidth >= 980 : false,
   );
   const [isReady, setIsReady] = useState(false);
-  const { muted: sfxMuted, volume: sfxVolume, playSfx, setVolume: setSfxVolume, toggleMuted: toggleSfxMuted, getAudioTime } =
-    useBoardSfx();
+  const [unitIconsReady, setUnitIconsReady] = useState(() => areAllUnitIconsReady());
+  const { playSfx, getAudioTime } = useBoardSfx();
   const playSfxRef = useRef(playSfx);
   const getAudioTimeRef = useRef(getAudioTime);
   
@@ -412,6 +415,11 @@ export default function Game() {
   // UI State Machine
   const [uiState, setUiState] = useState<UIState>({ type: 'idle' });
   const uiStateRef = useRef<UIState>({ type: 'idle' });
+  const [singleClickCancelReselectEnabled] = useState(
+    () => getAccountSettings().singleClickCancelReselect,
+  );
+  const [ownDrawOfferSinceMs, setOwnDrawOfferSinceMs] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [validator, setValidator] = useState<LegalBloomValidator | null>(null);
   const [lastOpponentChangedTiles, setLastOpponentChangedTiles] = useState<number[]>([]);
   const [activeOpponentAnimation, setActiveOpponentAnimation] = useState<ActiveOpponentAnimation | null>(null);
@@ -449,6 +457,24 @@ export default function Game() {
     uiStateRef.current = uiState;
   }, [uiState]);
 
+  useEffect(() => {
+    let active = true;
+    if (areAllUnitIconsReady()) {
+      setUnitIconsReady(true);
+      return () => {
+        active = false;
+      };
+    }
+    void preloadAllUnitIcons().then(() => {
+      if (active) {
+        setUnitIconsReady(true);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const describeAction = (action: number) => {
     const unsigned = action >>> 0;
     let opcode: number | null = null;
@@ -465,17 +491,24 @@ export default function Game() {
     };
   };
 
-  const commitUiState = (nextState: UIState, options?: { withResetSfx?: boolean }) => {
+  const commitUiState = (nextState: UIState, options?: { idleReason?: IdleTransitionReason }) => {
     const previousState = uiStateRef.current;
     if (isUiStateEqual(previousState, nextState)) return;
     uiStateRef.current = nextState;
     setUiState(nextState);
-    if (options?.withResetSfx && previousState.type !== 'idle' && nextState.type === 'idle') {
+    if (
+      options?.idleReason === 'cancel' &&
+      previousState.type !== 'idle' &&
+      nextState.type === 'idle'
+    ) {
       playSfxRef.current('resetToIdle');
     }
   };
 
-  const transitionUiState = (updater: (previousState: UIState) => UIState, options?: { withResetSfx?: boolean }) => {
+  const transitionUiState = (
+    updater: (previousState: UIState) => UIState,
+    options?: { idleReason?: IdleTransitionReason },
+  ) => {
     const previousState = uiStateRef.current;
     const nextState = updater(previousState);
     commitUiState(nextState, options);
@@ -555,17 +588,17 @@ export default function Game() {
 
   useEffect(() => {
     if (!gameState || !cache) {
-      commitUiState({ type: 'idle' }, { withResetSfx: false });
+      commitUiState({ type: 'idle' }, { idleReason: 'none' });
       return;
     }
     if (gameState.status === 'ended') {
-      commitUiState({ type: 'idle' }, { withResetSfx: false });
+      commitUiState({ type: 'idle' }, { idleReason: 'none' });
       return;
     }
 
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive && uiStateRef.current.type !== 'idle') {
-      commitUiState({ type: 'idle' }, { withResetSfx: false });
+      commitUiState({ type: 'idle' }, { idleReason: 'none' });
       return;
     }
 
@@ -639,7 +672,7 @@ export default function Game() {
           return prevState;
         }
       }
-    }, { withResetSfx: false });
+    }, { idleReason: 'none' });
   }, [gameState, cache, role]);
   
   const baseTileStates = useMemo(() => {
@@ -1176,7 +1209,7 @@ export default function Game() {
 
               gameStateRef.current = state;
               setGameState(state);
-              commitUiState({ type: 'idle' }, { withResetSfx: false });
+              commitUiState({ type: 'idle' }, { idleReason: 'none' });
               setLastOpponentChangedTiles([]);
               setActiveOpponentAnimation(null);
               lastTurnRef.current = snapshot.turn;
@@ -1266,7 +1299,7 @@ export default function Game() {
                 localPly: gameStateRef.current?.ply ?? null,
               });
               setError(message.message);
-              commitUiState({ type: 'idle' }, { withResetSfx: false });
+              commitUiState({ type: 'idle' }, { idleReason: 'none' });
               requestSync();
             } else {
               logGame('json.recv.unhandled', { type: message.t ?? null });
@@ -1387,14 +1420,14 @@ export default function Game() {
               } else {
                 logGame('action.apply.skip.no_state', actionInfo);
               }
-              commitUiState({ type: 'idle' }, { withResetSfx: true });
+              commitUiState({ type: 'idle' }, { idleReason: 'none' });
             } catch (err) {
               logGame('action.apply.fail', {
                 ...actionInfo,
                 error: err instanceof Error ? err.message : String(err),
               });
               setError(err instanceof Error ? err.message : 'Failed to apply action');
-              commitUiState({ type: 'idle' }, { withResetSfx: false });
+              commitUiState({ type: 'idle' }, { idleReason: 'none' });
               requestSync();
             }
           }
@@ -1497,6 +1530,14 @@ export default function Game() {
       });
       setError('Action is not legal');
       return;
+    }
+
+    const drawActionKind = getDrawActionKind(action);
+    if (drawActionKind === 1) {
+      if (withdrawCooldownRemainingMs > 0) {
+        setError(`Please wait ${Math.ceil(withdrawCooldownRemainingMs / 1000)}s before withdrawing your draw offer.`);
+        return;
+      }
     }
 
     const buffer = new ArrayBuffer(4);
@@ -1684,6 +1725,29 @@ export default function Game() {
     return next;
   };
 
+  const getIdleSelectionState = (cid: number): UIState | null => {
+    if (!gameState || !cache || gameState.status === 'ended') return null;
+    if (cache.enemy.has(cid)) {
+      return { type: 'enemy', targetCid: cid, optionIndex: 0 };
+    }
+    if (cache.empty.has(cid)) {
+      return { type: 'empty', centerCid: cid, donors: new Map(), optionIndex: 0 };
+    }
+
+    const ownPrimaryCache = cache.ownPrimary.get(cid);
+    const ownSecondaryCache = cache.ownSecondary.get(cid);
+    const hasPrimaryMoves = Boolean(ownPrimaryCache && ownPrimaryCache.targets.size > 0);
+    const hasSecondaryMoves = Boolean(ownSecondaryCache && ownSecondaryCache.split.emptyAdjDirs.length > 0);
+
+    if (hasPrimaryMoves) {
+      return { type: 'own_primary', originCid: cid, targetCid: null, optionIndex: 0 };
+    }
+    if (hasSecondaryMoves) {
+      return { type: 'own_secondary', originCid: cid, allocations: [0, 0, 0, 0, 0, 0] };
+    }
+    return null;
+  };
+
   const handleTileClick = (cid: number, d: number = 1) => {
     if (!gameState || !cache || gameState.status === 'ended') return;
     
@@ -1693,31 +1757,7 @@ export default function Game() {
     transitionUiState((prevState) => {
       switch (prevState.type) {
         case 'idle': {
-          // Check cache to determine which state to enter
-          if (cache.enemy.has(cid)) {
-            return { type: 'enemy', targetCid: cid, optionIndex: 0 };
-          }
-          if (cache.empty.has(cid)) {
-            return { type: 'empty', centerCid: cid, donors: new Map(), optionIndex: 0 };
-          }
-          
-          // For own units, check which state has moves and prefer that one
-          const ownPrimaryCache = cache.ownPrimary.get(cid);
-          const ownSecondaryCache = cache.ownSecondary.get(cid);
-          
-          // Check if primary has actual moves (targets)
-          const hasPrimaryMoves = ownPrimaryCache && ownPrimaryCache.targets.size > 0;
-          // Check if secondary has moves (empty adjacent tiles for split/backstabb)
-          const hasSecondaryMoves = ownSecondaryCache && ownSecondaryCache.split.emptyAdjDirs.length > 0;
-          
-          if (hasPrimaryMoves) {
-            return { type: 'own_primary', originCid: cid, targetCid: null, optionIndex: 0 };
-          }
-          if (hasSecondaryMoves) {
-            return { type: 'own_secondary', originCid: cid, allocations: [0, 0, 0, 0, 0, 0] };
-          }
-          
-          return prevState;
+          return getIdleSelectionState(cid) ?? prevState;
         }
         
         case 'enemy': {
@@ -1901,7 +1941,7 @@ export default function Game() {
           return { ...prevState, allocations: newAllocations };
         }
       }
-    }, { withResetSfx: true });
+    }, { idleReason: 'cancel' });
   };
 
   const getEmptyStateAction = (): number | null => {
@@ -2060,6 +2100,21 @@ export default function Game() {
   useEffect(() => {
     submitCurrentActionRef.current = submitCurrentAction;
   }, [submitCurrentAction]);
+
+  const getDrawActionKind = (action: number | null): 0 | 1 | 2 | 3 | null => {
+    if (action === null) return null;
+    try {
+      const decoded = engine.decodeAction(action >>> 0);
+      if (decoded.opcode !== 10) return null;
+      const drawAction = decoded.fields.drawAction;
+      if (drawAction === 0 || drawAction === 1 || drawAction === 2 || drawAction === 3) {
+        return drawAction;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
 
   type PreviewOverlayUnit = { p: number; s: number; color: engine.Color; tribun: boolean };
   type PreviewOverlay = { units: Map<number, PreviewOverlayUnit>; empty: Set<number> };
@@ -2481,6 +2536,7 @@ export default function Game() {
 
     const renderVisualUnit = (unit: VisualUnit, mode: 'icon' | 'number' = 'icon'): JSX.Element | null => {
       if (unit.p <= 0 && unit.s <= 0) return null;
+      const effectiveMode: 'icon' | 'number' = unitIconsReady && mode === 'icon' ? 'icon' : 'number';
       const textColor = unit.tribun
         ? unit.color === 0
           ? '#AE0000'
@@ -2501,7 +2557,7 @@ export default function Game() {
       if (unit.s > 0) {
         return (
           <SplitUnitGlyph
-            mode={mode}
+            mode={effectiveMode}
             primary={{ height: unit.s, tribun: false }}
             secondary={{ height: unit.p, tribun: unit.tribun }}
             sizePx={sizePx}
@@ -2515,7 +2571,7 @@ export default function Game() {
       }
       return (
         <UnitGlyph
-          mode={mode}
+          mode={effectiveMode}
           unit={{ height: unit.p, tribun: unit.tribun }}
           sizePx={sizePx}
           numberColor={{ fill: textColor, stroke: strokeColor }}
@@ -2592,7 +2648,17 @@ export default function Game() {
               playSfxRef.current('tileClick');
               handleTileClick(cid, 1);
             } else if (uiState.type !== 'idle') {
-              commitUiState({ type: 'idle' }, { withResetSfx: true });
+              const canCancelAndReselect =
+                singleClickCancelReselectEnabled && isActive && baseTileStates[cid] === 'selectable';
+              if (canCancelAndReselect) {
+                const nextFromIdle = getIdleSelectionState(cid);
+                if (nextFromIdle) {
+                  playSfxRef.current('tileClick');
+                  commitUiState(nextFromIdle, { idleReason: 'none' });
+                  return;
+                }
+              }
+              commitUiState({ type: 'idle' }, { idleReason: 'cancel' });
             }
           }}
           onContextMenu={(e) => {
@@ -2601,7 +2667,17 @@ export default function Game() {
               playSfxRef.current('tileClick');
               handleTileClick(cid, -1);
             } else if (uiState.type !== 'idle') {
-              commitUiState({ type: 'idle' }, { withResetSfx: true });
+              const canCancelAndReselect =
+                singleClickCancelReselectEnabled && isActive && baseTileStates[cid] === 'selectable';
+              if (canCancelAndReselect) {
+                const nextFromIdle = getIdleSelectionState(cid);
+                if (nextFromIdle) {
+                  playSfxRef.current('tileClick');
+                  commitUiState(nextFromIdle, { idleReason: 'none' });
+                  return;
+                }
+              }
+              commitUiState({ type: 'idle' }, { idleReason: 'cancel' });
             }
           }}
         >
@@ -2760,7 +2836,7 @@ export default function Game() {
       if (event.key === 'Escape') {
         if (uiStateRef.current.type !== 'idle') {
           event.preventDefault();
-          commitUiState({ type: 'idle' }, { withResetSfx: true });
+          commitUiState({ type: 'idle' }, { idleReason: 'cancel' });
         }
         return;
       }
@@ -2792,6 +2868,25 @@ export default function Game() {
   const isOfferer = hasDrawOffer && playerColor !== null && drawOfferBy === playerColor;
   const isReceiver = hasDrawOffer && playerColor !== null && drawOfferBy !== playerColor;
   const isBlocked = playerColor !== null && drawOfferBlocked === playerColor;
+
+  useEffect(() => {
+    if (isOfferer) {
+      setOwnDrawOfferSinceMs((prev) => prev ?? Date.now());
+    } else {
+      setOwnDrawOfferSinceMs(null);
+    }
+  }, [isOfferer]);
+
+  useEffect(() => {
+    if (!isOfferer) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 200);
+    return () => window.clearInterval(id);
+  }, [isOfferer]);
+
+  const withdrawCooldownRemainingMs =
+    isOfferer && typeof ownDrawOfferSinceMs === 'number'
+      ? Math.max(0, 5000 - (nowMs - ownDrawOfferSinceMs))
+      : 0;
   const drawButtonLabel = hasDrawOffer
     ? isOfferer
       ? 'Withdraw Offer'
@@ -2813,6 +2908,7 @@ export default function Game() {
         ? null
         : engine.encodeDraw(0, playerColor) // offer
       : null;
+  const drawActionKind = getDrawActionKind(drawAction);
 
   const surrenderAction =
     gameState && playerColor !== null
@@ -2838,6 +2934,12 @@ export default function Game() {
     if (connectionState !== 'connected') return false;
     return cache.legalSet.has(action >>> 0);
   };
+  const canSendDrawAction =
+    drawActionKind === 0
+      ? canSendAction(drawAction)
+      : drawActionKind === 1
+        ? canSendAction(drawAction) && withdrawCooldownRemainingMs <= 0
+        : canSendAction(drawAction);
 
   const renderClockBox = (color: 'black' | 'white') => {
     const isActive =
@@ -3051,12 +3153,6 @@ export default function Game() {
             />
             {connectionState}
           </div>
-          <BoardSfxControls
-            muted={sfxMuted}
-            volume={sfxVolume}
-            onToggleMuted={toggleSfxMuted}
-            onVolumeChange={setSfxVolume}
-          />
           <button
             onClick={() => navigate('/hub')}
             style={{
@@ -3669,17 +3765,17 @@ export default function Game() {
                 </button>
                 <button
                   onClick={() => drawAction && sendAction(drawAction)}
-                  disabled={!canSendAction(drawAction)}
+                  disabled={!canSendDrawAction}
                   style={{
                     padding: '10px',
                     borderRadius: '10px',
                     border: '2px solid #5a4a2f',
-                    background: canSendAction(drawAction) ? '#c9a565' : '#d8c8ab',
+                    background: canSendDrawAction ? '#c9a565' : '#d8c8ab',
                     color: '#2a2218',
                     fontWeight: 700,
                     textTransform: 'uppercase',
                     letterSpacing: '1px',
-                    cursor: canSendAction(drawAction) ? 'pointer' : 'not-allowed',
+                    cursor: canSendDrawAction ? 'pointer' : 'not-allowed',
                   }}
                 >
                   {drawButtonLabel}
@@ -3721,17 +3817,17 @@ export default function Game() {
             </button>
             <button
               onClick={() => drawAction && sendAction(drawAction)}
-              disabled={!canSendAction(drawAction)}
+              disabled={!canSendDrawAction}
               style={{
                 padding: '12px',
                 borderRadius: '12px',
                 border: '2px solid #5a4a2f',
-                background: canSendAction(drawAction) ? '#c9a565' : '#d8c8ab',
+                background: canSendDrawAction ? '#c9a565' : '#d8c8ab',
                 color: '#2a2218',
                 fontWeight: 700,
                 textTransform: 'uppercase',
                 letterSpacing: '1px',
-                cursor: canSendAction(drawAction) ? 'pointer' : 'not-allowed',
+                cursor: canSendDrawAction ? 'pointer' : 'not-allowed',
               }}
             >
               {drawButtonLabel}

@@ -102,6 +102,14 @@ export class GameRoom implements DurableObject {
 	private legalSet: Set<number> = new Set();
 	private actionLog: number[] = [];
 	private supportsDrawOfferBlocked: boolean | null = null;
+
+	/**
+	 * Guardrails for draw offer UX:
+	 * - After offering, withdrawing is allowed, but only after a 5s cooldown.
+	 *
+	 * These are enforced server-side to prevent client spam / bypass.
+	 */
+	private drawOfferLastOfferAtMsByColor: [number | null, number | null] = [null, null];
 	
 	// Clock and buffer state (server-authoritative)
 	private clockBlackMs: number = 0;
@@ -661,6 +669,7 @@ export class GameRoom implements DurableObject {
 			drawOfferBy: null,
 			drawOfferBlocked: null,
 		};
+		this.drawOfferLastOfferAtMsByColor = [null, null];
 		this.roomStatus = "active";
 		this.rematchOffers = { black: false, white: false };
 		this.clockBlackMs = this.timeControl.initialMs.black;
@@ -877,6 +886,27 @@ export class GameRoom implements DurableObject {
 			if (opcode === 11 && fields.loserColor !== expectedColor) {
 				this.sendError(ws, "Resign action color mismatch");
 				return;
+			}
+		}
+
+		// Additional DRAW throttling/turn rules (server-authoritative)
+		if (opcode === 10) {
+			const expectedColor = role === "black" ? 0 : 1;
+			const drawAction = fields.drawAction as 0 | 1 | 2 | 3;
+			const nowMs = Date.now();
+
+			if (drawAction === 0) {
+				this.drawOfferLastOfferAtMsByColor[expectedColor] = nowMs;
+			} else if (drawAction === 1) {
+				const lastOfferMs = this.drawOfferLastOfferAtMsByColor[expectedColor];
+				if (typeof lastOfferMs === "number") {
+					const remainingMs = 5000 - (nowMs - lastOfferMs);
+					if (remainingMs > 0) {
+						const remainingSeconds = Math.ceil(remainingMs / 1000);
+						this.sendError(ws, `Please wait ${remainingSeconds}s before withdrawing your draw offer`);
+						return;
+					}
+				}
 			}
 		}
 		
@@ -1189,16 +1219,60 @@ export class GameRoom implements DurableObject {
 		const endAction = engine.encodeEnd(1, loserColor);
 		const endedState = engine.applyAction(this.gameState, endAction);
 		
-		await this.env.DB.prepare(
-			`INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
+		// This can be triggered by an alarm. After a server restart, alarms (or concurrent workers)
+		// can re-run and attempt to write the same terminal ply twice. Make it idempotent.
+		const insertEndResult = await this.env.DB.prepare(
+			`INSERT OR IGNORE INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
 			 VALUES (?, ?, ?, ?, ?)`
-		).bind(
-			gameId,
-			endedState.ply - 1,
-			endAction,
-			null,
-			new Date().toISOString()
-		).run();
+		).bind(gameId, endedState.ply - 1, endAction, null, new Date().toISOString()).run();
+		if (insertEndResult.meta.changes === 0) {
+			// Someone already ended the game at this ply.
+			// Still ensure the `games` row is marked as ended so the lobby doesn't treat it as active.
+			const nowIso = new Date().toISOString();
+			const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+			if (supportsBlocked) {
+				await this.env.DB.prepare(
+					`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
+					   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
+				).bind(
+					endedState.ply,
+					endedState.turn,
+					endedState.drawOfferBy,
+					endedState.drawOfferBlocked,
+					this.clockBlackMs,
+					this.clockWhiteMs,
+					"ended",
+					endedState.winner ?? null,
+					11,
+					1,
+					nowIso,
+					gameId
+				).run();
+			} else {
+				await this.env.DB.prepare(
+					`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+					   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
+				).bind(
+					endedState.ply,
+					endedState.turn,
+					endedState.drawOfferBy,
+					this.clockBlackMs,
+					this.clockWhiteMs,
+					"ended",
+					endedState.winner ?? null,
+					11,
+					1,
+					nowIso,
+					gameId
+				).run();
+			}
+
+			this.gameState = endedState;
+			this.roomStatus = "ended";
+			this.turnStartTime = null;
+			await this.scheduleNextAlarm();
+			return;
+		}
 		
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
 		if (supportsBlocked) {
@@ -1255,16 +1329,57 @@ export class GameRoom implements DurableObject {
 		const endAction = engine.encodeEnd(2, loserColor);
 		const endedState = engine.applyAction(this.gameState, endAction);
 		
-		await this.env.DB.prepare(
-			`INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
+		// Idempotent end write: alarm can re-run after restarts.
+		const insertEndResult = await this.env.DB.prepare(
+			`INSERT OR IGNORE INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
 			 VALUES (?, ?, ?, ?, ?)`
-		).bind(
-			gameId,
-			endedState.ply - 1,
-			endAction,
-			null,
-			new Date().toISOString()
-		).run();
+		).bind(gameId, endedState.ply - 1, endAction, null, new Date().toISOString()).run();
+		if (insertEndResult.meta.changes === 0) {
+			const nowIso = new Date().toISOString();
+			const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+			if (supportsBlocked) {
+				await this.env.DB.prepare(
+					`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
+					   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
+				).bind(
+					endedState.ply,
+					endedState.turn,
+					endedState.drawOfferBy,
+					endedState.drawOfferBlocked,
+					this.clockBlackMs,
+					this.clockWhiteMs,
+					"ended",
+					endedState.winner ?? null,
+					11,
+					2,
+					nowIso,
+					gameId
+				).run();
+			} else {
+				await this.env.DB.prepare(
+					`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+					   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
+				).bind(
+					endedState.ply,
+					endedState.turn,
+					endedState.drawOfferBy,
+					this.clockBlackMs,
+					this.clockWhiteMs,
+					"ended",
+					endedState.winner ?? null,
+					11,
+					2,
+					nowIso,
+					gameId
+				).run();
+			}
+
+			this.gameState = endedState;
+			this.roomStatus = "ended";
+			this.turnStartTime = null;
+			await this.scheduleNextAlarm();
+			return;
+		}
 		
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
 		if (supportsBlocked) {
@@ -1380,16 +1495,57 @@ export class GameRoom implements DurableObject {
 		const endAction = engine.encodeEnd(3);
 		const endedState = engine.applyAction(this.gameState, endAction);
 		
-		await this.env.DB.prepare(
-			`INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
+		// Idempotent end write: alarm can re-run after restarts.
+		const insertEndResult = await this.env.DB.prepare(
+			`INSERT OR IGNORE INTO game_actions (game_id, ply, action_u32, actor_color, created_at)
 			 VALUES (?, ?, ?, ?, ?)`
-		).bind(
-			gameId,
-			endedState.ply - 1,
-			endAction,
-			null,
-			new Date().toISOString()
-		).run();
+		).bind(gameId, endedState.ply - 1, endAction, null, new Date().toISOString()).run();
+		if (insertEndResult.meta.changes === 0) {
+			const nowIso = new Date().toISOString();
+			const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+			if (supportsBlocked) {
+				await this.env.DB.prepare(
+					`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, draw_offer_blocked = ?, clock_black_ms = ?, clock_white_ms = ?,
+					   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
+				).bind(
+					endedState.ply,
+					endedState.turn,
+					endedState.drawOfferBy,
+					endedState.drawOfferBlocked,
+					this.clockBlackMs,
+					this.clockWhiteMs,
+					"ended",
+					endedState.winner ?? null,
+					11,
+					3,
+					nowIso,
+					gameId
+				).run();
+			} else {
+				await this.env.DB.prepare(
+					`UPDATE games SET ply = ?, turn = ?, draw_offer_by = ?, clock_black_ms = ?, clock_white_ms = ?,
+					   status = ?, winner_color = ?, end_opcode = ?, end_reason = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`
+				).bind(
+					endedState.ply,
+					endedState.turn,
+					endedState.drawOfferBy,
+					this.clockBlackMs,
+					this.clockWhiteMs,
+					"ended",
+					endedState.winner ?? null,
+					11,
+					3,
+					nowIso,
+					gameId
+				).run();
+			}
+
+			this.gameState = endedState;
+			this.roomStatus = "ended";
+			this.turnStartTime = null;
+			await this.scheduleNextAlarm();
+			return;
+		}
 		
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
 		if (supportsBlocked) {

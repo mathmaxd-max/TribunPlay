@@ -4,14 +4,41 @@ const MAX_ATTEMPTS = 8;
 const WINDOW_MS = 10 * 60 * 1000;
 const BLOCK_MS = 15 * 60 * 1000;
 
+const ensureAuthRateLimitsTable = async (db: D1Database): Promise<void> => {
+  // Local dev can run without migrations applied. If this table is missing, auth endpoints would
+  // incorrectly return 429 on every attempt (because the SELECT throws and gets treated as "rate limited").
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS auth_rate_limits (
+        bucket TEXT PRIMARY KEY,
+        attempts INTEGER NOT NULL,
+        blocked_until TEXT,
+        last_attempt_at TEXT NOT NULL
+      )`
+    )
+    .run();
+};
+
 export const consumeAuthAttempt = async (db: D1Database, bucket: string): Promise<void> => {
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
 
-  const existing = await db
-    .prepare("SELECT attempts, blocked_until, last_attempt_at FROM auth_rate_limits WHERE bucket = ?")
-    .bind(bucket)
-    .first<{ attempts: number; blocked_until: string | null; last_attempt_at: string }>();
+  let existing:
+    | { attempts: number; blocked_until: string | null; last_attempt_at: string }
+    | null
+    | undefined;
+  try {
+    existing = await db
+      .prepare("SELECT attempts, blocked_until, last_attempt_at FROM auth_rate_limits WHERE bucket = ?")
+      .bind(bucket)
+      .first<{ attempts: number; blocked_until: string | null; last_attempt_at: string }>();
+  } catch {
+    await ensureAuthRateLimitsTable(db);
+    existing = await db
+      .prepare("SELECT attempts, blocked_until, last_attempt_at FROM auth_rate_limits WHERE bucket = ?")
+      .bind(bucket)
+      .first<{ attempts: number; blocked_until: string | null; last_attempt_at: string }>();
+  }
 
   if (!existing) {
     await db
@@ -43,5 +70,11 @@ export const consumeAuthAttempt = async (db: D1Database, bucket: string): Promis
 };
 
 export const resetAuthAttempt = async (db: D1Database, bucket: string): Promise<void> => {
-  await db.prepare("DELETE FROM auth_rate_limits WHERE bucket = ?").bind(bucket).run();
+  try {
+    await db.prepare("DELETE FROM auth_rate_limits WHERE bucket = ?").bind(bucket).run();
+  } catch {
+    // Keep reset best-effort in dev environments without migrations.
+    await ensureAuthRateLimitsTable(db);
+    await db.prepare("DELETE FROM auth_rate_limits WHERE bucket = ?").bind(bucket).run();
+  }
 };

@@ -66,9 +66,19 @@ export class AuthLogin extends OpenAPIRoute {
       return c.json({ error: normalized.message }, normalized.status as 400 | 500);
     }
 
-    const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
-    const bucket = `login:${email}:${clientIp}`;
-    const ipBucket = `login_ip:${clientIp}`;
+    const forwardedFor = c.req.header("X-Forwarded-For") ?? c.req.header("x-forwarded-for");
+    const realIp = c.req.header("X-Real-IP") ?? c.req.header("x-real-ip");
+    const clientIp =
+      c.req.header("CF-Connecting-IP") ??
+      forwardedFor?.split(",")[0]?.trim() ??
+      realIp ??
+      "unknown";
+    const clientKey =
+      clientIp !== "unknown"
+        ? clientIp
+        : `ua:${(c.req.header("User-Agent") ?? "unknown").slice(0, 120)}`;
+    const bucket = `login:${email}:${clientKey}`;
+    const ipBucket = `login_ip:${clientKey}`;
 
     {
       const captcha = await verifyTurnstile({
