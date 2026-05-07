@@ -23,6 +23,8 @@ import {
   type AuthSuccessResponse,
 } from '../auth/identityStore';
 import { API_BASE, WS_BASE } from '../config';
+import { BoardSfxControls } from '../audio/BoardSfxControls';
+import { type BoardSfxEvent, useBoardSfx } from '../audio/boardSfx';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -96,6 +98,49 @@ type ActiveOpponentAnimation = {
   timeline: OpponentMoveTimeline;
   startedAtMs: number;
   nowMs: number;
+};
+
+const isUiStateEqual = (a: UIState, b: UIState): boolean => {
+  if (a.type !== b.type) return false;
+  switch (a.type) {
+    case 'idle':
+      return true;
+    case 'enemy':
+      return b.type === 'enemy' && a.targetCid === b.targetCid && a.optionIndex === b.optionIndex;
+    case 'own_primary':
+      return (
+        b.type === 'own_primary' &&
+        a.originCid === b.originCid &&
+        a.targetCid === b.targetCid &&
+        a.optionIndex === b.optionIndex
+      );
+    case 'own_secondary':
+      return (
+        b.type === 'own_secondary' &&
+        a.originCid === b.originCid &&
+        a.allocations.length === b.allocations.length &&
+        a.allocations.every((value, index) => value === b.allocations[index])
+      );
+    case 'empty':
+      if (b.type !== 'empty') return false;
+      if (a.centerCid !== b.centerCid || a.optionIndex !== b.optionIndex) return false;
+      if (a.donors.size !== b.donors.size) return false;
+      for (const [cid, value] of a.donors.entries()) {
+        if (b.donors.get(cid) !== value) return false;
+      }
+      if (!a.symmetry && !b.symmetry) return true;
+      if (!a.symmetry || !b.symmetry) return false;
+      if (a.symmetry.mode !== b.symmetry.mode || a.symmetry.donate !== b.symmetry.donate) return false;
+      if (a.symmetry.donorCids.length !== b.symmetry.donorCids.length) return false;
+      for (let i = 0; i < a.symmetry.donorCids.length; i++) {
+        if (a.symmetry.donorCids[i] !== b.symmetry.donorCids[i]) return false;
+      }
+      if (a.symmetry.savedDonors.size !== b.symmetry.savedDonors.size) return false;
+      for (const [cid, value] of a.symmetry.savedDonors.entries()) {
+        if (b.symmetry.savedDonors.get(cid) !== value) return false;
+      }
+      return true;
+  }
 };
 
 interface GameSnapshot {
@@ -340,6 +385,10 @@ export default function Game() {
     typeof window !== 'undefined' ? window.innerWidth >= 980 : false,
   );
   const [isReady, setIsReady] = useState(false);
+  const { muted: sfxMuted, volume: sfxVolume, playSfx, setVolume: setSfxVolume, toggleMuted: toggleSfxMuted, getAudioTime } =
+    useBoardSfx();
+  const playSfxRef = useRef(playSfx);
+  const getAudioTimeRef = useRef(getAudioTime);
   
   // Clock state
   const [clocksMs, setClocksMs] = useState<ColorClock>({ black: 300000, white: 300000 });
@@ -362,6 +411,7 @@ export default function Game() {
   
   // UI State Machine
   const [uiState, setUiState] = useState<UIState>({ type: 'idle' });
+  const uiStateRef = useRef<UIState>({ type: 'idle' });
   const [validator, setValidator] = useState<LegalBloomValidator | null>(null);
   const [lastOpponentChangedTiles, setLastOpponentChangedTiles] = useState<number[]>([]);
   const [activeOpponentAnimation, setActiveOpponentAnimation] = useState<ActiveOpponentAnimation | null>(null);
@@ -387,6 +437,18 @@ export default function Game() {
     console.info('[WS-GAME]', JSON.stringify(record));
   };
 
+  useEffect(() => {
+    playSfxRef.current = playSfx;
+  }, [playSfx]);
+
+  useEffect(() => {
+    getAudioTimeRef.current = getAudioTime;
+  }, [getAudioTime]);
+
+  useEffect(() => {
+    uiStateRef.current = uiState;
+  }, [uiState]);
+
   const describeAction = (action: number) => {
     const unsigned = action >>> 0;
     let opcode: number | null = null;
@@ -401,6 +463,22 @@ export default function Game() {
       hex: toHex32(unsigned),
       opcode,
     };
+  };
+
+  const commitUiState = (nextState: UIState, options?: { withResetSfx?: boolean }) => {
+    const previousState = uiStateRef.current;
+    if (isUiStateEqual(previousState, nextState)) return;
+    uiStateRef.current = nextState;
+    setUiState(nextState);
+    if (options?.withResetSfx && previousState.type !== 'idle' && nextState.type === 'idle') {
+      playSfxRef.current('resetToIdle');
+    }
+  };
+
+  const transitionUiState = (updater: (previousState: UIState) => UIState, options?: { withResetSfx?: boolean }) => {
+    const previousState = uiStateRef.current;
+    const nextState = updater(previousState);
+    commitUiState(nextState, options);
   };
 
   const getServerNowMs = () => {
@@ -477,25 +555,21 @@ export default function Game() {
 
   useEffect(() => {
     if (!gameState || !cache) {
-      if (uiState.type !== 'idle') {
-        setUiState({ type: 'idle' });
-      }
+      commitUiState({ type: 'idle' }, { withResetSfx: false });
       return;
     }
     if (gameState.status === 'ended') {
-      if (uiState.type !== 'idle') {
-        setUiState({ type: 'idle' });
-      }
+      commitUiState({ type: 'idle' }, { withResetSfx: false });
       return;
     }
 
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
-    if (!isActive && uiState.type !== 'idle') {
-      setUiState({ type: 'idle' });
+    if (!isActive && uiStateRef.current.type !== 'idle') {
+      commitUiState({ type: 'idle' }, { withResetSfx: false });
       return;
     }
 
-    setUiState((prevState) => {
+    transitionUiState((prevState) => {
       switch (prevState.type) {
         case 'idle':
           return prevState;
@@ -565,8 +639,8 @@ export default function Game() {
           return prevState;
         }
       }
-    });
-  }, [gameState, cache, role, uiState.type]);
+    }, { withResetSfx: false });
+  }, [gameState, cache, role]);
   
   const baseTileStates = useMemo(() => {
     const baseStates: Array<'default' | 'selectable'> = new Array(121).fill('default');
@@ -1102,7 +1176,7 @@ export default function Game() {
 
               gameStateRef.current = state;
               setGameState(state);
-              setUiState({ type: 'idle' });
+              commitUiState({ type: 'idle' }, { withResetSfx: false });
               setLastOpponentChangedTiles([]);
               setActiveOpponentAnimation(null);
               lastTurnRef.current = snapshot.turn;
@@ -1192,7 +1266,7 @@ export default function Game() {
                 localPly: gameStateRef.current?.ply ?? null,
               });
               setError(message.message);
-              setUiState({ type: 'idle' });
+              commitUiState({ type: 'idle' }, { withResetSfx: false });
               requestSync();
             } else {
               logGame('json.recv.unhandled', { type: message.t ?? null });
@@ -1218,12 +1292,29 @@ export default function Game() {
             try {
               const previousState = gameStateRef.current;
               if (previousState) {
+                const decodedAction = engine.decodeAction(actionWord >>> 0);
                 const newState = engine.applyAction(previousState, actionWord);
                 const boardDelta = engine.deriveBoardDelta(previousState.board, newState.board);
                 const currentRole = roleRef.current;
                 const myColor: engine.Color | null = currentRole === 'black' ? 0 : currentRole === 'white' ? 1 : null;
                 const actionActorColor = previousState.turn;
                 const isOpponentCommittedMove = myColor === null || actionActorColor !== myColor;
+                const actionIsAnimatedMove = decodedAction.opcode >= 0 && decodedAction.opcode <= 8;
+                const isDrawAction = decodedAction.opcode === 10;
+                const drawActionKind = isDrawAction ? decodedAction.fields.drawAction : null;
+                const isVisibleDrawAction =
+                  drawActionKind === 0 || drawActionKind === 1 || drawActionKind === 2 || drawActionKind === 3;
+                const didEndGame = previousState.status !== 'ended' && newState.status === 'ended';
+                const immediateSfx: BoardSfxEvent[] = [];
+                const scheduledSfx: Array<{ event: BoardSfxEvent; when: number }> = [];
+                const audioNow = getAudioTimeRef.current();
+                const registerReceiveSfx = (event: BoardSfxEvent, delayMs: number) => {
+                  if (delayMs > 0 && audioNow !== null) {
+                    scheduledSfx.push({ event, when: audioNow + delayMs / 1000 });
+                  } else {
+                    immediateSfx.push(event);
+                  }
+                };
 
                 if (isOpponentCommittedMove) {
                   setLastOpponentChangedTiles(boardDelta.changedCids);
@@ -1250,12 +1341,40 @@ export default function Game() {
                       startedAtMs: nowMs,
                       nowMs,
                     });
+                    // M03 timing policy: for receive-side events tied to animated opponent plies,
+                    // play SFX when the receive animation completes.
+                    if (actionIsAnimatedMove) {
+                      registerReceiveSfx('moveReceived', timeline.totalDurationMs);
+                    }
+                    if (didEndGame) {
+                      registerReceiveSfx('gameEnded', timeline.totalDurationMs);
+                    }
                   } else {
                     setActiveOpponentAnimation(null);
+                    if (actionIsAnimatedMove) {
+                      registerReceiveSfx('moveReceived', 0);
+                    }
+                    if (didEndGame) {
+                      registerReceiveSfx('gameEnded', 0);
+                    }
                   }
                 } else {
                   setLastOpponentChangedTiles([]);
                   setActiveOpponentAnimation(null);
+                  if (didEndGame) {
+                    registerReceiveSfx('gameEnded', 0);
+                  }
+                }
+
+                if (isDrawAction && isVisibleDrawAction) {
+                  registerReceiveSfx('drawReceived', 0);
+                }
+
+                for (const event of immediateSfx) {
+                  playSfxRef.current(event);
+                }
+                for (const scheduled of scheduledSfx) {
+                  playSfxRef.current(scheduled.event, { when: scheduled.when });
                 }
 
                 gameStateRef.current = newState;
@@ -1268,14 +1387,14 @@ export default function Game() {
               } else {
                 logGame('action.apply.skip.no_state', actionInfo);
               }
-              setUiState({ type: 'idle' });
+              commitUiState({ type: 'idle' }, { withResetSfx: true });
             } catch (err) {
               logGame('action.apply.fail', {
                 ...actionInfo,
                 error: err instanceof Error ? err.message : String(err),
               });
               setError(err instanceof Error ? err.message : 'Failed to apply action');
-              setUiState({ type: 'idle' });
+              commitUiState({ type: 'idle' }, { withResetSfx: false });
               requestSync();
             }
           }
@@ -1571,7 +1690,7 @@ export default function Game() {
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive) return;
 
-    setUiState((prevState) => {
+    transitionUiState((prevState) => {
       switch (prevState.type) {
         case 'idle': {
           // Check cache to determine which state to enter
@@ -1782,7 +1901,7 @@ export default function Game() {
           return { ...prevState, allocations: newAllocations };
         }
       }
-    });
+    }, { withResetSfx: true });
   };
 
   const getEmptyStateAction = (): number | null => {
@@ -2469,22 +2588,20 @@ export default function Game() {
             e.currentTarget.style.zIndex = '1';
           }}
           onClick={() => {
-            if (isClickable || (isActive && uiState.type === 'idle')) {
-              // Left click: d = +1
+            if (isClickable) {
+              playSfxRef.current('tileClick');
               handleTileClick(cid, 1);
             } else if (uiState.type !== 'idle') {
-              // Click unselectable tile when not in idle - reset to idle
-              setUiState({ type: 'idle' });
+              commitUiState({ type: 'idle' }, { withResetSfx: true });
             }
           }}
           onContextMenu={(e) => {
             e.preventDefault();
-            if (isClickable || (isActive && uiState.type === 'idle')) {
-              // Right click: d = -1
+            if (isClickable) {
+              playSfxRef.current('tileClick');
               handleTileClick(cid, -1);
             } else if (uiState.type !== 'idle') {
-              // Right click unselectable tile when not in idle - reset to idle
-              setUiState({ type: 'idle' });
+              commitUiState({ type: 'idle' }, { withResetSfx: true });
             }
           }}
         >
@@ -2640,6 +2757,14 @@ export default function Game() {
     if (typeof window === 'undefined') return;
     
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (uiStateRef.current.type !== 'idle') {
+          event.preventDefault();
+          commitUiState({ type: 'idle' }, { withResetSfx: true });
+        }
+        return;
+      }
+
       // Only handle spacebar
       if (event.key !== ' ') return;
       
@@ -2926,6 +3051,12 @@ export default function Game() {
             />
             {connectionState}
           </div>
+          <BoardSfxControls
+            muted={sfxMuted}
+            volume={sfxVolume}
+            onToggleMuted={toggleSfxMuted}
+            onVolumeChange={setSfxVolume}
+          />
           <button
             onClick={() => navigate('/hub')}
             style={{

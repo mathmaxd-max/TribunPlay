@@ -360,7 +360,6 @@ export default function SetupExplorer() {
     lastCid: null,
   });
   const userFlippedRef = useRef(false);
-  const pendingBoardInteractSoundRef = useRef(false);
 
   const [ownCells, setOwnCells] = useState<TileCell[]>(makeEmptyCells);
   const [ownHashInput, setOwnHashInput] = useState("");
@@ -370,12 +369,6 @@ export default function SetupExplorer() {
   const [enemyCells, setEnemyCells] = useState<TileCell[]>(makeEmptyCells);
   const [enemyHashInput, setEnemyHashInput] = useState("");
   const [enemyHashStatus, setEnemyHashStatus] = useState<HashStatus>("idle");
-
-  useEffect(() => {
-    if (!pendingBoardInteractSoundRef.current) return;
-    pendingBoardInteractSoundRef.current = false;
-    playSfx("boardInteract");
-  }, [ownCells, playSfx]);
 
   // Mapping between setup-index space and board CIDs depends on which player perspective we are displaying.
   // Important: we keep the underlying `ownCells[]` indexing/hash encoding stable; only which CID each index
@@ -727,27 +720,37 @@ export default function SetupExplorer() {
   const applyLeftClick = (cid: number) => {
     const setupIndex = ownCidToIndex.get(cid);
     if (setupIndex === undefined) return;
+    const currentCell = ownCells[setupIndex];
+    const hasOccupiedCell = cellOccupied(currentCell);
+    const nextHeight = brush === "eraser" ? null : (Number(brush) as 1 | 2 | 3);
+    const canApplyBrush = brush === "eraser"
+      ? hasOccupiedCell
+      : nextHeight !== null && canPlaceOnIndex(setupIndex, nextHeight, tribunBrush, onlyEmpty, ownCells);
+    const clearsOtherTribun =
+      brush !== "eraser" && tribunBrush && ownCells.some((cell, index) => index !== setupIndex && cell.tribun);
+    const sameResultAsCurrent =
+      brush !== "eraser" &&
+      nextHeight !== null &&
+      currentCell.height === nextHeight &&
+      currentCell.tribun === tribunBrush &&
+      !clearsOtherTribun;
+
+    if (!canApplyBrush || sameResultAsCurrent) return;
+    playSfx("tileClick");
+
     setOwnCells((prev) => {
       const next = prev.map((cell) => ({ ...cell }));
       if (brush === "eraser") {
-        if (!cellOccupied(prev[setupIndex])) return prev;
         next[setupIndex] = { ...EMPTY_CELL };
-        pendingBoardInteractSoundRef.current = true;
         return next;
       }
       const height = Number(brush) as 1 | 2 | 3;
-      if (!canPlaceOnIndex(setupIndex, height, tribunBrush, onlyEmpty, prev)) return prev;
-      const currentCell = prev[setupIndex];
-      const currentMatchesBrush = currentCell.height === height && currentCell.tribun === tribunBrush;
-      const clearingOtherTribun = tribunBrush && prev.some((cell, index) => index !== setupIndex && cell.tribun);
-      if (currentMatchesBrush && !clearingOtherTribun) return prev;
       if (tribunBrush) {
         for (let i = 0; i < next.length; i++) {
           if (next[i].tribun) next[i] = { ...EMPTY_CELL };
         }
       }
       next[setupIndex] = { height, tribun: tribunBrush };
-      pendingBoardInteractSoundRef.current = true;
       return next;
     });
   };
@@ -755,11 +758,11 @@ export default function SetupExplorer() {
   const applyRightErase = (cid: number) => {
     const setupIndex = ownCidToIndex.get(cid);
     if (setupIndex === undefined) return;
+    if (!cellOccupied(ownCells[setupIndex])) return;
+    playSfx("tileClick");
     setOwnCells((prev) => {
-      if (!cellOccupied(prev[setupIndex])) return prev;
       const next = prev.map((cell) => ({ ...cell }));
       next[setupIndex] = { ...EMPTY_CELL };
-      pendingBoardInteractSoundRef.current = true;
       return next;
     });
   };
@@ -821,7 +824,6 @@ export default function SetupExplorer() {
     if (status === "valid") {
       const decoded = decodeCodeDetailed(value);
       if (decoded.ok && decoded.setup) {
-        pendingBoardInteractSoundRef.current = false;
         setOwnCells(setupToCells(decoded.setup));
       }
     }
