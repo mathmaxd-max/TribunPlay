@@ -1159,6 +1159,7 @@ export default function SetupExplorer() {
 
   return (
     <div
+      className="SetupExplorer"
       style={{
         minHeight: "100vh",
         display: "flex",
@@ -1169,9 +1170,57 @@ export default function SetupExplorer() {
         fontFamily: '"Space Grotesk", "Trebuchet MS", sans-serif',
       }}
     >
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');`}</style>
+      <style>{`
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');
+
+/* Responsive helpers for Setup Explorer.
+   We keep the default (desktop) look inline, and only override where mobile would otherwise overflow. */
+@media (max-width: 640px) {
+  .SetupExplorer__header {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+
+  .SetupExplorer__main {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+  }
+
+  .SetupExplorer__librarySearchHeader {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+  }
+
+  .SetupExplorer__librarySearchQueryRow {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .SetupExplorer__librarySearchFiltersRow {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .SetupExplorer__libraryItemRow {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .SetupExplorer__hashDisplay {
+    font-size: 18px !important;
+    letter-spacing: 1px !important;
+    padding: 10px 12px !important;
+  }
+
+  .SetupExplorer__boardOverlay {
+    font-size: 18px !important;
+  }
+
+  .SetupExplorer__boardOuter {
+    padding: 8px !important;
+  }
+}
+`}</style>
 
       <header
+        className="SetupExplorer__header"
         style={{
           display: "flex",
           alignItems: "center",
@@ -1234,7 +1283,10 @@ export default function SetupExplorer() {
               gap: "10px",
             }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+            <div
+              className="SetupExplorer__librarySearchHeader"
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}
+            >
               <div style={{ fontSize: "18px", fontWeight: 700, color: "#2a2218" }}>
                 Setup library search ({librarySearchTarget === "own" ? "Own" : "Enemy"} hash)
               </div>
@@ -1275,7 +1327,10 @@ export default function SetupExplorer() {
                 </button>
               </div>
 
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "minmax(0, 1fr) auto", alignItems: "center" }}>
+              <div
+                className="SetupExplorer__librarySearchQueryRow"
+                style={{ display: "grid", gap: "8px", gridTemplateColumns: "minmax(0, 1fr) auto", alignItems: "center" }}
+              >
                 <input
                   type="text"
                   value={libraryQuery}
@@ -1311,7 +1366,10 @@ export default function SetupExplorer() {
                 </div>
               </div>
 
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "120px 120px minmax(0, 1fr)" }}>
+              <div
+                className="SetupExplorer__librarySearchFiltersRow"
+                style={{ display: "grid", gap: "8px", gridTemplateColumns: "120px 120px minmax(0, 1fr)" }}
+              >
                 <input
                   type="number"
                   min={0}
@@ -1377,7 +1435,10 @@ export default function SetupExplorer() {
                       gap: "8px",
                     }}
                   >
-                    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "10px", alignItems: "start" }}>
+                    <div
+                      className="SetupExplorer__libraryItemRow"
+                      style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "10px", alignItems: "start" }}
+                    >
                       <button
                         type="button"
                         onClick={() => applyLibraryHash(librarySearchTarget, item.hash)}
@@ -1573,7 +1634,10 @@ export default function SetupExplorer() {
         </div>
       )}
 
-      <main style={{ width: "100%", maxWidth: "1180px", margin: "0 auto", padding: "16px 12px 20px", display: "grid", gap: "12px" }}>
+      <main
+        className="SetupExplorer__main"
+        style={{ width: "100%", maxWidth: "1180px", margin: "0 auto", padding: "16px 12px 20px", display: "grid", gap: "12px" }}
+      >
         <section style={{ display: "grid", gap: "10px" }}>
           <div style={{ borderRadius: "14px", border: "2px solid #3c3226", background: "rgba(255, 250, 242, 0.84)", padding: "12px", display: "grid", gap: "10px" }}>
             <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", textTransform: "uppercase", color: "#7a6543" }}>Setup</div>
@@ -1766,6 +1830,7 @@ export default function SetupExplorer() {
           </div>
 
           <div
+            className="SetupExplorer__boardOuter"
             style={{
               flex: 1,
               minHeight: 0,
@@ -1813,6 +1878,7 @@ export default function SetupExplorer() {
             {showTribunSituationOverlay && (
               <div
                 aria-label="Tribun remainder"
+                className="SetupExplorer__boardOverlay"
                 style={{
                   position: "absolute",
                   left: "10px",
@@ -1847,6 +1913,7 @@ export default function SetupExplorer() {
 
             <div
               aria-label="Army size"
+              className="SetupExplorer__boardOverlay"
               style={{
                 position: "absolute",
                 right: "10px",
@@ -2079,6 +2146,7 @@ export default function SetupExplorer() {
             </div>
           </div>
           <div
+            className="SetupExplorer__hashDisplay"
             style={{
               fontFamily: '"JetBrains Mono", monospace',
               fontWeight: 800,
