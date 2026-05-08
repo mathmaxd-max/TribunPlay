@@ -361,6 +361,8 @@ function SetupUnitGlyph(props: {
 export default function SetupExplorer() {
   const { playSfx } = useBoardSfx();
   const [unitIconsReady, setUnitIconsReady] = useState(() => areAllUnitIconsReady());
+  const boardViewportRef = useRef<HTMLDivElement | null>(null);
+  const [boardViewportWidth, setBoardViewportWidth] = useState(0);
   const [brush, setBrush] = useState<Brush>("1");
   const [tribunBrush, setTribunBrush] = useState(false);
   const [onlyEmpty, setOnlyEmpty] = useState(true);
@@ -421,6 +423,22 @@ export default function SetupExplorer() {
     return () => {
       active = false;
     };
+  }, []);
+
+  useEffect(() => {
+    if (!boardViewportRef.current) return;
+    const element = boardViewportRef.current;
+    const updateSize = () => setBoardViewportWidth(element.clientWidth);
+    updateSize();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateSize);
+      return () => window.removeEventListener("resize", updateSize);
+    }
+
+    const observer = new ResizeObserver(() => updateSize());
+    observer.observe(element);
+    return () => observer.disconnect();
   }, []);
 
   const refreshLibrary = async () => {
@@ -827,6 +845,14 @@ export default function SetupExplorer() {
       outerHexHeight,
     };
   }, [rotate180]);
+
+  const boardScale = useMemo(() => {
+    const w = boardMetrics.width;
+    if (w <= 0) return 1;
+    const available = boardViewportWidth || w;
+    // Mirrors `Game.tsx`: never upscale, only scale down to fit the viewport.
+    return Math.min(1, available / w);
+  }, [boardMetrics.width, boardViewportWidth]);
 
   const applyLeftClick = (cid: number) => {
     const setupIndex = ownCidToIndex.get(cid);
@@ -1938,8 +1964,27 @@ export default function SetupExplorer() {
               {armySizeOverlayValue}
             </div>
 
-            <div style={{ width: "100%", display: "flex", justifyContent: "center", overflow: "auto" }}>
-              <div style={{ position: "relative", minWidth: `${boardMetrics.width}px`, height: `${boardMetrics.height}px` }}>
+            <div
+              ref={boardViewportRef}
+              style={{
+                position: "relative",
+                width: "100%",
+                height: `${Math.ceil(boardMetrics.height * boardScale)}px`,
+                minHeight: 0,
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  position: "absolute",
+                  left: "50%",
+                  top: "50%",
+                  width: `${boardMetrics.width}px`,
+                  height: `${boardMetrics.height}px`,
+                  transform: `translate(-50%, -50%) scale(${boardScale})`,
+                  transformOrigin: "center",
+                }}
+              >
                 {boardMetrics.tiles.map((tile) => {
                   const ownIdx = ownCidToIndex.get(tile.cid);
                   const enemyIdx = enemyCidToIndex.get(tile.cid);
