@@ -1,7 +1,7 @@
 import { OpenAPIRoute, Str } from "chanfana";
 import { z } from "zod";
 import type { AppContext } from "../types";
-import { issueAuthSession, toAuthSessionHttpError } from "../lib/authSession";
+import { toAuthSessionHttpError } from "../lib/authSession";
 import {
   hashPassword,
   toPasswordHttpError,
@@ -9,8 +9,10 @@ import {
   validateEmail,
   validatePassword,
 } from "../lib/password";
-import { verifyTurnstile } from "../lib/turnstile";
-import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
+import { resolveTurnstileServerConfig, verifyTurnstile } from "../lib/turnstile";
+import { consumeAuthAttempt, isAuthRateLimitError, resetAuthAttempt } from "../lib/authRateLimit";
+import { createEmailVerificationToken } from "../lib/emailVerification";
+import { sendResendEmail } from "../lib/emailSender";
 
 const signupBodySchema = z.object({
   email: Str(),
@@ -36,22 +38,12 @@ export class AuthSignup extends OpenAPIRoute {
     },
     responses: {
       "200": {
-        description: "Returns authenticated identity and session",
+        description: "Account created; email verification required before login",
         content: {
           "application/json": {
             schema: z.object({
-              identity: z.object({
-                mode: z.literal("token"),
-                accountId: Str(),
-                name: Str(),
-                email: Str(),
-              }),
-              session: z.object({
-                accessToken: Str(),
-                refreshToken: Str(),
-                expiresInSec: z.number(),
-                expiresAtMs: z.number(),
-              }),
+              success: z.boolean(),
+              requiresEmailVerification: z.boolean(),
             }),
           },
         },
@@ -87,15 +79,21 @@ export class AuthSignup extends OpenAPIRoute {
       clientIp !== "unknown"
         ? clientIp
         : `ua:${(c.req.header("User-Agent") ?? "unknown").slice(0, 120)}`;
+    const turnstileConfig = resolveTurnstileServerConfig({
+      enabledFlag: env.TURNSTILE_ENABLED,
+      configuredSecretKey: env.TURNSTILE_SECRET_KEY,
+      requestUrl: c.req.url,
+      hostHeader: c.req.header("Host") ?? undefined,
+    });
 
     {
       const captcha = await verifyTurnstile({
-        enabled: env.TURNSTILE_ENABLED === "true",
-        secretKey: env.TURNSTILE_SECRET_KEY,
+        enabled: turnstileConfig.enabled,
+        secretKey: turnstileConfig.secretKey,
         token: data.body.turnstileToken,
         remoteIp: clientIp,
       });
-      if (!captcha.success) {
+      if (captcha.success === false) {
         return c.json({ error: captcha.error }, 400);
       }
     }
@@ -104,21 +102,59 @@ export class AuthSignup extends OpenAPIRoute {
     // "unknown" would make every signup share the same global bucket and immediately hit 429.
     const bucket = `signup:${email}:${clientKey}`;
     const ipBucket = `signup_ip:${clientKey}`;
-    try {
-      await consumeAuthAttempt(env.DB, bucket);
-      // M01 additional non-invasive bot protection: a second per-IP bucket complements per-email+IP.
-      await consumeAuthAttempt(env.DB, ipBucket);
-    } catch {
-      return c.json({ error: "Too many signup attempts. Please try again later." }, 429);
+    if (!turnstileConfig.isLocalDevHost) {
+      try {
+        await consumeAuthAttempt(env.DB, bucket);
+        // M01 additional non-invasive bot protection: a second per-IP bucket complements per-email+IP.
+        await consumeAuthAttempt(env.DB, ipBucket);
+      } catch (error) {
+        if (isAuthRateLimitError(error)) {
+          c.header("Retry-After", String(error.retryAfterSec));
+          return c.json({ error: "Too many signup attempts. Please try again later." }, 429);
+        }
+        console.error("Signup rate-limit check failed", error);
+        return c.json({ error: "Unable to process signup right now. Please try again shortly." }, 503);
+      }
     }
 
     const existing = await env.DB
-      .prepare("SELECT id FROM accounts WHERE lower(email) = ? AND provider IN ('email', 'google')")
+      .prepare(
+        `SELECT id, provider, email_verified_at
+         FROM accounts
+         WHERE lower(email) = ? AND provider IN ('email', 'google') AND email IS NOT NULL`
+      )
       .bind(email)
-      .first<{ id: string }>();
+      .first<{ id: string; provider: "email" | "google"; email_verified_at: string | null }>();
+
+    // If an email/password account exists but isn't verified yet, behave like a signup:
+    // re-send verification and return the normal "requiresEmailVerification" response.
+    if (existing?.id && existing.provider === "email" && !existing.email_verified_at) {
+      try {
+        const { token } = await createEmailVerificationToken(env.DB, existing.id);
+        const baseUrl = env.APP_BASE_URL ?? "https://tribun-ppc.com";
+        const verifyUrl = new URL("/verify-email", baseUrl);
+        verifyUrl.searchParams.set("token", token);
+
+        await sendResendEmail({
+          apiKey: env.RESEND_API_KEY,
+          from: env.EMAIL_FROM,
+          to: email,
+          subject: "Verify your email for TribunPlay",
+          text: `Welcome back!\n\nVerify your email to finish signing up:\n\n${verifyUrl.toString()}\n\nIf you didn’t request this, you can ignore this email.`,
+          html: `<p>Welcome back!</p><p>Verify your email to finish signing up:</p><p><a href="${verifyUrl.toString()}">Verify email</a></p><p>If you didn’t request this, you can ignore this email.</p>`,
+        });
+
+        return { success: true, requiresEmailVerification: true };
+      } catch (error) {
+        const normalized = toAuthSessionHttpError(error);
+        return c.json({ error: normalized.message }, normalized.status as 400 | 401 | 403 | 500 | 503);
+      }
+    }
 
     if (existing?.id) {
-      return c.json({ error: "Unable to create account" }, 409);
+      // Provide a user-facing message; avoid vague "Unable to create account".
+      // Do not leak whether the account is Google vs email beyond this stable hint.
+      return c.json({ error: "An account with this email already exists. Please log in instead." }, 409);
     }
 
     try {
@@ -143,11 +179,23 @@ export class AuthSignup extends OpenAPIRoute {
 
       await resetAuthAttempt(env.DB, bucket);
       await resetAuthAttempt(env.DB, ipBucket);
-      return issueAuthSession({
-        db: env.DB,
-        tokenSecret: env.AUTH_TOKEN_SECRET,
-        account: { id: accountId, name, email },
+
+      // Email verification
+      const { token } = await createEmailVerificationToken(env.DB, accountId);
+      const baseUrl = env.APP_BASE_URL ?? "https://tribun-ppc.com";
+      const verifyUrl = new URL("/verify-email", baseUrl);
+      verifyUrl.searchParams.set("token", token);
+
+      await sendResendEmail({
+        apiKey: env.RESEND_API_KEY,
+        from: env.EMAIL_FROM,
+        to: email,
+        subject: "Verify your email for TribunPlay",
+        text: `Welcome to TribunPlay!\n\nVerify your email to finish signing up:\n\n${verifyUrl.toString()}\n\nIf you didn’t request this, you can ignore this email.`,
+        html: `<p>Welcome to TribunPlay!</p><p>Verify your email to finish signing up:</p><p><a href="${verifyUrl.toString()}">Verify email</a></p><p>If you didn’t request this, you can ignore this email.</p>`,
       });
+
+      return { success: true, requiresEmailVerification: true };
     } catch (error) {
       const normalized = toAuthSessionHttpError(error);
       return c.json({ error: normalized.message }, normalized.status as 400 | 401 | 403 | 500 | 503);

@@ -35,6 +35,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
   const [password, setPassword] = useState("");
   const [loadingMode, setLoadingMode] = useState<"google" | "login" | "signup" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
 
   const turnstileEnabled = useMemo(() => Boolean(TURNSTILE_SITE_KEY), []);
@@ -110,14 +111,11 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     setLoadingMode("google");
     setError(null);
     try {
-      const captchaToken = getCaptchaTokenOrThrow();
       const googleIdToken = await requestGoogleIdToken(googleClientId);
-      const body: Record<string, unknown> = { googleIdToken };
-      if (captchaToken) body.turnstileToken = captchaToken;
       const response = await fetch(`${API_BASE}/api/auth/google`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ googleIdToken }),
       });
 
       if (!response.ok) {
@@ -129,6 +127,34 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
       onAuthSuccess(payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google sign-in failed");
+    } finally {
+      resetCaptchaAfterSubmit();
+      setLoadingMode(null);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    const normalizedEmail = (pendingVerificationEmail ?? email).trim().toLowerCase();
+    if (!normalizedEmail) return;
+
+    setLoadingMode("signup");
+    setError(null);
+    try {
+      const captchaToken = getCaptchaTokenOrThrow();
+      const body: Record<string, unknown> = { email: normalizedEmail };
+      if (captchaToken) body.turnstileToken = captchaToken;
+
+      const response = await fetch(`${API_BASE}/api/auth/resend-verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to resend verification email. Please try again later.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to resend verification email.");
     } finally {
       resetCaptchaAfterSubmit();
       setLoadingMode(null);
@@ -171,8 +197,12 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         throw new Error(errData.error || statusHint || "Authentication failed");
       }
 
-      const payload = (await response.json()) as AuthSuccessResponse;
-      onAuthSuccess(payload);
+      const payload = (await response.json()) as AuthSuccessResponse | { requiresEmailVerification?: boolean };
+      if (mode === "signup" && payload && "requiresEmailVerification" in payload && payload.requiresEmailVerification) {
+        setPendingVerificationEmail(normalizedEmail);
+        return;
+      }
+      onAuthSuccess(payload as AuthSuccessResponse);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
@@ -199,12 +229,12 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         Account
       </div>
       <div style={{ fontSize: "30px", fontWeight: 700, color: "#2c2318" }}>
-        {mode === "login" ? "Log in" : "Sign up"}
+        {pendingVerificationEmail ? "Verify your email" : mode === "login" ? "Log in" : "Sign up"}
       </div>
 
       <button
         onClick={handleGoogle}
-        disabled={isLoading || !googleClientId || (turnstileEnabled && !turnstileToken)}
+        disabled={isLoading || !googleClientId}
         style={{
           width: "100%",
           padding: "11px 14px",
@@ -256,7 +286,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         </div>
       )}
 
-      {mode === "signup" && (
+      {!pendingVerificationEmail && mode === "signup" && (
         <div style={{ display: "grid", gap: "6px" }}>
           <label htmlFor="auth-name" style={labelStyle}>
             Name
@@ -280,41 +310,43 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         <input
           id="auth-email"
           type="email"
-          value={email}
+          value={pendingVerificationEmail ?? email}
           onChange={(event) => setEmail(event.target.value)}
           style={inputStyle}
-          disabled={isLoading}
+          disabled={isLoading || Boolean(pendingVerificationEmail)}
           autoComplete={mode === "login" ? "email" : "new-email"}
         />
       </div>
 
-      <div style={{ display: "grid", gap: "6px" }}>
-        <label htmlFor="auth-password" style={labelStyle}>
-          Password
-        </label>
-        <input
-          id="auth-password"
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          style={inputStyle}
-          disabled={isLoading}
-          autoComplete={mode === "login" ? "current-password" : "new-password"}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              handleEmailSubmit();
-            }
-          }}
-        />
-      </div>
+      {!pendingVerificationEmail && (
+        <div style={{ display: "grid", gap: "6px" }}>
+          <label htmlFor="auth-password" style={labelStyle}>
+            Password
+          </label>
+          <input
+            id="auth-password"
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            style={inputStyle}
+            disabled={isLoading}
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                handleEmailSubmit();
+              }
+            }}
+          />
+        </div>
+      )}
 
       <button
-        onClick={handleEmailSubmit}
+        onClick={pendingVerificationEmail ? handleResendVerification : handleEmailSubmit}
         disabled={
           isLoading ||
           !email.trim() ||
-          !password ||
-          (mode === "signup" && !name.trim()) ||
+          (!pendingVerificationEmail && !password) ||
+          (!pendingVerificationEmail && mode === "signup" && !name.trim()) ||
           (turnstileEnabled && !turnstileToken)
         }
         aria-busy={loadingMode === "login" || loadingMode === "signup"}
@@ -333,34 +365,66 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
             isLoading || !email.trim() || !password || (mode === "signup" && !name.trim()) ? "not-allowed" : "pointer",
         }}
       >
-        {mode === "login"
-          ? loadingMode === "login"
-            ? "Logging in..."
-            : "Log in"
-          : loadingMode === "signup"
-            ? "Creating account..."
-            : "Sign up"}
+        {pendingVerificationEmail
+          ? loadingMode === "signup"
+            ? "Resending..."
+            : "Resend verification email"
+          : mode === "login"
+            ? loadingMode === "login"
+              ? "Logging in..."
+              : "Log in"
+            : loadingMode === "signup"
+              ? "Creating account..."
+              : "Sign up"}
       </button>
 
-      <div style={{ textAlign: "center", fontSize: "14px", color: "#5a4630" }}>
-        {mode === "login" ? "Don't have an account? " : "Already have an account? "}
-        <button
-          type="button"
-          onClick={() => setMode((prev) => (prev === "login" ? "signup" : "login"))}
-          style={{
-            border: "none",
-            background: "transparent",
-            color: "#1f4d2f",
-            fontWeight: 700,
-            cursor: "pointer",
-            padding: 0,
-            textDecoration: "underline",
-          }}
-          disabled={isLoading}
-        >
-          {mode === "login" ? "Sign up" : "Log in"}
-        </button>
-      </div>
+      {pendingVerificationEmail ? (
+        <div style={{ textAlign: "center", fontSize: "14px", color: "#5a4630", lineHeight: 1.4 }}>
+          We sent a verification link to <strong>{pendingVerificationEmail}</strong>. Please check your inbox and verify your
+          email before logging in.
+          <div style={{ marginTop: "10px" }}>
+            <button
+              type="button"
+              onClick={() => {
+                setPendingVerificationEmail(null);
+                setMode("login");
+              }}
+              style={{
+                border: "none",
+                background: "transparent",
+                color: "#1f4d2f",
+                fontWeight: 700,
+                cursor: "pointer",
+                padding: 0,
+                textDecoration: "underline",
+              }}
+              disabled={isLoading}
+            >
+              Back to login
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ textAlign: "center", fontSize: "14px", color: "#5a4630" }}>
+          {mode === "login" ? "Don't have an account? " : "Already have an account? "}
+          <button
+            type="button"
+            onClick={() => setMode((prev) => (prev === "login" ? "signup" : "login"))}
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "#1f4d2f",
+              fontWeight: 700,
+              cursor: "pointer",
+              padding: 0,
+              textDecoration: "underline",
+            }}
+            disabled={isLoading}
+          >
+            {mode === "login" ? "Sign up" : "Log in"}
+          </button>
+        </div>
+      )}
 
       {error && (
         <div

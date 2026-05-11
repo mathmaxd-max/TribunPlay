@@ -6,3 +6,6 @@
 # TURNSTILE_SECRET_KEY=
 # GOOGLE_CLIENT_ID=
 AUTH_TOKEN_SECRET=
+
+# Optional (dev/staging only): enables POST /api/admin/purge-local-accounts
+# ADMIN_PURGE_KEY=

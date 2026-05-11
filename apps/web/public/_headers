@@ -1,0 +1,2 @@
+/*
+  Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://challenges.cloudflare.com https://www.google.com; frame-src https://challenges.cloudflare.com https://www.google.com; connect-src 'self' https: wss: https://challenges.cloudflare.com; font-src 'self' https: data:

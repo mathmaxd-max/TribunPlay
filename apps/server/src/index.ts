@@ -9,6 +9,8 @@ import { GameCancel } from "./endpoints/gameCancel";
 import { AuthLogin } from "./endpoints/authLogin";
 import { AuthSignup } from "./endpoints/authSignup";
 import { AuthGoogle } from "./endpoints/authGoogle";
+import { AuthVerifyEmail } from "./endpoints/authVerifyEmail";
+import { AuthResendVerification } from "./endpoints/authResendVerification";
 import { AuthRefresh } from "./endpoints/authRefresh";
 import { AuthLogout } from "./endpoints/authLogout";
 import { HistoryList } from "./endpoints/historyList";
@@ -17,6 +19,7 @@ import { SetupLibraryList } from "./endpoints/setupLibraryList";
 import { SetupLibraryCreate } from "./endpoints/setupLibraryCreate";
 import { SetupLibraryUpdate } from "./endpoints/setupLibraryUpdate";
 import { SetupLibraryDelete } from "./endpoints/setupLibraryDelete";
+import { AdminPurgeLocalAccounts } from "./endpoints/adminPurgeLocalAccounts";
 import { GameRoom } from "./durable-objects/GameRoom";
 
 // Start a Hono app
@@ -40,6 +43,8 @@ openapi.post("/api/game/cancel", GameCancel);
 openapi.post("/api/auth/login", AuthLogin);
 openapi.post("/api/auth/signup", AuthSignup);
 openapi.post("/api/auth/google", AuthGoogle);
+openapi.post("/api/auth/verify-email", AuthVerifyEmail);
+openapi.post("/api/auth/resend-verification", AuthResendVerification);
 openapi.post("/api/auth/refresh", AuthRefresh);
 openapi.post("/api/auth/logout", AuthLogout);
 openapi.get("/api/history", HistoryList);
@@ -48,6 +53,9 @@ openapi.get("/api/setup-library", SetupLibraryList);
 openapi.post("/api/setup-library", SetupLibraryCreate);
 openapi.patch("/api/setup-library/:itemId", SetupLibraryUpdate);
 openapi.delete("/api/setup-library/:itemId", SetupLibraryDelete);
+
+// Admin (manual maintenance)
+openapi.post("/api/admin/purge-local-accounts", AdminPurgeLocalAccounts);
 
 // WebSocket health endpoint.
 // In local dev, immediately closing after accept can cause Wrangler to surface noisy

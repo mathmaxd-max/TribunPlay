@@ -16,6 +16,45 @@ export type VerifyTurnstileInput = {
   remoteIp?: string;
 };
 
+export const TURNSTILE_TEST_SECRET_KEY = "1x0000000000000000000000000000000AA";
+
+export type ResolveTurnstileServerConfigInput = {
+  enabledFlag?: string;
+  configuredSecretKey?: string;
+  requestUrl: string;
+  hostHeader?: string;
+};
+
+export type ResolveTurnstileServerConfigResult = {
+  enabled: boolean;
+  secretKey?: string;
+  isLocalDevHost: boolean;
+};
+
+const isLocalDevHost = (host: string): boolean =>
+  host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+
+const resolveRequestHost = (requestUrl: string, hostHeader?: string): string => {
+  try {
+    return new URL(requestUrl).hostname;
+  } catch {
+    return hostHeader ?? "";
+  }
+};
+
+export const resolveTurnstileServerConfig = (
+  input: ResolveTurnstileServerConfigInput,
+): ResolveTurnstileServerConfigResult => {
+  const requestHost = resolveRequestHost(input.requestUrl, input.hostHeader);
+  const isLocal = isLocalDevHost(requestHost);
+  return {
+    enabled: input.enabledFlag === "true" || isLocal,
+    // Local dev must use Turnstile's test key-pair; dashboard keys are domain-gated.
+    secretKey: isLocal ? TURNSTILE_TEST_SECRET_KEY : input.configuredSecretKey,
+    isLocalDevHost: isLocal,
+  };
+};
+
 /**
  * Cloudflare Turnstile verification.
  *
@@ -59,6 +98,18 @@ export const verifyTurnstile = async (input: VerifyTurnstileInput): Promise<Turn
       | null;
 
     if (!data?.success) {
+      const errorCodes = Array.isArray(data?.["error-codes"])
+        ? (data?.["error-codes"] as unknown[]).filter((item): item is string => typeof item === "string")
+        : [];
+      if (errorCodes.length > 0) {
+        console.error("Turnstile verification failed", errorCodes);
+      }
+      if (errorCodes.includes("timeout-or-duplicate")) {
+        return { success: false, error: "CAPTCHA expired. Please verify again." };
+      }
+      if (errorCodes.includes("missing-input-secret") || errorCodes.includes("invalid-input-secret")) {
+        return { success: false, error: "CAPTCHA is unavailable. Please try again later." };
+      }
       return { success: false, error: "CAPTCHA verification failed." };
     }
 
@@ -67,4 +118,3 @@ export const verifyTurnstile = async (input: VerifyTurnstileInput): Promise<Turn
     return { success: false, error: "CAPTCHA verification failed." };
   }
 };
-

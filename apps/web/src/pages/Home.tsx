@@ -10,8 +10,7 @@ import {
   type AuthSuccessResponse,
   type StoredIdentity,
 } from '../auth/identityStore';
-import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
-import { renderTurnstile } from '../auth/turnstile';
+import { API_BASE } from '../config';
 import { formatDurationHms } from '../utils/formatDuration';
 import { useHealthCheck } from '../utils/useHealthCheck';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
@@ -191,72 +190,8 @@ export default function Home() {
   });
 
   const isLoading = loadingAction !== null;
-  const turnstileEnabled = useMemo(() => Boolean(TURNSTILE_SITE_KEY), []);
-  const guestTurnstileRequired = Boolean(turnstileEnabled && identity?.mode === 'guest');
-  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
-  const turnstileHostRef = useRef<HTMLDivElement | null>(null);
-  const turnstileResetRef = useRef<(() => void) | null>(null);
-
-  useEffect(() => {
-    if (!guestTurnstileRequired) {
-      setTurnstileToken(null);
-      turnstileResetRef.current = null;
-      return;
-    }
-    if (!TURNSTILE_SITE_KEY) return;
-    const host = turnstileHostRef.current;
-    if (!host) return;
-
-    let cancelled = false;
-
-    (async () => {
-      try {
-        host.innerHTML = '';
-        setTurnstileToken(null);
-
-        const { reset } = await renderTurnstile(host, {
-          sitekey: TURNSTILE_SITE_KEY,
-          theme: 'auto',
-          callback: (token) => {
-            if (!cancelled) setTurnstileToken(token);
-          },
-          'expired-callback': () => {
-            if (!cancelled) setTurnstileToken(null);
-          },
-          'error-callback': () => {
-            if (!cancelled) setTurnstileToken(null);
-          },
-        });
-
-        if (!cancelled) {
-          turnstileResetRef.current = () => reset();
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setTurnstileToken(null);
-          setError(err instanceof Error ? err.message : 'CAPTCHA is unavailable.');
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      turnstileResetRef.current = null;
-    };
-  }, [guestTurnstileRequired]);
-
-  const getCaptchaTokenOrThrow = (): string | null => {
-    if (!guestTurnstileRequired) return null;
-    if (!turnstileToken) {
-      throw new Error('Please complete the CAPTCHA to continue.');
-    }
-    return turnstileToken;
-  };
-
   const resetCaptchaAfterSubmit = () => {
-    if (!guestTurnstileRequired) return;
-    setTurnstileToken(null);
-    turnstileResetRef.current?.();
+    // CAPTCHA is only used for login/signup (see /auth).
   };
 
   const setClockValue = (
@@ -463,17 +398,15 @@ export default function Home() {
         return;
       }
       const { current, payload: identityPayload } = requireIdentityPayload();
-      const captchaToken = getCaptchaTokenOrThrow();
       const timeControl = buildTimeControl();
       const setupConfig = buildSetupConfig();
       const setupSelections: engine.SetupSelectionsBySide = { black: null, white: null };
       const roomSettings = { hostColor, startColor, nextStartColor, setupConfig, setupSelections };
-      const turnstilePart = captchaToken ? { turnstileToken: captchaToken } : {};
       const doCreate = async (payload: unknown) =>
         fetch(`${API_BASE}/api/game/create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ timeControl, roomSettings, identity: payload, ...turnstilePart }),
+          body: JSON.stringify({ timeControl, roomSettings, identity: payload }),
         });
 
       let response = await doCreate(identityPayload);
@@ -524,13 +457,11 @@ export default function Home() {
         return;
       }
       const { current, payload: identityPayload } = requireIdentityPayload();
-      const captchaToken = getCaptchaTokenOrThrow();
-      const turnstilePart = captchaToken ? { turnstileToken: captchaToken } : {};
       const doJoin = async (payload: unknown) =>
         fetch(`${API_BASE}/api/game/join`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: code.trim().toUpperCase(), identity: payload, ...turnstilePart }),
+          body: JSON.stringify({ code: code.trim().toUpperCase(), identity: payload }),
         });
 
       let response = await doJoin(identityPayload);
@@ -567,11 +498,7 @@ export default function Home() {
     ? isClockNonZero(sharedClock)
     : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
   const clockInvalid = !canStartGame;
-  const createDisabled =
-    isLoading ||
-    clockInvalid ||
-    !hasIdentity ||
-    (guestTurnstileRequired && !turnstileToken);
+  const createDisabled = isLoading || clockInvalid || !hasIdentity;
   const createButtonLabel =
     loadingAction === 'create'
       ? 'Creating...'
@@ -713,35 +640,6 @@ export default function Home() {
             <div style={{ ...sectionLabelStyle, color: '#7a6543' }}>Quick Join</div>
             <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Join Game</div>
 
-            {guestTurnstileRequired && (
-              <div style={{ display: 'grid', gap: '8px' }}>
-                <div style={fieldLabelStyle}>CAPTCHA</div>
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'center',
-                    padding: '10px',
-                    borderRadius: 0,
-                    background: 'rgba(255, 249, 239, 0.55)',
-                    boxShadow: 'inset 0 0 0 1px rgba(204, 184, 155, 0.65)',
-                  }}
-                >
-                  <div
-                    ref={turnstileHostRef}
-                    style={{
-                      minHeight: '66px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      borderRadius: 0,
-                      overflow: 'hidden',
-                      background: 'transparent',
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
             <div style={{ display: 'grid', gap: '9px' }}>
               <div style={fieldLabelStyle}>Game Code</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
@@ -766,7 +664,7 @@ export default function Home() {
                 />
                 <button
                   onClick={handleJoinGame}
-                  disabled={isLoading || !hasIdentity || (guestTurnstileRequired && !turnstileToken)}
+                  disabled={isLoading || !hasIdentity}
                   style={{
                     padding: '10px 18px',
                     borderRadius: '999px',

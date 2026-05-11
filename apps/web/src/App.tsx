@@ -2,13 +2,16 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-route
 import { DocumentHead } from "./DocumentHead";
 import Home from "./pages/Home";
 import Game from "./pages/Game";
-import Landing from "./pages/Landing";
+import Welcome from "./pages/Welcome";
+import Auth from "./pages/Auth";
+import Guest from "./pages/Guest";
 import Hub from "./pages/Hub";
 import History from "./pages/History";
 import Review from "./pages/Review";
 import SetupExplorer from "./pages/SetupExplorer";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
+import VerifyEmail from "./pages/VerifyEmail";
 import Datenschutz from "./pages/Datenschutz";
 import Disclaimer from "./pages/Disclaimer";
 import Impressum from "./pages/Impressum";
@@ -33,6 +36,20 @@ function RedirectIfIdentity({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+function RequireNonGuest({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  const identity = getStoredIdentity();
+  if (!identity) {
+    const next = `${location.pathname}${location.search}${location.hash}`;
+    return <Navigate to={`/?next=${encodeURIComponent(next)}`} replace />;
+  }
+  if (identity.mode === "guest") {
+    const next = `${location.pathname}${location.search}${location.hash}`;
+    return <Navigate to={`/guest?reason=restricted&next=${encodeURIComponent(next)}`} replace />;
+  }
+  return <>{children}</>;
+}
+
 function App() {
   return (
     <BrowserRouter>
@@ -42,11 +59,14 @@ function App() {
           path="/"
           element={
             <RedirectIfIdentity>
-              <Landing />
+              <Welcome />
             </RedirectIfIdentity>
           }
         />
         <Route path="/login" element={<Login />} />
+        <Route path="/verify-email" element={<VerifyEmail />} />
+        <Route path="/auth" element={<Auth />} />
+        <Route path="/guest" element={<Guest />} />
         <Route
           path="/hub"
           element={
@@ -66,17 +86,17 @@ function App() {
         <Route
           path="/history"
           element={
-            <RequireIdentity>
+            <RequireNonGuest>
               <History />
-            </RequireIdentity>
+            </RequireNonGuest>
           }
         />
         <Route
           path="/review/:gameId"
           element={
-            <RequireIdentity>
+            <RequireNonGuest>
               <Review />
-            </RequireIdentity>
+            </RequireNonGuest>
           }
         />
         <Route

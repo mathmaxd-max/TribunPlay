@@ -1,11 +1,11 @@
 import { OpenAPIRoute, Str } from "chanfana";
 import { z } from "zod";
 import type { AppContext } from "../types";
-import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
+import { consumeAuthAttempt, isAuthRateLimitError, resetAuthAttempt } from "../lib/authRateLimit";
 import { issueAuthSession, toAuthSessionHttpError } from "../lib/authSession";
 import { toPasswordHttpError, validateEmail, validatePassword } from "../lib/password";
 import { verifyPassword } from "../lib/password";
-import { verifyTurnstile } from "../lib/turnstile";
+import { resolveTurnstileServerConfig, verifyTurnstile } from "../lib/turnstile";
 
 const loginBodySchema = z.object({
   email: Str(),
@@ -79,38 +79,51 @@ export class AuthLogin extends OpenAPIRoute {
       clientIp !== "unknown"
         ? clientIp
         : `ua:${(c.req.header("User-Agent") ?? "unknown").slice(0, 120)}`;
+    const turnstileConfig = resolveTurnstileServerConfig({
+      enabledFlag: env.TURNSTILE_ENABLED,
+      configuredSecretKey: env.TURNSTILE_SECRET_KEY,
+      requestUrl: c.req.url,
+      hostHeader: c.req.header("Host") ?? undefined,
+    });
     const bucket = `login:${email}:${clientKey}`;
     const ipBucket = `login_ip:${clientKey}`;
 
     {
       const captcha = await verifyTurnstile({
-        enabled: env.TURNSTILE_ENABLED === "true",
-        secretKey: env.TURNSTILE_SECRET_KEY,
+        enabled: turnstileConfig.enabled,
+        secretKey: turnstileConfig.secretKey,
         token: data.body.turnstileToken,
         remoteIp: clientIp,
       });
-      if (!captcha.success) {
+      if (captcha.success === false) {
         return c.json({ error: captcha.error }, 400);
       }
     }
 
-    try {
-      await consumeAuthAttempt(env.DB, bucket);
-      // M01 additional non-invasive bot protection: a second per-IP bucket complements per-email+IP.
-      await consumeAuthAttempt(env.DB, ipBucket);
-    } catch {
-      return c.json({ error: "Too many login attempts. Please try again later." }, 429);
+    if (!turnstileConfig.isLocalDevHost) {
+      try {
+        await consumeAuthAttempt(env.DB, bucket);
+        // M01 additional non-invasive bot protection: a second per-IP bucket complements per-email+IP.
+        await consumeAuthAttempt(env.DB, ipBucket);
+      } catch (error) {
+        if (isAuthRateLimitError(error)) {
+          c.header("Retry-After", String(error.retryAfterSec));
+          return c.json({ error: "Too many login attempts. Please try again later." }, 429);
+        }
+        console.error("Login rate-limit check failed", error);
+        return c.json({ error: "Unable to process login right now. Please try again shortly." }, 503);
+      }
     }
 
     const account = await env.DB
       .prepare(
-        `SELECT a.id, a.name, a.email, ac.password_hash
+        `SELECT a.id, a.name, a.email, a.email_verified_at, ac.password_hash
          FROM accounts a
          INNER JOIN account_credentials ac ON ac.account_id = a.id
          WHERE lower(a.email) = ? AND a.provider = 'email'`
       )
       .bind(email)
-      .first<{ id: string; name: string; email: string; password_hash: string }>();
+      .first<{ id: string; name: string; email: string; email_verified_at: string | null; password_hash: string }>();
 
     if (!account) {
       return c.json({ error: "Invalid email or password" }, 401);
@@ -119,6 +132,10 @@ export class AuthLogin extends OpenAPIRoute {
     const isValid = await verifyPassword(password, account.password_hash);
     if (!isValid) {
       return c.json({ error: "Invalid email or password" }, 401);
+    }
+
+    if (!account.email_verified_at) {
+      return c.json({ error: "Please verify your email before logging in." }, 403);
     }
 
     await resetAuthAttempt(env.DB, bucket);

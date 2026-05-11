@@ -2,7 +2,7 @@ import { OpenAPIRoute, Str } from "chanfana";
 import { z } from "zod";
 import type { AppContext } from "../types";
 import { identitySchema, resolveIdentity, toHttpError } from "../lib/identity";
-import { verifyTurnstile } from "../lib/turnstile";
+import { resolveTurnstileServerConfig, verifyTurnstile } from "../lib/turnstile";
 import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
 
 const joinGameBodySchema = z.object({
@@ -62,15 +62,21 @@ export class GameJoin extends OpenAPIRoute {
 
     const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
     const guestRateBucket = `game_join_ip:${clientIp}`;
+    const turnstileConfig = resolveTurnstileServerConfig({
+      enabledFlag: env.TURNSTILE_ENABLED,
+      configuredSecretKey: env.TURNSTILE_SECRET_KEY,
+      requestUrl: c.req.url,
+      hostHeader: c.req.header("Host") ?? undefined,
+    });
 
-    if (env.TURNSTILE_ENABLED === "true" && body.identity.mode === "guest") {
+    if (turnstileConfig.enabled && body.identity.mode === "guest") {
       const captcha = await verifyTurnstile({
         enabled: true,
-        secretKey: env.TURNSTILE_SECRET_KEY,
+        secretKey: turnstileConfig.secretKey,
         token: body.turnstileToken,
         remoteIp: clientIp,
       });
-      if (!captcha.success) {
+      if (captcha.success === false) {
         return c.json({ error: captcha.error }, 400);
       }
     }

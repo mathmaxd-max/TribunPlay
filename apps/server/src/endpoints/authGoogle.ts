@@ -3,14 +3,10 @@ import { z } from "zod";
 import type { AppContext } from "../types";
 import { resolveGoogleIdentity, toHttpError } from "../lib/identity";
 import { issueAuthSession, toAuthSessionHttpError } from "../lib/authSession";
-import { verifyTurnstile } from "../lib/turnstile";
-import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
+import { consumeAuthAttempt, isAuthRateLimitError, resetAuthAttempt } from "../lib/authRateLimit";
 
 const googleBodySchema = z.object({
   googleIdToken: Str(),
-  // Older clients may send `turnstileToken: null` when CAPTCHA is disabled.
-  // Treat null as "missing" so request validation doesn't hard-fail with 400.
-  turnstileToken: z.preprocess((value) => (value === null ? undefined : value), Str({ required: false })),
 });
 
 export class AuthGoogle extends OpenAPIRoute {
@@ -57,24 +53,17 @@ export class AuthGoogle extends OpenAPIRoute {
 
     const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
 
-    {
-      const captcha = await verifyTurnstile({
-        enabled: env.TURNSTILE_ENABLED === "true",
-        secretKey: env.TURNSTILE_SECRET_KEY,
-        token: data.body.turnstileToken,
-        remoteIp: clientIp,
-      });
-      if (!captcha.success) {
-        return c.json({ error: captcha.error }, 400);
-      }
-    }
-
     const ipBucket = `google_ip:${clientIp}`;
     try {
       // M01 additional non-invasive bot protection: per-IP limiting for OAuth token exchange.
       await consumeAuthAttempt(env.DB, ipBucket);
-    } catch {
-      return c.json({ error: "Too many sign-in attempts. Please try again later." }, 429);
+    } catch (error) {
+      if (isAuthRateLimitError(error)) {
+        c.header("Retry-After", String(error.retryAfterSec));
+        return c.json({ error: "Too many sign-in attempts. Please try again later." }, 429);
+      }
+      console.error("Google auth rate-limit check failed", error);
+      return c.json({ error: "Unable to process sign-in right now. Please try again shortly." }, 503);
     }
 
     let googleIdentity;
