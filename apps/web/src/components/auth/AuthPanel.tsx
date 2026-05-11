@@ -28,15 +28,22 @@ type Props = {
   onAuthSuccess: (payload: AuthSuccessResponse) => void;
 };
 
+type ResendVerificationResult = {
+  success: boolean;
+  result: "sent" | "already_verified" | "accepted";
+};
+
 export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
-  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [mode, setMode] = useState<"login" | "signup" | "forgot">("login");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [loadingMode, setLoadingMode] = useState<"google" | "login" | "signup" | null>(null);
+  const [signupPasswordRepeat, setSignupPasswordRepeat] = useState("");
+  const [loadingMode, setLoadingMode] = useState<"google" | "login" | "signup" | "forgot" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [forgotPasswordNotice, setForgotPasswordNotice] = useState<string | null>(null);
 
   const turnstileEnabled = useMemo(() => Boolean(TURNSTILE_SITE_KEY), []);
   const turnstileHostRef = useRef<HTMLDivElement | null>(null);
@@ -110,6 +117,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
 
     setLoadingMode("google");
     setError(null);
+    setForgotPasswordNotice(null);
     try {
       const googleIdToken = await requestGoogleIdToken(googleClientId);
       const response = await fetch(`${API_BASE}/api/auth/google`, {
@@ -139,6 +147,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
 
     setLoadingMode("signup");
     setError(null);
+    setForgotPasswordNotice(null);
     try {
       const captchaToken = getCaptchaTokenOrThrow();
       const body: Record<string, unknown> = { email: normalizedEmail };
@@ -151,10 +160,57 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
       });
 
       if (!response.ok) {
-        throw new Error("Unable to resend verification email. Please try again later.");
+        const errData = await response.json().catch(() => ({ error: "Unable to resend verification email." }));
+        throw new Error(errData.error || "Unable to resend verification email. Please try again later.");
       }
+
+      const payload = (await response.json()) as ResendVerificationResult;
+      if (payload.result === "already_verified") {
+        setError("Email is already verified. Please log in.");
+        return;
+      }
+      if (payload.result === "sent") {
+        setForgotPasswordNotice("Verification email sent. Please check your inbox.");
+        return;
+      }
+      setForgotPasswordNotice("If this account can receive verification mail, we have accepted your request.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to resend verification email.");
+    } finally {
+      resetCaptchaAfterSubmit();
+      setLoadingMode(null);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setError("Enter your email address.");
+      return;
+    }
+
+    setLoadingMode("forgot");
+    setError(null);
+    setForgotPasswordNotice(null);
+    try {
+      const captchaToken = getCaptchaTokenOrThrow();
+      const body: Record<string, unknown> = { email: normalizedEmail };
+      if (captchaToken) body.turnstileToken = captchaToken;
+
+      const response = await fetch(`${API_BASE}/api/auth/forgot-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({ error: "Unable to process password reset." }));
+        throw new Error(errData.error || "Unable to process password reset.");
+      }
+
+      setForgotPasswordNotice("If an account exists for this email, a reset link has been sent.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to process password reset.");
     } finally {
       resetCaptchaAfterSubmit();
       setLoadingMode(null);
@@ -171,9 +227,14 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
       setError("Enter your name to sign up.");
       return;
     }
+    if (mode === "signup" && password !== signupPasswordRepeat) {
+      setError("Passwords do not match.");
+      return;
+    }
 
     setLoadingMode(mode);
     setError(null);
+    setForgotPasswordNotice(null);
     try {
       const captchaToken = getCaptchaTokenOrThrow();
       const endpoint = mode === "login" ? "/api/auth/login" : "/api/auth/signup";
@@ -206,11 +267,21 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
-      // Token is short-lived and generally single-use; always reset after an attempt.
       resetCaptchaAfterSubmit();
       setLoadingMode(null);
     }
   };
+
+  const isForgotMode = mode === "forgot" && !pendingVerificationEmail;
+
+  const submitDisabled =
+    isLoading ||
+    !email.trim() ||
+    (!pendingVerificationEmail && !isForgotMode && !password) ||
+    (!pendingVerificationEmail && !isForgotMode && mode === "signup" && !name.trim()) ||
+    (!pendingVerificationEmail && !isForgotMode && mode === "signup" && !signupPasswordRepeat) ||
+    (!pendingVerificationEmail && !isForgotMode && mode === "signup" && password !== signupPasswordRepeat) ||
+    (turnstileEnabled && !turnstileToken);
 
   return (
     <section
@@ -229,33 +300,43 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         Account
       </div>
       <div style={{ fontSize: "30px", fontWeight: 700, color: "#2c2318" }}>
-        {pendingVerificationEmail ? "Verify your email" : mode === "login" ? "Log in" : "Sign up"}
+        {pendingVerificationEmail
+          ? "Verify your email"
+          : isForgotMode
+            ? "Reset password"
+            : mode === "login"
+              ? "Log in"
+              : "Sign up"}
       </div>
 
-      <button
-        onClick={handleGoogle}
-        disabled={isLoading || !googleClientId}
-        style={{
-          width: "100%",
-          padding: "11px 14px",
-          borderRadius: "999px",
-          border: "2px solid #1f4d2f",
-          background: isLoading || !googleClientId ? "#8ea593" : "#2f6b3f",
-          color: "#f7f3eb",
-          fontWeight: 700,
-          letterSpacing: "0.6px",
-          cursor: isLoading || !googleClientId ? "not-allowed" : "pointer",
-        }}
-        aria-busy={loadingMode === "google"}
-      >
-        {loadingMode === "google" ? "Connecting..." : "Continue with Google"}
-      </button>
+      {!pendingVerificationEmail && !isForgotMode && (
+        <>
+          <button
+            onClick={handleGoogle}
+            disabled={isLoading || !googleClientId}
+            style={{
+              width: "100%",
+              padding: "11px 14px",
+              borderRadius: "999px",
+              border: "2px solid #1f4d2f",
+              background: isLoading || !googleClientId ? "#8ea593" : "#2f6b3f",
+              color: "#f7f3eb",
+              fontWeight: 700,
+              letterSpacing: "0.6px",
+              cursor: isLoading || !googleClientId ? "not-allowed" : "pointer",
+            }}
+            aria-busy={loadingMode === "google"}
+          >
+            {loadingMode === "google" ? "Connecting..." : "Continue with Google"}
+          </button>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: "10px" }}>
-        <div style={{ height: "1px", background: "#d7c5ab" }} />
-        <div style={{ fontSize: "12px", color: "#6f5a38", textTransform: "uppercase", letterSpacing: "1px" }}>or</div>
-        <div style={{ height: "1px", background: "#d7c5ab" }} />
-      </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: "10px" }}>
+            <div style={{ height: "1px", background: "#d7c5ab" }} />
+            <div style={{ fontSize: "12px", color: "#6f5a38", textTransform: "uppercase", letterSpacing: "1px" }}>or</div>
+            <div style={{ height: "1px", background: "#d7c5ab" }} />
+          </div>
+        </>
+      )}
 
       {turnstileEnabled && (
         <div style={{ display: "grid", gap: "8px" }}>
@@ -318,7 +399,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         />
       </div>
 
-      {!pendingVerificationEmail && (
+      {!pendingVerificationEmail && !isForgotMode && (
         <div style={{ display: "grid", gap: "6px" }}>
           <label htmlFor="auth-password" style={labelStyle}>
             Password
@@ -340,42 +421,60 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
         </div>
       )}
 
+      {!pendingVerificationEmail && mode === "signup" && (
+        <div style={{ display: "grid", gap: "6px" }}>
+          <label htmlFor="auth-password-repeat" style={labelStyle}>
+            Confirm password
+          </label>
+          <input
+            id="auth-password-repeat"
+            type="password"
+            value={signupPasswordRepeat}
+            onChange={(event) => setSignupPasswordRepeat(event.target.value)}
+            style={inputStyle}
+            disabled={isLoading}
+            autoComplete="new-password"
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                handleEmailSubmit();
+              }
+            }}
+          />
+        </div>
+      )}
+
       <button
-        onClick={pendingVerificationEmail ? handleResendVerification : handleEmailSubmit}
-        disabled={
-          isLoading ||
-          !email.trim() ||
-          (!pendingVerificationEmail && !password) ||
-          (!pendingVerificationEmail && mode === "signup" && !name.trim()) ||
-          (turnstileEnabled && !turnstileToken)
-        }
-        aria-busy={loadingMode === "login" || loadingMode === "signup"}
+        onClick={pendingVerificationEmail ? handleResendVerification : isForgotMode ? handleForgotPassword : handleEmailSubmit}
+        disabled={submitDisabled}
+        aria-busy={loadingMode === "login" || loadingMode === "signup" || loadingMode === "forgot"}
         style={{
           width: "100%",
           padding: "12px 16px",
           borderRadius: "999px",
           border: "2px solid #6f5a38",
-          background:
-            isLoading || !email.trim() || !password || (mode === "signup" && !name.trim()) ? "#d8c8ab" : "#f2d9b2",
+          background: submitDisabled ? "#d8c8ab" : "#f2d9b2",
           color: "#2a2218",
           fontWeight: 700,
           letterSpacing: "1px",
           textTransform: "uppercase",
-          cursor:
-            isLoading || !email.trim() || !password || (mode === "signup" && !name.trim()) ? "not-allowed" : "pointer",
+          cursor: submitDisabled ? "not-allowed" : "pointer",
         }}
       >
         {pendingVerificationEmail
           ? loadingMode === "signup"
             ? "Resending..."
             : "Resend verification email"
-          : mode === "login"
-            ? loadingMode === "login"
-              ? "Logging in..."
-              : "Log in"
-            : loadingMode === "signup"
-              ? "Creating account..."
-              : "Sign up"}
+          : isForgotMode
+            ? loadingMode === "forgot"
+              ? "Sending reset link..."
+              : "Send reset link"
+            : mode === "login"
+              ? loadingMode === "login"
+                ? "Logging in..."
+                : "Log in"
+              : loadingMode === "signup"
+                ? "Creating account..."
+                : "Sign up"}
       </button>
 
       {pendingVerificationEmail ? (
@@ -388,6 +487,7 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
               onClick={() => {
                 setPendingVerificationEmail(null);
                 setMode("login");
+                setSignupPasswordRepeat("");
               }}
               style={{
                 border: "none",
@@ -405,11 +505,19 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
           </div>
         </div>
       ) : (
-        <div style={{ textAlign: "center", fontSize: "14px", color: "#5a4630" }}>
-          {mode === "login" ? "Don't have an account? " : "Already have an account? "}
+        <div style={{ textAlign: "center", fontSize: "14px", color: "#5a4630", lineHeight: 1.35 }}>
+          {isForgotMode ? "Remembered your password? " : mode === "login" ? "Don't have an account? " : "Already have an account? "}
           <button
             type="button"
-            onClick={() => setMode((prev) => (prev === "login" ? "signup" : "login"))}
+            onClick={() => {
+              setError(null);
+              setForgotPasswordNotice(null);
+              setMode((prev) => {
+                if (prev === "forgot") return "login";
+                return prev === "login" ? "signup" : "login";
+              });
+              setSignupPasswordRepeat("");
+            }}
             style={{
               border: "none",
               background: "transparent",
@@ -421,8 +529,49 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
             }}
             disabled={isLoading}
           >
-            {mode === "login" ? "Sign up" : "Log in"}
+            {isForgotMode ? "Log in" : mode === "login" ? "Sign up" : "Log in"}
           </button>
+          {mode === "login" && (
+            <div style={{ marginTop: "8px" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("forgot");
+                  setError(null);
+                  setForgotPasswordNotice(null);
+                }}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "#1f4d2f",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  padding: 0,
+                  textDecoration: "underline",
+                }}
+                disabled={isLoading}
+              >
+                Forgot password?
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {forgotPasswordNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            borderRadius: "12px",
+            border: "2px solid #5b7a41",
+            background: "#e6f2da",
+            color: "#22451a",
+            padding: "10px 14px",
+            fontWeight: 600,
+          }}
+        >
+          {forgotPasswordNotice}
         </div>
       )}
 

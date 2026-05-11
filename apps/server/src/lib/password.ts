@@ -13,7 +13,51 @@ class PasswordError extends Error {
 
 export const normalizeEmail = (value: string): string => value.trim().toLowerCase();
 
-export const validateEmail = (value: string): string => {
+const DEFAULT_ALLOWED_EMAIL_DOMAINS = [
+  "gmail.com",
+  "googlemail.com",
+  "outlook.com",
+  "hotmail.com",
+  "live.com",
+  "icloud.com",
+  "me.com",
+  "yahoo.com",
+  "yahoo.de",
+  "web.de",
+  "gmx.de",
+  "gmx.net",
+  "proton.me",
+  "protonmail.com",
+];
+
+const getEmailDomain = (email: string): string => {
+  const atIndex = email.lastIndexOf("@");
+  if (atIndex < 0 || atIndex >= email.length - 1) {
+    throw new PasswordError(400, "Invalid email format");
+  }
+  return email.slice(atIndex + 1).toLowerCase();
+};
+
+export const resolveAllowedEmailDomains = (configuredCsv?: string): Set<string> => {
+  const raw = (configuredCsv ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(raw.length > 0 ? raw : DEFAULT_ALLOWED_EMAIL_DOMAINS);
+};
+
+export const assertAllowedEmailDomain = (email: string, configuredCsv?: string): void => {
+  const domain = getEmailDomain(email);
+  const allowed = resolveAllowedEmailDomains(configuredCsv);
+  if (!allowed.has(domain)) {
+    throw new PasswordError(
+      400,
+      "Email domain is not supported. Please use a common provider such as gmail.com or web.de.",
+    );
+  }
+};
+
+export const validateEmail = (value: string, allowedDomainsCsv?: string): string => {
   const normalized = normalizeEmail(value);
   if (!normalized) {
     throw new PasswordError(400, "Email is required");
@@ -26,6 +70,7 @@ export const validateEmail = (value: string): string => {
   if (!emailPattern.test(normalized)) {
     throw new PasswordError(400, "Invalid email format");
   }
+  assertAllowedEmailDomain(normalized, allowedDomainsCsv);
   return normalized;
 };
 

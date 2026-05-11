@@ -12,6 +12,7 @@ import SetupExplorer from "./pages/SetupExplorer";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import VerifyEmail from "./pages/VerifyEmail";
+import ResetPassword from "./pages/ResetPassword";
 import Datenschutz from "./pages/Datenschutz";
 import Disclaimer from "./pages/Disclaimer";
 import Impressum from "./pages/Impressum";
@@ -65,6 +66,7 @@ function App() {
         />
         <Route path="/login" element={<Login />} />
         <Route path="/verify-email" element={<VerifyEmail />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
         <Route path="/auth" element={<Auth />} />
         <Route path="/guest" element={<Guest />} />
         <Route

@@ -104,7 +104,7 @@ export const refreshAuthSession = async (params: {
   }
 
   const account = await db
-    .prepare("SELECT id, name, email FROM accounts WHERE id = ? AND email IS NOT NULL")
+    .prepare("SELECT id, name, email FROM accounts WHERE id = ? AND email IS NOT NULL AND deleted_at IS NULL")
     .bind(row.account_id)
     .first<{ id: string; name: string; email: string }>();
 
@@ -158,7 +158,7 @@ export const getAuthIdentityFromAccessToken = async (params: {
 }): Promise<AuthIdentity> => {
   const claims = await verifyAccessToken(params.tokenSecret, params.accessToken);
   const account = await params.db
-    .prepare("SELECT id, name, email FROM accounts WHERE id = ? AND email IS NOT NULL")
+    .prepare("SELECT id, name, email FROM accounts WHERE id = ? AND email IS NOT NULL AND deleted_at IS NULL")
     .bind(claims.accountId)
     .first<{ id: string; name: string; email: string }>();
 
@@ -174,6 +174,13 @@ export const revokeRefreshToken = async (db: D1Database, refreshToken: string): 
   await db
     .prepare("UPDATE auth_refresh_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE token_hash = ?")
     .bind(new Date().toISOString(), refreshHash)
+    .run();
+};
+
+export const revokeAllRefreshTokensForAccount = async (db: D1Database, accountId: string): Promise<void> => {
+  await db
+    .prepare("UPDATE auth_refresh_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE account_id = ?")
+    .bind(new Date().toISOString(), accountId)
     .run();
 };
 

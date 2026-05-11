@@ -25,7 +25,10 @@ export class AuthVerifyEmail extends OpenAPIRoute {
         description: "Verification result",
         content: {
           "application/json": {
-            schema: z.object({ success: z.boolean() }),
+            schema: z.object({
+              success: z.boolean(),
+              result: z.enum(["verified", "already_verified", "invalid_or_expired"]),
+            }),
           },
         },
       },
@@ -36,12 +39,7 @@ export class AuthVerifyEmail extends OpenAPIRoute {
     const env = c.env;
     const data = await this.getValidatedData<typeof this.schema>();
 
-    try {
-      await consumeEmailVerificationToken(env.DB, data.body.token);
-      return { success: true };
-    } catch {
-      return c.json({ error: "Invalid or expired verification link" }, 400);
-    }
+    const result = await consumeEmailVerificationToken(env.DB, data.body.token);
+    return { success: true, result: result.result };
   }
 }
-

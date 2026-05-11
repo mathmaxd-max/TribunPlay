@@ -74,6 +74,7 @@ export default function History() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [games, setGames] = useState<HistoryItem[]>([]);
+  const [deletingGameId, setDeletingGameId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -130,6 +131,48 @@ export default function History() {
       cancelled = true;
     };
   }, []);
+
+  const handleDeleteGame = async (gameId: string) => {
+    const confirmed = window.confirm("Delete this game from your history?");
+    if (!confirmed) return;
+
+    setDeletingGameId(gameId);
+    setError(null);
+    try {
+      const identity = getStoredIdentity();
+      if (!identity || identity.mode !== "token") {
+        throw new Error("History is only available for authenticated accounts.");
+      }
+      const tokenIdentity: Extract<StoredIdentity, { mode: "token" }> = identity;
+
+      let accessToken = tokenIdentity.session.accessToken;
+      const doDelete = async () =>
+        fetch(`${API_BASE}/api/history/${encodeURIComponent(gameId)}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+
+      let response = await doDelete();
+      if (!response.ok && response.status === 401) {
+        const nextIdentity = await refreshSessionOrThrow(tokenIdentity);
+        accessToken = nextIdentity.session.accessToken;
+        response = await doDelete();
+      }
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: "Failed to delete history game" }));
+        throw new Error(err.error || "Failed to delete history game");
+      }
+
+      setGames((previous) => previous.filter((item) => item.gameId !== gameId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete history game");
+    } finally {
+      setDeletingGameId(null);
+    }
+  };
 
   return (
     <div
@@ -222,7 +265,7 @@ export default function History() {
               <div>Started: {formatDateTime(game.startedAt)}</div>
               <div>Ended: {formatDateTime(game.endedAt)}</div>
             </div>
-            <div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
               <Link
                 to={`/review/${game.gameId}`}
                 style={{
@@ -240,6 +283,25 @@ export default function History() {
               >
                 Open Replay
               </Link>
+              <button
+                type="button"
+                onClick={() => handleDeleteGame(game.gameId)}
+                disabled={deletingGameId === game.gameId}
+                style={{
+                  display: "inline-block",
+                  padding: "9px 14px",
+                  borderRadius: "999px",
+                  border: "2px solid #8b3b3b",
+                  background: deletingGameId === game.gameId ? "#efc9c6" : "#f7d7d5",
+                  color: "#5c1c16",
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "1px",
+                  cursor: deletingGameId === game.gameId ? "not-allowed" : "pointer",
+                }}
+              >
+                {deletingGameId === game.gameId ? "Deleting..." : "Delete"}
+              </button>
             </div>
           </div>
         ))}

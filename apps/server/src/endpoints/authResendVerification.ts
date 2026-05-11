@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AppContext } from "../types";
 import { validateEmail } from "../lib/password";
 import { resolveTurnstileServerConfig, verifyTurnstile } from "../lib/turnstile";
-import { consumeAuthAttempt } from "../lib/authRateLimit";
+import { consumeAuthAttempt, isAuthRateLimitError } from "../lib/authRateLimit";
 import { createEmailVerificationToken } from "../lib/emailVerification";
 import { sendResendEmail } from "../lib/emailSender";
 
@@ -12,6 +12,11 @@ const resendVerificationBodySchema = z.object({
   // Older clients may send `turnstileToken: null` when CAPTCHA is disabled.
   // Treat null as "missing" so request validation doesn't hard-fail with 400.
   turnstileToken: z.preprocess((value) => (value === null ? undefined : value), Str({ required: false })),
+});
+
+const resendVerificationResponseSchema = z.object({
+  success: z.boolean(),
+  result: z.enum(["sent", "already_verified", "accepted"]),
 });
 
 export class AuthResendVerification extends OpenAPIRoute {
@@ -29,10 +34,10 @@ export class AuthResendVerification extends OpenAPIRoute {
     },
     responses: {
       "200": {
-        description: "Always returns success to avoid account enumeration",
+        description: "Resend verification result",
         content: {
           "application/json": {
-            schema: z.object({ success: z.boolean() }),
+            schema: resendVerificationResponseSchema,
           },
         },
       },
@@ -43,26 +48,25 @@ export class AuthResendVerification extends OpenAPIRoute {
     const env = c.env;
     const data = await this.getValidatedData<typeof this.schema>();
 
-    // Always respond 200; this endpoint must not leak whether an account exists.
-    const ok = () => ({ success: true });
+    const ok = (result: "sent" | "already_verified" | "accepted") => ({ success: true, result });
 
     let email: string;
     try {
-      email = validateEmail(data.body.email);
+      email = validateEmail(data.body.email, env.ALLOWED_EMAIL_DOMAINS);
     } catch {
-      return ok();
+      return ok("accepted");
     }
 
     const clientIp = c.req.header("CF-Connecting-IP") ?? "unknown";
 
-    {
-      const turnstileConfig = resolveTurnstileServerConfig({
-        enabledFlag: env.TURNSTILE_ENABLED,
-        configuredSecretKey: env.TURNSTILE_SECRET_KEY,
-        requestUrl: c.req.url,
-        hostHeader: c.req.header("Host") ?? undefined,
-      });
+    const turnstileConfig = resolveTurnstileServerConfig({
+      enabledFlag: env.TURNSTILE_ENABLED,
+      configuredSecretKey: env.TURNSTILE_SECRET_KEY,
+      requestUrl: c.req.url,
+      hostHeader: c.req.header("Host") ?? undefined,
+    });
 
+    {
       const captcha = await verifyTurnstile({
         enabled: turnstileConfig.enabled,
         secretKey: turnstileConfig.secretKey,
@@ -70,29 +74,39 @@ export class AuthResendVerification extends OpenAPIRoute {
         remoteIp: clientIp,
       });
       if (captcha.success === false) {
-        return ok();
+        return c.json({ error: captcha.error }, 400);
       }
     }
 
-    try {
-      // Per-email + per-IP style buckets. Keep separate from login/signup to avoid unexpected coupling.
-      await consumeAuthAttempt(env.DB, `resend_verify:${email}:${clientIp}`);
-      await consumeAuthAttempt(env.DB, `resend_verify_ip:${clientIp}`);
-    } catch {
-      return ok();
+    if (!turnstileConfig.isLocalDevHost) {
+      try {
+        await consumeAuthAttempt(env.DB, `resend_verify:${email}:${clientIp}`);
+        await consumeAuthAttempt(env.DB, `resend_verify_ip:${clientIp}`);
+      } catch (error) {
+        if (isAuthRateLimitError(error)) {
+          c.header("Retry-After", String(error.retryAfterSec));
+          return c.json({ error: "Too many resend attempts. Please try again later." }, 429);
+        }
+        console.error("Resend verification rate-limit check failed", error);
+        return c.json({ error: "Unable to process the request right now. Please try again shortly." }, 503);
+      }
     }
 
     const account = await env.DB
       .prepare(
         `SELECT id, email_verified_at
          FROM accounts
-         WHERE lower(email) = ? AND provider = 'email' AND email IS NOT NULL`
+         WHERE lower(email) = ? AND provider = 'email' AND email IS NOT NULL AND deleted_at IS NULL`
       )
       .bind(email)
       .first<{ id: string; email_verified_at: string | null }>();
 
-    if (!account || account.email_verified_at) {
-      return ok();
+    if (!account) {
+      return ok("accepted");
+    }
+
+    if (account.email_verified_at) {
+      return ok("already_verified");
     }
 
     try {
@@ -110,11 +124,10 @@ export class AuthResendVerification extends OpenAPIRoute {
         text: `Verify your email to finish signing up:\n\n${verifyUrl.toString()}\n\nIf you didn’t request this, you can ignore this email.`,
         html: `<p>Verify your email to finish signing up:</p><p><a href="${verifyUrl.toString()}">Verify email</a></p><p>If you didn’t request this, you can ignore this email.</p>`,
       });
+      return ok("sent");
     } catch {
-      // Swallow errors to keep response non-enumerating and avoid leaking provider failures.
-      return ok();
+      // Keep provider failures opaque.
+      return ok("accepted");
     }
-
-    return ok();
   }
 }

@@ -98,6 +98,7 @@ export class HistoryList extends OpenAPIRoute {
          INNER JOIN game_participants self_participant
            ON self_participant.game_id = g.id
           AND self_participant.account_id = ?
+          AND self_participant.deleted_at IS NULL
          LEFT JOIN game_participants opponent_participant
            ON opponent_participant.game_id = g.id
           AND opponent_participant.seat <> self_participant.seat

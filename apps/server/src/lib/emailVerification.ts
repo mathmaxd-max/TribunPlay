@@ -27,6 +27,11 @@ export type EmailVerificationToken = {
   expiresAtIso: string;
 };
 
+export type ConsumeEmailVerificationResult =
+  | { result: "verified"; accountId: string }
+  | { result: "already_verified"; accountId: string }
+  | { result: "invalid_or_expired" };
+
 export const createEmailVerificationToken = async (
   db: D1Database,
   accountId: string,
@@ -50,33 +55,53 @@ export const createEmailVerificationToken = async (
 export const consumeEmailVerificationToken = async (
   db: D1Database,
   token: string,
-): Promise<{ accountId: string }> => {
+): Promise<ConsumeEmailVerificationResult> => {
   const tokenHash = await sha256Hex(token);
   const row = await db
     .prepare(
-      `SELECT id, account_id, expires_at, consumed_at
-       FROM auth_email_verifications
-       WHERE token_hash = ?`
+      `SELECT
+         v.account_id,
+         v.expires_at,
+         v.consumed_at,
+         a.email_verified_at,
+         a.deleted_at
+       FROM auth_email_verifications v
+       INNER JOIN accounts a ON a.id = v.account_id
+       WHERE v.token_hash = ?`
     )
     .bind(tokenHash)
-    .first<{ id: string; account_id: string; expires_at: string; consumed_at: string | null }>();
+    .first<{
+      account_id: string;
+      expires_at: string;
+      consumed_at: string | null;
+      email_verified_at: string | null;
+      deleted_at: string | null;
+    }>();
 
-  if (!row || row.consumed_at) {
-    throw new Error("Invalid verification token");
+  if (!row || row.deleted_at) {
+    return { result: "invalid_or_expired" };
   }
 
-  if (Date.parse(row.expires_at) <= Date.now()) {
-    throw new Error("Verification token expired");
+  if (row.consumed_at || Date.parse(row.expires_at) <= Date.now()) {
+    if (row.email_verified_at) {
+      return { result: "already_verified", accountId: row.account_id };
+    }
+    return { result: "invalid_or_expired" };
   }
 
   const nowIso = new Date().toISOString();
+  if (row.email_verified_at) {
+    await db
+      .prepare("UPDATE auth_email_verifications SET consumed_at = COALESCE(consumed_at, ?) WHERE token_hash = ?")
+      .bind(nowIso, tokenHash)
+      .run();
+    return { result: "already_verified", accountId: row.account_id };
+  }
+
   await db.batch([
-    db
-      .prepare("UPDATE accounts SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?")
-      .bind(nowIso, row.account_id),
-    db.prepare("UPDATE auth_email_verifications SET consumed_at = ? WHERE id = ?").bind(nowIso, row.id),
+    db.prepare("UPDATE accounts SET email_verified_at = ? WHERE id = ?").bind(nowIso, row.account_id),
+    db.prepare("UPDATE auth_email_verifications SET consumed_at = ? WHERE token_hash = ?").bind(nowIso, tokenHash),
   ]);
 
-  return { accountId: row.account_id };
+  return { result: "verified", accountId: row.account_id };
 };
-

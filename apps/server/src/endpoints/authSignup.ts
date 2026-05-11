@@ -60,7 +60,7 @@ export class AuthSignup extends OpenAPIRoute {
     let name: string;
 
     try {
-      email = validateEmail(data.body.email);
+      email = validateEmail(data.body.email, env.ALLOWED_EMAIL_DOMAINS);
       password = validatePassword(data.body.password);
       name = validateAccountName(data.body.name);
     } catch (error) {
@@ -119,12 +119,16 @@ export class AuthSignup extends OpenAPIRoute {
 
     const existing = await env.DB
       .prepare(
-        `SELECT id, provider, email_verified_at
+        `SELECT id, provider, email_verified_at, deleted_at
          FROM accounts
          WHERE lower(email) = ? AND provider IN ('email', 'google') AND email IS NOT NULL`
       )
       .bind(email)
-      .first<{ id: string; provider: "email" | "google"; email_verified_at: string | null }>();
+      .first<{ id: string; provider: "email" | "google"; email_verified_at: string | null; deleted_at: string | null }>();
+
+    if (existing?.id && existing.deleted_at) {
+      return c.json({ error: "This account has been deleted and cannot be re-created." }, 409);
+    }
 
     // If an email/password account exists but isn't verified yet, behave like a signup:
     // re-send verification and return the normal "requiresEmailVerification" response.

@@ -16,10 +16,10 @@ declare global {
     RESEND_API_KEY?: string;
     EMAIL_FROM?: string;
     APP_BASE_URL?: string;
+    ALLOWED_EMAIL_DOMAINS?: string;
 
     // Admin maintenance (manual, on-demand).
     // Keep this secret and only set it in environments where you want this endpoint enabled.
     ADMIN_PURGE_KEY?: string;
   }
 }
-

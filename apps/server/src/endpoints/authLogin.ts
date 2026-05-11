@@ -61,7 +61,7 @@ export class AuthLogin extends OpenAPIRoute {
     let password: string;
 
     try {
-      email = validateEmail(data.body.email);
+      email = validateEmail(data.body.email, env.ALLOWED_EMAIL_DOMAINS);
       password = validatePassword(data.body.password);
     } catch (error) {
       const normalized = toPasswordHttpError(error);
@@ -120,7 +120,7 @@ export class AuthLogin extends OpenAPIRoute {
         `SELECT a.id, a.name, a.email, a.email_verified_at, ac.password_hash
          FROM accounts a
          INNER JOIN account_credentials ac ON ac.account_id = a.id
-         WHERE lower(a.email) = ? AND a.provider = 'email'`
+         WHERE lower(a.email) = ? AND a.provider = 'email' AND a.deleted_at IS NULL`
       )
       .bind(email)
       .first<{ id: string; name: string; email: string; email_verified_at: string | null; password_hash: string }>();

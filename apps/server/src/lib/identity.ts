@@ -97,7 +97,7 @@ const upsertGuestAccount = async (db: D1Database, identity: GuestIdentityInput):
 
   if (accountId) {
     const existing = await db
-      .prepare("SELECT id FROM accounts WHERE id = ? AND provider = 'guest'")
+      .prepare("SELECT id FROM accounts WHERE id = ? AND provider = 'guest' AND deleted_at IS NULL")
       .bind(accountId)
       .first<{ id: string }>();
 
@@ -156,9 +156,13 @@ export const resolveGoogleIdentity = async (
   const name = validateName(rawName);
 
   const existing = await db
-    .prepare("SELECT id FROM accounts WHERE provider = 'google' AND provider_subject = ?")
+    .prepare("SELECT id, deleted_at FROM accounts WHERE provider = 'google' AND provider_subject = ?")
     .bind(providerSubject)
-    .first<{ id: string }>();
+    .first<{ id: string; deleted_at: string | null }>();
+
+  if (existing?.deleted_at) {
+    throw new IdentityError(403, "This account has been deleted.");
+  }
 
   const accountId = existing?.id ?? crypto.randomUUID();
 

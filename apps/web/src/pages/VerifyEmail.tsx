@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { useLocation, Link } from "react-router-dom";
+import { useLocation, Link, useNavigate } from "react-router-dom";
 import { API_BASE } from "../config";
 
 export default function VerifyEmail() {
+  const navigate = useNavigate();
   const location = useLocation();
   const token = useMemo(() => new URLSearchParams(location.search).get("token") ?? "", [location.search]);
   const [status, setStatus] = useState<"idle" | "verifying" | "success" | "error">("idle");
@@ -32,9 +33,26 @@ export default function VerifyEmail() {
           throw new Error(errData.error || "Invalid or expired verification link");
         }
 
+        const payload = (await response.json()) as {
+          success: boolean;
+          result: "verified" | "already_verified" | "invalid_or_expired";
+        };
+
         if (!cancelled) {
-          setStatus("success");
-          setMessage("Your email has been verified. You can now log in.");
+          if (payload.result === "verified") {
+            setStatus("success");
+            setMessage("Your email has been verified. Redirecting to login...");
+            window.setTimeout(() => navigate("/auth", { replace: true }), 1800);
+            return;
+          }
+          if (payload.result === "already_verified") {
+            setStatus("success");
+            setMessage("Account is already activated. Redirecting to login...");
+            window.setTimeout(() => navigate("/auth", { replace: true }), 1800);
+            return;
+          }
+          setStatus("error");
+          setMessage("Invalid or expired verification link.");
         }
       } catch (err) {
         if (!cancelled) {
@@ -47,7 +65,7 @@ export default function VerifyEmail() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [navigate, token]);
 
   return (
     <main style={{ maxWidth: "720px", margin: "0 auto", padding: "24px" }}>
@@ -64,4 +82,3 @@ export default function VerifyEmail() {
     </main>
   );
 }
-

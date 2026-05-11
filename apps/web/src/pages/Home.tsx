@@ -10,7 +10,8 @@ import {
   type AuthSuccessResponse,
   type StoredIdentity,
 } from '../auth/identityStore';
-import { API_BASE } from '../config';
+import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
+import { renderTurnstile } from '../auth/turnstile';
 import { formatDurationHms } from '../utils/formatDuration';
 import { useHealthCheck } from '../utils/useHealthCheck';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
@@ -182,7 +183,78 @@ export default function Home() {
   const [maxGameMinutesTotal, setMaxGameMinutesTotal] = useState<number | ''>(60);
   const [loadingAction, setLoadingAction] = useState<'join' | 'create' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const turnstileHostRef = useRef<HTMLDivElement | null>(null);
+  const turnstileResetRef = useRef<(() => void) | null>(null);
   const navigate = useNavigate();
+
+  const guestTurnstileRequired = useMemo(
+    () => identity?.mode === 'guest' && Boolean(TURNSTILE_SITE_KEY),
+    [identity?.mode],
+  );
+
+  useEffect(() => {
+    if (!guestTurnstileRequired || !TURNSTILE_SITE_KEY) {
+      setTurnstileToken(null);
+      turnstileResetRef.current = null;
+      return;
+    }
+
+    const host = turnstileHostRef.current;
+    if (!host) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        host.innerHTML = '';
+        setTurnstileToken(null);
+
+        const { reset } = await renderTurnstile(host, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: 'auto',
+          callback: (token) => {
+            if (!cancelled) setTurnstileToken(token);
+          },
+          'expired-callback': () => {
+            if (!cancelled) setTurnstileToken(null);
+          },
+          'error-callback': () => {
+            if (!cancelled) setTurnstileToken(null);
+          },
+        });
+
+        if (!cancelled) {
+          turnstileResetRef.current = () => reset();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setTurnstileToken(null);
+          setError(err instanceof Error ? err.message : 'CAPTCHA is unavailable.');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      turnstileResetRef.current = null;
+    };
+  }, [guestTurnstileRequired]);
+
+  const getGuestCaptchaTokenOrThrow = (mode: 'guest' | 'token'): string | null => {
+    if (mode !== 'guest') return null;
+    if (!TURNSTILE_SITE_KEY) return null;
+    if (!turnstileToken) {
+      throw new Error('Please complete the CAPTCHA to continue.');
+    }
+    return turnstileToken;
+  };
+
+  const resetCaptchaAfterSubmit = () => {
+    if (!guestTurnstileRequired) return;
+    setTurnstileToken(null);
+    turnstileResetRef.current?.();
+  };
 
   const { result: healthResult, checking: healthChecking } = useHealthCheck({
     autoCheck: true,
@@ -190,9 +262,6 @@ export default function Home() {
   });
 
   const isLoading = loadingAction !== null;
-  const resetCaptchaAfterSubmit = () => {
-    // CAPTCHA is only used for login/signup (see /auth).
-  };
 
   const setClockValue = (
     setter: Dispatch<SetStateAction<ClockInput>>,
@@ -398,6 +467,7 @@ export default function Home() {
         return;
       }
       const { current, payload: identityPayload } = requireIdentityPayload();
+      const captchaToken = getGuestCaptchaTokenOrThrow(current.mode);
       const timeControl = buildTimeControl();
       const setupConfig = buildSetupConfig();
       const setupSelections: engine.SetupSelectionsBySide = { black: null, white: null };
@@ -406,7 +476,12 @@ export default function Home() {
         fetch(`${API_BASE}/api/game/create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ timeControl, roomSettings, identity: payload }),
+          body: JSON.stringify({
+            timeControl,
+            roomSettings,
+            identity: payload,
+            ...(captchaToken ? { turnstileToken: captchaToken } : {}),
+          }),
         });
 
       let response = await doCreate(identityPayload);
@@ -457,11 +532,16 @@ export default function Home() {
         return;
       }
       const { current, payload: identityPayload } = requireIdentityPayload();
+      const captchaToken = getGuestCaptchaTokenOrThrow(current.mode);
       const doJoin = async (payload: unknown) =>
         fetch(`${API_BASE}/api/game/join`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: code.trim().toUpperCase(), identity: payload }),
+          body: JSON.stringify({
+            code: code.trim().toUpperCase(),
+            identity: payload,
+            ...(captchaToken ? { turnstileToken: captchaToken } : {}),
+          }),
         });
 
       let response = await doJoin(identityPayload);
@@ -494,11 +574,12 @@ export default function Home() {
 
   const healthOk = Boolean(healthResult?.api.reachable && healthResult?.websocket.reachable);
   const hasIdentity = Boolean(identity);
+  const guestTurnstileBlocking = guestTurnstileRequired && !turnstileToken;
   const canStartGame = sameClockSettings
     ? isClockNonZero(sharedClock)
     : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
   const clockInvalid = !canStartGame;
-  const createDisabled = isLoading || clockInvalid || !hasIdentity;
+  const createDisabled = isLoading || clockInvalid || !hasIdentity || guestTurnstileBlocking;
   const createButtonLabel =
     loadingAction === 'create'
       ? 'Creating...'
@@ -626,6 +707,49 @@ export default function Home() {
             margin: '0 auto',
           }}
         >
+          {guestTurnstileRequired && (
+            <section
+              style={{
+                borderRadius: '18px',
+                border: '2px solid #3c3226',
+                background: 'rgba(255, 250, 242, 0.84)',
+                boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
+                padding: '18px',
+                display: 'grid',
+                gap: '10px',
+              }}
+            >
+              <div style={fieldLabelStyle}>CAPTCHA</div>
+              <p style={{ margin: 0, fontSize: '13px', color: '#5a4630', lineHeight: 1.45 }}>
+                Guest play is protected the same way as email sign-in. Complete the check before joining or creating a
+                game.
+              </p>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'center',
+                  padding: '10px',
+                  borderRadius: 0,
+                  background: 'rgba(255, 249, 239, 0.55)',
+                  boxShadow: 'inset 0 0 0 1px rgba(204, 184, 155, 0.65)',
+                }}
+              >
+                <div
+                  ref={turnstileHostRef}
+                  style={{
+                    minHeight: '66px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderRadius: 0,
+                    overflow: 'hidden',
+                    background: 'transparent',
+                  }}
+                />
+              </div>
+            </section>
+          )}
+
           <section
             style={{
               borderRadius: '18px',
@@ -664,17 +788,17 @@ export default function Home() {
                 />
                 <button
                   onClick={handleJoinGame}
-                  disabled={isLoading || !hasIdentity}
+                  disabled={isLoading || !hasIdentity || guestTurnstileBlocking}
                   style={{
                     padding: '10px 18px',
                     borderRadius: '999px',
                     border: '2px solid #1f4d2f',
-                    background: isLoading || !hasIdentity ? '#8ea593' : '#2f6b3f',
+                    background: isLoading || !hasIdentity || guestTurnstileBlocking ? '#8ea593' : '#2f6b3f',
                     color: '#f7f3eb',
                     fontWeight: 700,
                     textTransform: 'uppercase',
                     letterSpacing: '1px',
-                    cursor: isLoading || !hasIdentity ? 'not-allowed' : 'pointer',
+                    cursor: isLoading || !hasIdentity || guestTurnstileBlocking ? 'not-allowed' : 'pointer',
                   }}
                 >
                   {loadingAction === 'join' ? 'Joining...' : 'Join'}
