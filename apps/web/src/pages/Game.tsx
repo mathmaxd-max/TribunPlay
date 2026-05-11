@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import * as engine from '@tribunplay/engine';
 import { getHexagonColor, getBaseColor, type HexagonState } from '../hexagonColors';
@@ -59,6 +59,17 @@ type RoomPresence = {
   canStart?: boolean;
   rematch?: { black: boolean; white: boolean };
   rematchReady?: boolean;
+};
+type LobbyRosterPerson = {
+  connectionId: string;
+  name: string;
+  isGuest: boolean;
+  seat: Role;
+};
+type LobbyRoster = {
+  black: LobbyRosterPerson | null;
+  white: LobbyRosterPerson | null;
+  spectators: LobbyRosterPerson[];
 };
 type TimeControl = {
   initialMs: ColorClock;
@@ -382,6 +393,226 @@ const digestBoard = (board: Uint8Array): { sum: number; xor: number; len: number
 
 const toHex32 = (value: number): string => `0x${(value >>> 0).toString(16).padStart(8, '0')}`;
 
+const LOBBY_SEGMENTS: Role[] = ['white', 'spectator', 'black'];
+const LOBBY_SEGMENT_INDEX: Record<Role, number> = { white: 0, spectator: 1, black: 2 };
+
+const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+
+const parseLobbyRoster = (raw: any): LobbyRoster | null => {
+  const parsePerson = (input: any, fallbackSeat: Role): LobbyRosterPerson | null => {
+    if (!input || typeof input !== 'object') return null;
+    if (typeof input.connectionId !== 'string') return null;
+    const name = typeof input.name === 'string' ? input.name.trim().slice(0, 48) : '';
+    return {
+      connectionId: input.connectionId,
+      name: name || 'Player',
+      isGuest: Boolean(input.isGuest),
+      seat:
+        input.seat === 'black' || input.seat === 'white' || input.seat === 'spectator'
+          ? input.seat
+          : fallbackSeat,
+    };
+  };
+
+  const black = parsePerson(raw?.black, 'black');
+  const white = parsePerson(raw?.white, 'white');
+  const spectators = Array.isArray(raw?.spectators)
+    ? raw.spectators
+        .map((person: any) => parsePerson(person, 'spectator'))
+        .filter((person: LobbyRosterPerson | null): person is LobbyRosterPerson => Boolean(person))
+    : [];
+  return { black, white, spectators };
+};
+
+const buildFallbackLobbyRoster = (_presence: RoomPresence): LobbyRoster => ({
+  black: null,
+  white: null,
+  spectators: [],
+});
+
+type SeatSwipeControlProps = {
+  person: LobbyRosterPerson;
+  role: Role;
+  isHostControl: boolean;
+  reducedMotion: boolean;
+  onSeatCommit: (targetConnectionId: string, seat: Role) => void;
+};
+
+const SeatSwipeControl = ({ person, role, isHostControl, reducedMotion, onSeatCommit }: SeatSwipeControlProps) => {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const [dragOffsetPx, setDragOffsetPx] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStateRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startSeat: Role;
+    width: number;
+  } | null>(null);
+
+  const seat = person.seat;
+  const baseIndex = LOBBY_SEGMENT_INDEX[seat];
+  const segmentWidth = trackRef.current ? trackRef.current.clientWidth / 3 : 0;
+  const dragIndexOffset = segmentWidth > 0 ? dragOffsetPx / segmentWidth : 0;
+  const visualIndex = clamp(baseIndex + dragIndexOffset, 0, 2);
+  const knobLeftPercent = (visualIndex / 3) * 100;
+
+  const commitSeat = (nextSeat: Role) => {
+    if (!isHostControl) return;
+    if (nextSeat === seat) return;
+    onSeatCommit(person.connectionId, nextSeat);
+  };
+
+  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!isHostControl) return;
+    const track = trackRef.current;
+    if (!track) return;
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startSeat: seat,
+      width: Math.max(1, track.clientWidth),
+    };
+    setIsDragging(true);
+    setDragOffsetPx(0);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const delta = clamp(event.clientX - drag.startX, -drag.width, drag.width);
+    setDragOffsetPx(delta);
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const delta = event.clientX - drag.startX;
+    const dragSeatIndex = LOBBY_SEGMENT_INDEX[drag.startSeat];
+    const rawIndex = clamp(dragSeatIndex + delta / (drag.width / 3), 0, 2);
+    const nearest = Math.round(rawIndex) as 0 | 1 | 2;
+    const thresholdPx = Math.max(24, drag.width * 0.12);
+    const committedIndex = Math.abs(delta) < thresholdPx ? dragSeatIndex : nearest;
+    const nextSeat = LOBBY_SEGMENTS[committedIndex];
+    setIsDragging(false);
+    setDragOffsetPx(0);
+    dragStateRef.current = null;
+    commitSeat(nextSeat);
+  };
+
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gap: '8px',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <div style={{ fontSize: '13px', fontWeight: 700, color: '#34281d' }}>{person.name}</div>
+        {person.isGuest && (
+          <span
+            style={{
+              borderRadius: '999px',
+              padding: '2px 8px',
+              border: '1px solid #b7792a',
+              background: '#f6e0be',
+              color: '#704214',
+              fontSize: '11px',
+              fontWeight: 700,
+              letterSpacing: '0.4px',
+              textTransform: 'uppercase',
+            }}
+          >
+            Guest
+          </span>
+        )}
+      </div>
+      <div
+        ref={trackRef}
+        onPointerDown={startDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        role={isHostControl ? 'slider' : undefined}
+        aria-label={`${person.name} seat`}
+        aria-valuemin={0}
+        aria-valuemax={2}
+        aria-valuenow={LOBBY_SEGMENT_INDEX[seat]}
+        style={{
+          position: 'relative',
+          height: '42px',
+          borderRadius: '999px',
+          border: '1px solid #c8c0b3',
+          overflow: 'hidden',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 1fr)',
+          userSelect: 'none',
+          touchAction: isHostControl ? 'pan-y' : 'auto',
+          cursor: isHostControl ? (isDragging ? 'grabbing' : 'grab') : 'default',
+          background: '#d5d8dc',
+          boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.08)',
+          opacity: isHostControl || role === 'black' ? 1 : 0.92,
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => commitSeat('white')}
+          disabled={!isHostControl}
+          style={{ border: 0, margin: 0, padding: 0, background: '#f2f1ed', color: '#252628', fontWeight: 700 }}
+        >
+          White
+        </button>
+        <button
+          type="button"
+          onClick={() => commitSeat('spectator')}
+          disabled={!isHostControl}
+          style={{ border: 0, margin: 0, padding: 0, background: '#c9ced4', color: '#2d3135', fontWeight: 700 }}
+        >
+          Spectator
+        </button>
+        <button
+          type="button"
+          onClick={() => commitSeat('black')}
+          disabled={!isHostControl}
+          style={{ border: 0, margin: 0, padding: 0, background: '#191c22', color: '#f2f3f4', fontWeight: 700 }}
+        >
+          Black
+        </button>
+        <div
+          style={{
+            position: 'absolute',
+            top: '4px',
+            left: `calc(${knobLeftPercent}% + 4px)`,
+            width: 'calc(33.333% - 8px)',
+            height: '34px',
+            borderRadius: '999px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '0 8px',
+            fontSize: '12px',
+            fontWeight: 700,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            background: seat === 'black' ? '#0f1116' : seat === 'white' ? '#fdfdfc' : '#eceff2',
+            color: seat === 'black' ? '#f5f7fa' : '#22252a',
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.22)',
+            transition:
+              reducedMotion || isDragging
+                ? 'none'
+                : 'left 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease, opacity 180ms ease',
+            opacity: isDragging ? 0.98 : 1,
+            transform: isDragging ? 'scale(1.01)' : 'scale(1)',
+          }}
+        >
+          {person.name}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default function Game() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
@@ -389,6 +620,7 @@ export default function Game() {
   const sessionIdRef = useRef(`sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
   const wsConnIdRef = useRef(0);
   const msgSeqRef = useRef(0);
+  const stopReconnectRef = useRef(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [role, setRole] = useState<Role | null>(null);
   const roleRef = useRef<Role | null>(null);
@@ -417,6 +649,17 @@ export default function Game() {
     players: { black: 0, white: 0 },
     spectators: 0,
   });
+  const [roomRoster, setRoomRoster] = useState<LobbyRoster>(() =>
+    buildFallbackLobbyRoster({
+      players: { black: 0, white: 0 },
+      spectators: 0,
+    }),
+  );
+  const [selfConnectionId, setSelfConnectionId] = useState<string | null>(null);
+  const [selfIsHost, setSelfIsHost] = useState(false);
+  const [currentGameId, setCurrentGameId] = useState<string | null>(null);
+  const [presenceCollapsed, setPresenceCollapsed] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
   const [showEndModal, setShowEndModal] = useState(false);
   const [showSurrenderConfirm, setShowSurrenderConfirm] = useState(false);
   const [cancellingLobby, setCancellingLobby] = useState(false);
@@ -534,6 +777,32 @@ export default function Game() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const apply = () => setReducedMotion(media.matches);
+    apply();
+    media.addEventListener('change', apply);
+    return () => {
+      media.removeEventListener('change', apply);
+    };
+  }, []);
+
+  const presenceStorageKey = useMemo(
+    () => `game_presence_collapsed_${currentGameId ?? code ?? 'unknown'}`,
+    [currentGameId, code],
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = window.sessionStorage.getItem(presenceStorageKey);
+    if (stored === '1' || stored === '0') {
+      setPresenceCollapsed(stored === '1');
+      return;
+    }
+    setPresenceCollapsed(!isWideLayout);
+  }, [presenceStorageKey, isWideLayout]);
 
   const describeAction = (action: number) => {
     const unsigned = action >>> 0;
@@ -656,6 +925,13 @@ export default function Game() {
       return;
     }
 
+    if (role === 'spectator') {
+      if (uiStateRef.current.type !== 'idle') {
+        commitUiState({ type: 'idle' }, { idleReason: 'none' });
+      }
+      return;
+    }
+
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive && uiStateRef.current.type !== 'idle') {
       commitUiState({ type: 'idle' }, { idleReason: 'none' });
@@ -737,7 +1013,14 @@ export default function Game() {
   
   const baseTileStates = useMemo(() => {
     const baseStates: Array<'default' | 'selectable'> = new Array(121).fill('default');
-    if (!gameState || !cache || gameState.status === 'ended') return baseStates;
+    if (!gameState || !cache) return baseStates;
+
+    if (role === 'spectator') {
+      for (let i = 0; i < 121; i++) baseStates[i] = 'selectable';
+      return baseStates;
+    }
+
+    if (gameState.status === 'ended') return baseStates;
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive) return baseStates;
     
@@ -1050,6 +1333,7 @@ export default function Game() {
 
     const connect = async () => {
       try {
+        stopReconnectRef.current = false;
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.close();
         }
@@ -1164,6 +1448,9 @@ export default function Game() {
           role: seat,
           gameId,
         });
+        setCurrentGameId(gameId);
+        setSelfConnectionId(null);
+        setSelfIsHost(false);
         serverOffsetMsRef.current = null;
         bestRttMsRef.current = null;
         const ws = new WebSocket(wsUrl);
@@ -1183,6 +1470,17 @@ export default function Game() {
           }
           reconnectAttempts = 0;
           logGame('ws.open', { readyState: ws.readyState });
+          const identity = getStoredIdentity();
+          if (identity) {
+            ws.send(
+              JSON.stringify({
+                t: 'lobby_identify',
+                name: identity.name,
+                mode: identity.mode,
+                accountId: 'accountId' in identity ? identity.accountId ?? null : null,
+              }),
+            );
+          }
           sendTimeSync();
           timeSyncInterval = setInterval(sendTimeSync, 15000);
         };
@@ -1218,6 +1516,7 @@ export default function Game() {
                 roomStatus: message.roomStatus ?? null,
                 players: message.players ?? null,
                 spectators: message.spectators ?? null,
+                roster: message.roster ?? null,
               });
               const incomingSetupConfig = engine.normalizeSetupConfig(message.setup?.config ?? roomSettings.setupConfig);
               const incomingSelections: engine.SetupSelectionsBySide = {
@@ -1236,6 +1535,18 @@ export default function Game() {
                 rematch: message.rematch,
                 rematchReady: message.rematchReady,
               });
+              const parsedRoster = parseLobbyRoster(message.roster) ?? buildFallbackLobbyRoster({ players, spectators });
+              setRoomRoster(parsedRoster);
+              if (typeof message.selfConnectionId === 'string') {
+                setSelfConnectionId(message.selfConnectionId);
+              }
+              setSelfIsHost(Boolean(message.selfIsHost));
+              if (message.selfRole === 'black' || message.selfRole === 'white' || message.selfRole === 'spectator') {
+                setRole(message.selfRole);
+                if (code) {
+                  localStorage.setItem(`game_seat_${code}`, message.selfRole);
+                }
+              }
               if (message.roomStatus === 'lobby' || message.roomStatus === 'active' || message.roomStatus === 'ended') {
                 setRoomStatus(message.roomStatus);
               }
@@ -1247,6 +1558,12 @@ export default function Game() {
             } else if (message.t === 'start') {
               // Initial sync
               const snapshot: GameSnapshot = message.snapshot;
+              if (message.role === 'black' || message.role === 'white' || message.role === 'spectator') {
+                setRole(message.role);
+                if (code) {
+                  localStorage.setItem(`game_seat_${code}`, message.role);
+                }
+              }
               const nextRoomStatus = snapshot.roomStatus ?? 'active';
               const nextRoomSettings = normalizeRoomSettings(snapshot.roomSettings ?? DEFAULT_ROOM_SETTINGS);
               const nextSetupSelections = snapshot.setupSelections ?? { black: null, white: null };
@@ -1372,6 +1689,18 @@ export default function Game() {
               });
               const newValidator = new LegalBloomValidator(legalMsg.bloom, legalMsg.ply);
               setValidator(newValidator);
+            } else if (message.t === 'lobby_closed') {
+              stopReconnectRef.current = true;
+              if (code) {
+                localStorage.removeItem(`game_token_${code}`);
+                localStorage.removeItem(`game_id_${code}`);
+                localStorage.removeItem(`game_seat_${code}`);
+              }
+              setError('Lobby was closed.');
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.close();
+              }
+              navigate('/hub', { replace: true });
             } else if (message.t === 'error') {
               logGame('error.recv', {
                 message: message.message ?? null,
@@ -1518,7 +1847,9 @@ export default function Game() {
             setConnectionState('error');
             setError('WebSocket error');
           }
-          scheduleReconnect('error');
+          if (!stopReconnectRef.current) {
+            scheduleReconnect('error');
+          }
         };
 
         ws.onclose = (closeEvent) => {
@@ -1533,7 +1864,12 @@ export default function Game() {
           }
           if (mounted) {
             setConnectionState('disconnected');
-            scheduleReconnect('close');
+            if (closeEvent.reason === 'lobby_closed') {
+              stopReconnectRef.current = true;
+            }
+            if (!stopReconnectRef.current) {
+              scheduleReconnect('close');
+            }
           }
           if (timeSyncInterval) {
             clearInterval(timeSyncInterval);
@@ -1642,6 +1978,34 @@ export default function Game() {
     wsRef.current.send(JSON.stringify({ t: type }));
   };
 
+  const togglePresenceCollapsed = () => {
+    setPresenceCollapsed((prev) => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem(presenceStorageKey, next ? '1' : '0');
+      }
+      return next;
+    });
+  };
+
+  const sendLobbySeatCommand = (targetConnectionId: string, seat: Role) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+    if (!selfIsHost || roomStatus !== 'lobby') {
+      setError('Only the host can reassign seats in the lobby.');
+      return;
+    }
+    wsRef.current.send(
+      JSON.stringify({
+        t: 'lobby_set_seat',
+        targetConnectionId,
+        seat,
+      }),
+    );
+  };
+
   const sendSetupSelection = (hash: string, flip: boolean) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
@@ -1675,7 +2039,7 @@ export default function Game() {
       setError('Not connected');
       return;
     }
-    if (role !== 'black') {
+    if (!selfIsHost) {
       setError('Only the host can choose shared setup.');
       return;
     }
@@ -1968,7 +2332,8 @@ export default function Game() {
 
   const handleTileClick = (cid: number, d: number = 1) => {
     if (!gameState || !cache || gameState.status === 'ended') return;
-    
+    if (role === 'spectator') return;
+
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
     if (!isActive) return;
 
@@ -2575,7 +2940,8 @@ export default function Game() {
     // Determine clickable and highlighted tiles using UI backend
     // Use actual gameState for UI logic, not preview state
     const isActive = gameState.turn === (role === 'black' ? 0 : 1);
-    
+    const canInteractAsPlayer = role !== 'spectator' && isActive;
+
     // Always recalculate from scratch on every render to ensure no stale state
     // This ensures interactable tiles are properly cleaned up on state transitions
     // Initialize arrays fresh on every render - never reuse previous values
@@ -2837,6 +3203,8 @@ export default function Game() {
         hexagonState = 'selected';
       } else if (isInteractableTile) {
         hexagonState = 'interactable';
+      } else if (role === 'spectator' && isOpponentChangedTile) {
+        hexagonState = 'lastOpponentMove';
       } else {
         hexagonState = baseTileStates[cid] ?? 'default';
       }
@@ -2847,7 +3215,7 @@ export default function Game() {
       const tileInnerOffsetY = (Math.sqrt(3) / 2) * tileBorderWidth;
       const tileInnerWidth = outerHexWidth - tileBorderWidth * 2;
       const tileInnerHeight = outerHexHeight - Math.sqrt(3) * tileBorderWidth;
-      const isClickable = isActive && (
+      const isClickable = canInteractAsPlayer && (
         isSelectedTile ||
         isInteractableTile ||
         (uiState.type === 'idle' && baseTileStates[cid] === 'selectable')
@@ -2993,7 +3361,7 @@ export default function Game() {
               handleTileClick(cid, 1);
             } else if (uiState.type !== 'idle') {
               const canCancelAndReselect =
-                singleClickCancelReselectEnabled && isActive && baseTileStates[cid] === 'selectable';
+                singleClickCancelReselectEnabled && canInteractAsPlayer && baseTileStates[cid] === 'selectable';
               if (canCancelAndReselect) {
                 const nextFromIdle = getIdleSelectionState(cid);
                 if (nextFromIdle) {
@@ -3012,7 +3380,7 @@ export default function Game() {
               handleTileClick(cid, -1);
             } else if (uiState.type !== 'idle') {
               const canCancelAndReselect =
-                singleClickCancelReselectEnabled && isActive && baseTileStates[cid] === 'selectable';
+                singleClickCancelReselectEnabled && canInteractAsPlayer && baseTileStates[cid] === 'selectable';
               if (canCancelAndReselect) {
                 const nextFromIdle = getIdleSelectionState(cid);
                 if (nextFromIdle) {
@@ -3341,11 +3709,25 @@ export default function Game() {
   };
 
   const playersReady = roomPresence.players.black > 0 && roomPresence.players.white > 0;
+  const effectiveRoster = roomRoster ?? buildFallbackLobbyRoster(roomPresence);
+  const seatRows: Array<{ seat: 'black' | 'white'; person: LobbyRosterPerson | null }> = [
+    { seat: 'black', person: effectiveRoster.black },
+    { seat: 'white', person: effectiveRoster.white },
+  ];
+  const spectatorRows = effectiveRoster.spectators;
+  const rosterRowsForIdentity: LobbyRosterPerson[] = [
+    ...(effectiveRoster.black ? [effectiveRoster.black] : []),
+    ...(effectiveRoster.white ? [effectiveRoster.white] : []),
+    ...spectatorRows,
+  ];
+  const myRosterEntry =
+    selfConnectionId ? rosterRowsForIdentity.find((entry) => entry.connectionId === selfConnectionId) ?? null : null;
+  const seatsFilled = Boolean(effectiveRoster.black && effectiveRoster.white);
   const setupIssues = roomSetup.issues ?? [];
   const canHostStart =
     roomStatus === 'lobby' &&
-    role === 'black' &&
-    playersReady &&
+    selfIsHost &&
+    seatsFilled &&
     Boolean(roomPresence.canStart ?? setupIssues.length === 0);
   const rematchOffers = roomPresence.rematch ?? { black: false, white: false };
   const rematchReady = Boolean(roomPresence.rematchReady ?? (rematchOffers.black && rematchOffers.white));
@@ -3397,10 +3779,12 @@ export default function Game() {
     ? !(roomStatus === 'ended' && role !== 'spectator' && playersReady)
     : !canOfferRematch;
   const lobbyActionLabel =
-    role === 'black'
-      ? playersReady
+    selfIsHost
+      ? canHostStart
         ? 'Start Game'
-        : 'Waiting for opponent'
+        : seatsFilled
+        ? 'Waiting for players'
+        : 'Fill both seats'
       : 'Waiting for host';
 
   const contentPadding = isWideLayout ? '16px 20px 20px' : '8px 6px 10px';
@@ -4030,7 +4414,7 @@ export default function Game() {
           overflowX: roomStatus === 'lobby' ? 'hidden' : undefined,
           WebkitOverflowScrolling: roomStatus === 'lobby' ? 'touch' : undefined,
           display: 'grid',
-          gridTemplateColumns: isWideLayout ? '220px minmax(0, 1fr) 220px' : 'minmax(0, 1fr)',
+          gridTemplateColumns: isWideLayout ? 'minmax(0, 1fr) 220px' : 'minmax(0, 1fr)',
           gap: contentGap,
           padding: contentPadding,
         }}
@@ -4121,6 +4505,76 @@ export default function Game() {
 
             <div
               style={{
+                padding: '16px',
+                borderRadius: '12px',
+                border: '1px solid #d8cbb8',
+                background: '#fffaf0',
+                display: 'grid',
+                gap: '10px',
+              }}
+            >
+              <div
+                style={{
+                  fontSize: '11px',
+                  letterSpacing: '1.2px',
+                  textTransform: 'uppercase',
+                  color: '#7a6543',
+                  fontWeight: 700,
+                }}
+              >
+                Start
+              </div>
+              <button
+                onClick={() => sendRoomCommand('start_game')}
+                disabled={!canHostStart}
+                style={{
+                  padding: '12px 18px',
+                  borderRadius: '999px',
+                  border: '2px solid #6f5a38',
+                  background: canHostStart ? '#f2d9b2' : '#e6dccf',
+                  color: '#2a2218',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  cursor: canHostStart ? 'pointer' : 'not-allowed',
+                }}
+              >
+                {lobbyActionLabel}
+              </button>
+              {selfIsHost && roomStatus === 'lobby' && (
+                <button
+                  onClick={handleCancelLobby}
+                  disabled={cancellingLobby}
+                  style={{
+                    padding: '10px 16px',
+                    borderRadius: '999px',
+                    border: '2px solid #8b3b3b',
+                    background: cancellingLobby ? '#e6dccf' : '#f7d7d5',
+                    color: '#5c1c16',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: cancellingLobby ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {cancellingLobby ? 'Closing...' : 'Close lobby'}
+                </button>
+              )}
+              {!canHostStart && (
+                <div style={{ fontSize: '12px', color: '#7a6543' }}>
+                  {selfIsHost
+                    ? setupIssues.length > 0
+                      ? `Resolve setup issues before starting: ${setupIssues[0]?.message ?? 'invalid setup'}`
+                      : seatsFilled
+                      ? 'Both seated players must be connected before starting.'
+                      : 'Assign both Black and White seats before starting.'
+                    : 'Waiting for the host to start.'}
+                </div>
+              )}
+            </div>
+
+            <div
+              style={{
                 display: 'grid',
                 gridTemplateColumns: isWideLayout ? 'minmax(0, 1fr) minmax(0, 1fr)' : '1fr',
                 gap: '16px',
@@ -4147,57 +4601,97 @@ export default function Game() {
                 >
                   Presence
                 </div>
-                <div style={{ fontWeight: 700, color: '#3a2c1b', fontSize: '20px' }}>Players & Spectators</div>
-                <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
-                  <div>Black: {roomPresence.players.black > 0 ? 'Connected' : 'Waiting'}</div>
-                  <div>White: {roomPresence.players.white > 0 ? 'Connected' : 'Waiting'}</div>
-                  <div>Spectators: {roomPresence.spectators}</div>
+                <div style={{ fontWeight: 700, color: '#3a2c1b', fontSize: '20px' }}>
+                  {selfIsHost && roomStatus === 'lobby' ? 'Seat Manager' : 'Players & Spectators'}
                 </div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', color: '#5a4630', fontSize: '12px', fontWeight: 700 }}>
+                  <span>Black: {roomPresence.players.black > 0 ? 'Connected' : 'Waiting'}</span>
+                  <span>White: {roomPresence.players.white > 0 ? 'Connected' : 'Waiting'}</span>
+                  <span>Spectators: {roomPresence.spectators}</span>
+                </div>
+                {(!selfIsHost || role === 'spectator') && (
+                  <div style={{ fontSize: '12px', color: '#6a5842' }}>
+                    {myRosterEntry
+                      ? `You are ${myRosterEntry.seat === 'spectator' ? 'spectating' : `seated as ${myRosterEntry.seat}.`}`
+                      : role === 'spectator'
+                      ? 'You are spectating.'
+                      : `You are seated as ${role}.`}
+                  </div>
+                )}
                 <button
-                  onClick={() => sendRoomCommand('start_game')}
-                  disabled={!canHostStart}
+                  type="button"
+                  onClick={togglePresenceCollapsed}
                   style={{
-                    marginTop: '6px',
-                    padding: '12px 18px',
+                    justifySelf: 'start',
+                    padding: '6px 10px',
                     borderRadius: '999px',
-                    border: '2px solid #6f5a38',
-                    background: canHostStart ? '#f2d9b2' : '#e6dccf',
-                    color: '#2a2218',
+                    border: '1px solid #bfae94',
+                    background: '#f6efe2',
+                    color: '#4a3720',
+                    fontSize: '12px',
                     fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '1px',
-                    cursor: canHostStart ? 'pointer' : 'not-allowed',
+                    cursor: 'pointer',
                   }}
                 >
-                  {lobbyActionLabel}
+                  {presenceCollapsed ? 'Show roster' : 'Hide roster'}
                 </button>
-                {role === 'black' && roomStatus === 'lobby' && (
-                  <button
-                    onClick={handleCancelLobby}
-                    disabled={cancellingLobby}
-                    style={{
-                      marginTop: '10px',
-                      padding: '10px 16px',
-                      borderRadius: '999px',
-                      border: '2px solid #8b3b3b',
-                      background: cancellingLobby ? '#e6dccf' : '#f7d7d5',
-                      color: '#5c1c16',
-                      fontWeight: 700,
-                      textTransform: 'uppercase',
-                      letterSpacing: '1px',
-                      cursor: cancellingLobby ? 'not-allowed' : 'pointer',
-                    }}
-                  >
-                    {cancellingLobby ? 'Closing...' : 'Close lobby'}
-                  </button>
-                )}
-                {!canHostStart && (
-                  <div style={{ fontSize: '12px', color: '#7a6543' }}>
-                    {role === 'black'
-                      ? setupIssues.length > 0
-                        ? `Resolve setup issues before starting: ${setupIssues[0]?.message ?? 'invalid setup'}`
-                        : 'Both players must connect before starting.'
-                      : 'Waiting for the host to start.'}
+                {!presenceCollapsed && (
+                  <div style={{ display: 'grid', gap: '10px' }}>
+                    {seatRows.map(({ seat, person }) => (
+                      <div
+                        key={seat}
+                        style={{
+                          border: '1px solid #d5ccbe',
+                          borderRadius: '12px',
+                          padding: '10px',
+                          background: '#fffdf8',
+                          display: 'grid',
+                          gap: '8px',
+                        }}
+                      >
+                        <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#7a6543' }}>
+                          {seat === 'black' ? 'Black' : 'White'}
+                        </div>
+                        {person ? (
+                          <SeatSwipeControl
+                            person={person}
+                            role={role ?? 'spectator'}
+                            isHostControl={selfIsHost && roomStatus === 'lobby'}
+                            reducedMotion={reducedMotion}
+                            onSeatCommit={sendLobbySeatCommand}
+                          />
+                        ) : (
+                          <div style={{ fontSize: '13px', color: '#7a6543' }}>Empty seat</div>
+                        )}
+                      </div>
+                    ))}
+                    {spectatorRows.map((person) => (
+                      <div
+                        key={person.connectionId}
+                        style={{
+                          border: '1px solid #d5ccbe',
+                          borderRadius: '12px',
+                          padding: '10px',
+                          background: '#fffdf8',
+                          display: 'grid',
+                          gap: '8px',
+                        }}
+                      >
+                        <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#7a6543' }}>
+                          Spectator
+                        </div>
+                        <SeatSwipeControl
+                          person={person}
+                          role={role ?? 'spectator'}
+                          isHostControl={selfIsHost && roomStatus === 'lobby'}
+                          reducedMotion={reducedMotion}
+                          onSeatCommit={sendLobbySeatCommand}
+                        />
+                      </div>
+                    ))}
+                    {spectatorRows.length === 0 && (
+                      <div style={{ fontSize: '12px', color: '#7a6543' }}>No spectators connected.</div>
+                    )}
                   </div>
                 )}
               </div>
@@ -4227,7 +4721,7 @@ export default function Game() {
                   {roomSetup.config.mode === 'shared' && (
                     <div style={{ display: 'grid', gap: '8px' }}>
                       <div style={{ fontSize: '12px', fontWeight: 700, color: '#5a4630' }}>Shared setup selection</div>
-                      {role === 'black' ? (
+                      {selfIsHost ? (
                         <>
                           <SetupHashInput
                             value={lobbySetupHashInput}
@@ -4383,54 +4877,6 @@ export default function Game() {
           </div>
         ) : (
           <>
-        {isWideLayout && (
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '12px',
-              minHeight: 0,
-            }}
-          >
-            <button
-              onClick={() => submitCurrentAction()}
-              disabled={!canSubmit}
-              style={{
-                padding: '12px',
-                borderRadius: '12px',
-                border: '2px solid #183628',
-                background: canSubmit ? '#2f6b3f' : '#8ea593',
-                color: '#f7f3eb',
-                fontWeight: 700,
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-                cursor: canSubmit ? 'pointer' : 'not-allowed',
-                boxShadow: canSubmit ? '0 10px 18px rgba(24, 54, 40, 0.22)' : 'none',
-              }}
-            >
-              Submit Move
-            </button>
-            <button
-              onClick={handleSurrenderClick}
-              disabled={!canSendAction(surrenderAction)}
-              style={{
-                padding: '12px',
-                borderRadius: '12px',
-                border: '2px solid #5b2a2a',
-                background: canSendAction(surrenderAction) ? '#8b3b3b' : '#b9a2a2',
-                color: '#f8f1e7',
-                fontWeight: 700,
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-                cursor: canSendAction(surrenderAction) ? 'pointer' : 'not-allowed',
-              }}
-            >
-              {surrenderButtonLabel}
-            </button>
-            <div style={{ marginTop: 'auto' }}>{renderClockBox('black')}</div>
-          </div>
-        )}
-
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, gap: '12px' }}>
           <div
             style={{
@@ -4484,59 +4930,63 @@ export default function Game() {
 
           {!isWideLayout && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <button
-                onClick={() => submitCurrentAction()}
-                disabled={!canSubmit}
-                style={{
-                  padding: '12px',
-                  borderRadius: '12px',
-                  border: '2px solid #183628',
-                  background: canSubmit ? '#2f6b3f' : '#8ea593',
-                  color: '#f7f3eb',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '1px',
-                  cursor: canSubmit ? 'pointer' : 'not-allowed',
-                }}
-              >
-                Submit Move
-              </button>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                <button
-                  onClick={handleSurrenderClick}
-                  disabled={!canSendAction(surrenderAction)}
-                  style={{
-                    padding: '10px',
-                    borderRadius: '10px',
-                    border: '2px solid #5b2a2a',
-                    background: canSendAction(surrenderAction) ? '#8b3b3b' : '#b9a2a2',
-                    color: '#f8f1e7',
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '1px',
-                    cursor: canSendAction(surrenderAction) ? 'pointer' : 'not-allowed',
-                  }}
-                >
-                  {surrenderButtonLabel}
-                </button>
-                <button
-                  onClick={() => drawAction && sendAction(drawAction)}
-                  disabled={!canSendDrawAction}
-                  style={{
-                    padding: '10px',
-                    borderRadius: '10px',
-                    border: '2px solid #5a4a2f',
-                    background: canSendDrawAction ? '#c9a565' : '#d8c8ab',
-                    color: '#2a2218',
-                    fontWeight: 700,
-                    textTransform: 'uppercase',
-                    letterSpacing: '1px',
-                    cursor: canSendDrawAction ? 'pointer' : 'not-allowed',
-                  }}
-                >
-                  {drawButtonLabel}
-                </button>
-              </div>
+              {role !== 'spectator' && (
+                <>
+                  <button
+                    onClick={() => submitCurrentAction()}
+                    disabled={!canSubmit}
+                    style={{
+                      padding: '12px',
+                      borderRadius: '12px',
+                      border: '2px solid #183628',
+                      background: canSubmit ? '#2f6b3f' : '#8ea593',
+                      color: '#f7f3eb',
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      letterSpacing: '1px',
+                      cursor: canSubmit ? 'pointer' : 'not-allowed',
+                    }}
+                  >
+                    Submit Move
+                  </button>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    <button
+                      onClick={handleSurrenderClick}
+                      disabled={!canSendAction(surrenderAction)}
+                      style={{
+                        padding: '10px',
+                        borderRadius: '10px',
+                        border: '2px solid #5b2a2a',
+                        background: canSendAction(surrenderAction) ? '#8b3b3b' : '#b9a2a2',
+                        color: '#f8f1e7',
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        letterSpacing: '1px',
+                        cursor: canSendAction(surrenderAction) ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      {surrenderButtonLabel}
+                    </button>
+                    <button
+                      onClick={() => drawAction && sendAction(drawAction)}
+                      disabled={!canSendDrawAction}
+                      style={{
+                        padding: '10px',
+                        borderRadius: '10px',
+                        border: '2px solid #5a4a2f',
+                        background: canSendDrawAction ? '#c9a565' : '#d8c8ab',
+                        color: '#2a2218',
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        letterSpacing: '1px',
+                        cursor: canSendDrawAction ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      {drawButtonLabel}
+                    </button>
+                  </div>
+                </>
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                 {renderClockBox('black')}
                 {renderClockBox('white')}
@@ -4552,43 +5002,78 @@ export default function Game() {
               flexDirection: 'column',
               gap: '12px',
               minHeight: 0,
+              height: '100%',
+              alignSelf: 'stretch',
             }}
           >
-            <button
-              onClick={() => submitCurrentAction()}
-              disabled={!canSubmit}
+            {role !== 'spectator' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', flexShrink: 0 }}>
+                <button
+                  onClick={() => submitCurrentAction()}
+                  disabled={!canSubmit}
+                  style={{
+                    padding: '12px',
+                    borderRadius: '12px',
+                    border: '2px solid #183628',
+                    background: canSubmit ? '#2f6b3f' : '#8ea593',
+                    color: '#f7f3eb',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: canSubmit ? 'pointer' : 'not-allowed',
+                    boxShadow: canSubmit ? '0 10px 18px rgba(24, 54, 40, 0.22)' : 'none',
+                  }}
+                >
+                  Submit Move
+                </button>
+                <button
+                  onClick={() => drawAction && sendAction(drawAction)}
+                  disabled={!canSendDrawAction}
+                  style={{
+                    padding: '12px',
+                    borderRadius: '12px',
+                    border: '2px solid #5a4a2f',
+                    background: canSendDrawAction ? '#c9a565' : '#d8c8ab',
+                    color: '#2a2218',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: canSendDrawAction ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {drawButtonLabel}
+                </button>
+                <button
+                  onClick={handleSurrenderClick}
+                  disabled={!canSendAction(surrenderAction)}
+                  style={{
+                    padding: '12px',
+                    borderRadius: '12px',
+                    border: '2px solid #5b2a2a',
+                    background: canSendAction(surrenderAction) ? '#8b3b3b' : '#b9a2a2',
+                    color: '#f8f1e7',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    cursor: canSendAction(surrenderAction) ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {surrenderButtonLabel}
+                </button>
+              </div>
+            )}
+            <div
               style={{
-                padding: '12px',
-                borderRadius: '12px',
-                border: '2px solid #183628',
-                background: canSubmit ? '#2f6b3f' : '#8ea593',
-                color: '#f7f3eb',
-                fontWeight: 700,
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-                cursor: canSubmit ? 'pointer' : 'not-allowed',
+                marginTop: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '12px',
+                flexShrink: 0,
               }}
             >
-              Submit Move
-            </button>
-            <button
-              onClick={() => drawAction && sendAction(drawAction)}
-              disabled={!canSendDrawAction}
-              style={{
-                padding: '12px',
-                borderRadius: '12px',
-                border: '2px solid #5a4a2f',
-                background: canSendDrawAction ? '#c9a565' : '#d8c8ab',
-                color: '#2a2218',
-                fontWeight: 700,
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-                cursor: canSendDrawAction ? 'pointer' : 'not-allowed',
-              }}
-            >
-              {drawButtonLabel}
-            </button>
-            <div style={{ marginTop: 'auto' }}>{renderClockBox('white')}</div>
+              {renderClockBox('black')}
+              {renderClockBox('white')}
+            </div>
           </div>
         )}
           </>
@@ -4606,5 +5091,4 @@ function formatTime(ms: number): string {
   const seconds = totalSeconds % 60;
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
-
 

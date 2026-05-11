@@ -509,7 +509,7 @@ export default function Home() {
       }
       localStorage.setItem(`game_token_${data.code}`, data.token);
       localStorage.setItem(`game_id_${data.code}`, data.gameId);
-      localStorage.setItem(`game_seat_${data.code}`, 'black');
+      localStorage.setItem(`game_seat_${data.code}`, data.seat ?? 'spectator');
       navigate(`/game/${data.code}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');

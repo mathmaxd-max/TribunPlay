@@ -29,7 +29,7 @@ export class GameActiveForAccount extends OpenAPIRoute {
               code: z.string().nullable(),
               gameId: z.string().nullable(),
               status: z.string().nullable(),
-              seat: z.enum(["black", "white"]).nullable(),
+              seat: z.enum(["black", "white", "spectator"]).nullable(),
             }),
           },
         },
@@ -52,26 +52,34 @@ export class GameActiveForAccount extends OpenAPIRoute {
     const accountId = resolvedIdentity.accountId;
     const row = await env.DB
       .prepare(
-        `SELECT g.id, g.code, g.status, gp.seat
+        `SELECT
+           g.id,
+           g.code,
+           g.status,
+           gp.seat,
+           COALESCE(g.host_account_id, g.black_player_id) AS host_account_id
          FROM games g
-         INNER JOIN game_participants gp ON gp.game_id = g.id
+         LEFT JOIN game_participants gp ON gp.game_id = g.id AND gp.account_id = ?
          WHERE g.status IN ('lobby', 'active')
-           AND gp.account_id = ?
+           AND (gp.account_id = ? OR COALESCE(g.host_account_id, g.black_player_id) = ?)
          ORDER BY g.created_at DESC
          LIMIT 1`,
       )
-      .bind(accountId)
+      .bind(accountId, accountId, accountId)
       .first<{
         id: string;
         code: string;
         status: string;
-        seat: "black" | "white";
+        seat: "black" | "white" | null;
+        host_account_id: string | null;
       }>();
 
     if (!row) {
       return { code: null, gameId: null, status: null, seat: null };
     }
 
-    return { code: row.code, gameId: row.id, status: row.status, seat: row.seat };
+    const seat: "black" | "white" | "spectator" =
+      row.seat === "black" || row.seat === "white" ? row.seat : "spectator";
+    return { code: row.code, gameId: row.id, status: row.status, seat };
   }
 }

@@ -94,11 +94,12 @@ export class GameCreate extends OpenAPIRoute {
             schema: z.object({
               gameId: Str(),
               code: Str(),
+              seat: z.enum(["black", "white", "spectator"]),
               token: Str(),
               wsUrl: Str(),
               participant: z.object({
                 accountId: Str(),
-                seat: z.literal("black"),
+                seat: z.enum(["black", "white", "spectator"]),
                 name: Str(),
                 email: z.string().nullable(),
                 mode: z.enum(["guest", "token"]),
@@ -159,11 +160,15 @@ export class GameCreate extends OpenAPIRoute {
       .prepare(
         `SELECT code FROM games
          WHERE status IN ('lobby', 'active')
-           AND (black_player_id = ? OR white_player_id = ?)
+           AND (
+             black_player_id = ?
+             OR white_player_id = ?
+             OR COALESCE(host_account_id, black_player_id) = ?
+           )
          ORDER BY created_at DESC
          LIMIT 1`,
       )
-      .bind(resolvedIdentity.accountId, resolvedIdentity.accountId)
+      .bind(resolvedIdentity.accountId, resolvedIdentity.accountId, resolvedIdentity.accountId)
       .first<{ code: string }>();
     if (existing?.code) {
       return c.json({ error: "You are already in an ongoing game.", code: existing.code }, 409);
@@ -280,8 +285,8 @@ export class GameCreate extends OpenAPIRoute {
         .prepare(
           `INSERT INTO games (
             id, code, status, created_at, initial_turn, turn, initial_board, ply,
-            time_control_json, room_settings_json, setup_state_json, starting_player_color, black_player_id, black_token
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            time_control_json, room_settings_json, setup_state_json, starting_player_color, host_account_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           gameId,
@@ -297,25 +302,6 @@ export class GameCreate extends OpenAPIRoute {
           JSON.stringify(setupSelections),
           0,
           resolvedIdentity.accountId,
-          token,
-        ),
-      env.DB
-        .prepare(
-          `INSERT INTO game_participants (game_id, seat, account_id, name, email, created_at, updated_at)
-           VALUES (?, 'black', ?, ?, ?, ?, ?)
-           ON CONFLICT(game_id, seat) DO UPDATE SET
-             account_id = excluded.account_id,
-             name = excluded.name,
-             email = excluded.email,
-             updated_at = excluded.updated_at`
-        )
-        .bind(
-          gameId,
-          resolvedIdentity.accountId,
-          resolvedIdentity.name,
-          resolvedIdentity.email,
-          nowIso,
-          nowIso,
         ),
     ]);
 
@@ -329,11 +315,12 @@ export class GameCreate extends OpenAPIRoute {
     return {
       gameId,
       code,
+      seat: "spectator" as const,
       token,
       wsUrl,
       participant: {
         accountId: resolvedIdentity.accountId,
-        seat: "black" as const,
+        seat: "spectator" as const,
         name: resolvedIdentity.name,
         email: resolvedIdentity.email,
         mode: resolvedIdentity.mode,

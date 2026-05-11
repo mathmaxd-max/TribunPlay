@@ -54,6 +54,7 @@ export class GameCancel extends OpenAPIRoute {
         `SELECT
            g.id,
            g.status,
+           COALESCE(g.host_account_id, g.black_player_id) AS host_account_id,
            g.black_player_id,
            black_account.provider AS black_provider,
            white_account.provider AS white_provider
@@ -66,6 +67,7 @@ export class GameCancel extends OpenAPIRoute {
       .first<{
         id: string;
         status: string;
+        host_account_id: string | null;
         black_player_id: string | null;
         black_provider: string | null;
         white_provider: string | null;
@@ -77,7 +79,7 @@ export class GameCancel extends OpenAPIRoute {
     if (game.status !== "lobby") {
       return c.json({ error: "Game is not cancellable" }, 400);
     }
-    if (!game.black_player_id || game.black_player_id !== resolvedIdentity.accountId) {
+    if (!game.host_account_id || game.host_account_id !== resolvedIdentity.accountId) {
       return c.json({ error: "Only the host can cancel this lobby" }, 403);
     }
 

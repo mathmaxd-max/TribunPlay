@@ -15,6 +15,27 @@ type RoomSettings = {
 	nextStartColor: "same" | "other" | "random";
 	setupConfig: engine.SetupConfig;
 };
+type ConnectionRole = "black" | "white" | "spectator";
+type LobbyAccountMode = "guest" | "token" | null;
+type LobbyPerson = {
+	connectionId: string;
+	name: string;
+	isGuest: boolean;
+	seat: ConnectionRole;
+};
+type ConnectionEntry = {
+	ws: WebSocket;
+	role: ConnectionRole;
+	token: string;
+	displayName: string;
+	isGuest: boolean;
+	accountMode: LobbyAccountMode;
+	accountId: string | null;
+};
+// Guest-host abandonment policy:
+// if the last WS connection belonging to host_account_id disappears while roomStatus === "lobby",
+// the lobby is purged after a short grace period to tolerate refresh/reconnect gaps.
+const GUEST_HOST_ABANDONMENT_GRACE_MS = 8000;
 
 const DEFAULT_TIME_CONTROL: TimeControl = {
 	initialMs: { black: 300000, white: 300000 },
@@ -146,9 +167,14 @@ export class GameRoom implements DurableObject {
 	private initialBoard: Uint8Array | null = null;
 	private currentStartColor: engine.Color | null = null;
 	private rematchOffers: { black: boolean; white: boolean } = { black: false, white: false };
+	private hostAccountId: string | null = null;
+	private hostIsGuest: boolean = false;
+	private guestHostCleanupDeadlineMs: number | null = null;
+	private lobbyWasDeleted = false;
+	private closingLobbySockets = false;
 	
 	// Connected clients (players + spectators)
-	private connections: Map<string, { ws: WebSocket; role: "black" | "white" | "spectator"; token: string }> = new Map();
+	private connections: Map<string, ConnectionEntry> = new Map();
 	
 	// Player seating
 	private players: {
@@ -195,6 +221,329 @@ export class GameRoom implements DurableObject {
 		};
 	}
 
+	private hasHostConnectionOnline(): boolean {
+		if (!this.hostAccountId) return false;
+		for (const conn of this.connections.values()) {
+			if (conn.accountId === this.hostAccountId) return true;
+		}
+		return false;
+	}
+
+	private isHostConnection(conn: ConnectionEntry | null | undefined): boolean {
+		if (!conn || !this.hostAccountId || !conn.accountId) return false;
+		return conn.accountId === this.hostAccountId;
+	}
+
+	private async updateGuestHostAbandonmentPolicy(trigger: string): Promise<void> {
+		if (this.roomStatus !== "lobby" || !this.hostAccountId || !this.hostIsGuest || this.lobbyWasDeleted) {
+			if (this.guestHostCleanupDeadlineMs !== null) {
+				this.guestHostCleanupDeadlineMs = null;
+				this.logGame("host.guest_cleanup.cancel", { trigger, reason: "policy_not_applicable" });
+			}
+			await this.scheduleNextAlarm();
+			return;
+		}
+
+		if (this.hasHostConnectionOnline()) {
+			if (this.guestHostCleanupDeadlineMs !== null) {
+				this.logGame("host.guest_cleanup.cancel", { trigger, reason: "host_online" });
+			}
+			this.guestHostCleanupDeadlineMs = null;
+			await this.scheduleNextAlarm();
+			return;
+		}
+
+		if (this.guestHostCleanupDeadlineMs === null) {
+			this.guestHostCleanupDeadlineMs = Date.now() + GUEST_HOST_ABANDONMENT_GRACE_MS;
+			this.logGame("host.guest_cleanup.scheduled", {
+				trigger,
+				deadlineMs: this.guestHostCleanupDeadlineMs,
+				graceMs: GUEST_HOST_ABANDONMENT_GRACE_MS,
+			});
+		}
+		await this.scheduleNextAlarm();
+	}
+
+	private closeAllLobbySockets(reason: string): void {
+		if (this.closingLobbySockets) return;
+		this.closingLobbySockets = true;
+		const payload = JSON.stringify({ t: "lobby_closed", reason });
+		for (const conn of this.connections.values()) {
+			if (conn.ws.readyState === 1) {
+				try {
+					conn.ws.send(payload);
+				} catch {}
+				try {
+					conn.ws.close(1000, "lobby_closed");
+				} catch {}
+			}
+		}
+	}
+
+	private async purgeGuestHostAbandonedLobby(trigger: string): Promise<boolean> {
+		if (this.roomStatus !== "lobby" || !this.hostAccountId || !this.hostIsGuest || this.lobbyWasDeleted) {
+			return false;
+		}
+		if (this.hasHostConnectionOnline()) {
+			this.guestHostCleanupDeadlineMs = null;
+			return false;
+		}
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+		await this.env.DB.batch([
+			this.env.DB.prepare("DELETE FROM game_actions WHERE game_id = ?").bind(this.gameId),
+			this.env.DB.prepare("DELETE FROM game_participants WHERE game_id = ?").bind(this.gameId),
+			this.env.DB.prepare("DELETE FROM games WHERE id = ?").bind(this.gameId),
+		]);
+		this.lobbyWasDeleted = true;
+		this.guestHostCleanupDeadlineMs = null;
+		this.logGame("host.guest_cleanup.purged", { trigger });
+		this.closeAllLobbySockets("guest_host_abandoned");
+		return true;
+	}
+
+	private normalizeLobbyName(name: string | null | undefined, fallback: string): string {
+		if (typeof name !== "string") return fallback;
+		const compact = name.trim().replace(/\s+/g, " ").slice(0, 48);
+		return compact || fallback;
+	}
+
+	private async resolveSeatIdentity(seat: "black" | "white"): Promise<{
+		accountId: string | null;
+		name: string;
+		isGuest: boolean;
+		accountMode: LobbyAccountMode;
+	}> {
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+		const row = await this.env.DB
+			.prepare(
+				`SELECT
+				   g.black_player_id,
+				   g.white_player_id,
+				   black_participant.name AS black_participant_name,
+				   white_participant.name AS white_participant_name,
+				   black_account.name AS black_account_name,
+				   white_account.name AS white_account_name,
+				   black_account.provider AS black_provider,
+				   white_account.provider AS white_provider
+				 FROM games g
+				 LEFT JOIN game_participants black_participant
+				   ON black_participant.game_id = g.id AND black_participant.seat = 'black'
+				 LEFT JOIN game_participants white_participant
+				   ON white_participant.game_id = g.id AND white_participant.seat = 'white'
+				 LEFT JOIN accounts black_account ON black_account.id = g.black_player_id
+				 LEFT JOIN accounts white_account ON white_account.id = g.white_player_id
+				 WHERE g.id = ?`,
+			)
+			.bind(this.gameId)
+			.first<{
+				black_player_id: string | null;
+				white_player_id: string | null;
+				black_participant_name: string | null;
+				white_participant_name: string | null;
+				black_account_name: string | null;
+				white_account_name: string | null;
+				black_provider: string | null;
+				white_provider: string | null;
+			}>();
+
+		if (!row) {
+			const fallback = seat === "black" ? "Black Player" : "White Player";
+			return { accountId: null, name: fallback, isGuest: false, accountMode: null };
+		}
+
+		if (seat === "black") {
+			const fallback = "Black Player";
+			return {
+				accountId: row.black_player_id,
+				name: this.normalizeLobbyName(row.black_participant_name ?? row.black_account_name, fallback),
+				isGuest: row.black_provider === "guest",
+				accountMode: row.black_provider === "guest" ? "guest" : row.black_provider ? "token" : null,
+			};
+		}
+		return {
+			accountId: row.white_player_id,
+			name: this.normalizeLobbyName(row.white_participant_name ?? row.white_account_name, "White Player"),
+			isGuest: row.white_provider === "guest",
+			accountMode: row.white_provider === "guest" ? "guest" : row.white_provider ? "token" : null,
+		};
+	}
+
+	private async hydrateConnectionIdentity(connectionId: string): Promise<void> {
+		const conn = this.connections.get(connectionId);
+		if (!conn) return;
+		if (conn.role !== "black" && conn.role !== "white") return;
+		const seatIdentity = await this.resolveSeatIdentity(conn.role);
+		const fallback = conn.role === "black" ? "Black Player" : "White Player";
+		conn.displayName = this.normalizeLobbyName(seatIdentity.name, fallback);
+		conn.isGuest = seatIdentity.isGuest;
+		conn.accountMode = seatIdentity.accountMode;
+		conn.accountId = seatIdentity.accountId;
+	}
+
+	private findPrimaryConnectionByRole(role: ConnectionRole): [string, ConnectionEntry] | null {
+		for (const entry of this.connections.entries()) {
+			if (entry[1].role === role) return entry;
+		}
+		return null;
+	}
+
+	private getConnectionRole(connectionId: string): ConnectionRole | null {
+		return this.connections.get(connectionId)?.role ?? null;
+	}
+
+	private getRoomRoster(): { black: LobbyPerson | null; white: LobbyPerson | null; spectators: LobbyPerson[] } {
+		let black: LobbyPerson | null = null;
+		let white: LobbyPerson | null = null;
+		const spectators: LobbyPerson[] = [];
+		for (const [connectionId, conn] of this.connections.entries()) {
+			const person: LobbyPerson = {
+				connectionId,
+				name: this.normalizeLobbyName(conn.displayName, conn.role === "spectator" ? "Spectator" : `${conn.role} player`),
+				isGuest: Boolean(conn.isGuest),
+				seat: conn.role,
+			};
+			if (conn.role === "black" && !black) {
+				black = person;
+			} else if (conn.role === "white" && !white) {
+				white = person;
+			} else {
+				spectators.push({ ...person, seat: "spectator" });
+			}
+		}
+		return { black, white, spectators };
+	}
+
+	private async resolveAccountSnapshot(accountId: string): Promise<{ name: string; email: string | null; isGuest: boolean } | null> {
+		const row = await this.env.DB
+			.prepare("SELECT name, email, provider FROM accounts WHERE id = ?")
+			.bind(accountId)
+			.first<{ name: string; email: string | null; provider: string }>();
+		if (!row) return null;
+		return {
+			name: this.normalizeLobbyName(row.name, "Player"),
+			email: row.email ?? null,
+			isGuest: row.provider === "guest",
+		};
+	}
+
+	private async assignLobbySeat(targetConnectionId: string, seat: ConnectionRole): Promise<void> {
+		const target = this.connections.get(targetConnectionId);
+		if (!target) {
+			throw new Error("Target participant is not connected");
+		}
+		if (target.role === seat) return;
+		if ((seat === "black" || seat === "white") && !target.accountId) {
+			throw new Error("Target participant is not identified yet");
+		}
+
+		const nextRoles = new Map<string, ConnectionRole>();
+		for (const [id, conn] of this.connections.entries()) {
+			nextRoles.set(id, conn.role);
+		}
+		nextRoles.set(targetConnectionId, seat);
+		if (seat === "black") {
+			const currentBlack = this.findPrimaryConnectionByRole("black");
+			if (currentBlack && currentBlack[0] !== targetConnectionId) {
+				nextRoles.set(currentBlack[0], "spectator");
+			}
+		}
+		if (seat === "white") {
+			const currentWhite = this.findPrimaryConnectionByRole("white");
+			if (currentWhite && currentWhite[0] !== targetConnectionId) {
+				nextRoles.set(currentWhite[0], "spectator");
+			}
+		}
+
+		let nextBlackId: string | null = null;
+		let nextWhiteId: string | null = null;
+		for (const [id, role] of nextRoles.entries()) {
+			if (role === "black" && !nextBlackId) nextBlackId = id;
+			if (role === "white" && !nextWhiteId) nextWhiteId = id;
+		}
+
+		const blackConn = nextBlackId ? this.connections.get(nextBlackId) ?? null : null;
+		const whiteConn = nextWhiteId ? this.connections.get(nextWhiteId) ?? null : null;
+		if (blackConn && !blackConn.accountId) {
+			throw new Error("Black seat requires an identified participant");
+		}
+		if (whiteConn && !whiteConn.accountId) {
+			throw new Error("White seat requires an identified participant");
+		}
+
+		const blackAccount =
+			blackConn?.accountId ? await this.resolveAccountSnapshot(blackConn.accountId) : null;
+		if (blackConn?.accountId && !blackAccount) throw new Error("Failed to resolve black player account");
+		const whiteAccount =
+			whiteConn?.accountId ? await this.resolveAccountSnapshot(whiteConn.accountId) : null;
+		if (whiteConn?.accountId && !whiteAccount) {
+			throw new Error("Failed to resolve white player account");
+		}
+
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+		const nowIso = new Date().toISOString();
+		const statements = [
+			this.env.DB
+				.prepare(
+					"UPDATE games SET black_player_id = ?, black_token = ?, white_player_id = ?, white_token = ? WHERE id = ?",
+				)
+				.bind(
+					blackConn?.accountId ?? null,
+					blackConn?.token ?? null,
+					whiteConn?.accountId ?? null,
+					whiteConn?.token ?? null,
+					this.gameId,
+				),
+			this.env.DB.prepare("DELETE FROM game_participants WHERE game_id = ? AND seat = 'black'").bind(this.gameId),
+			this.env.DB.prepare("DELETE FROM game_participants WHERE game_id = ? AND seat = 'white'").bind(this.gameId),
+		];
+		if (blackConn?.accountId && blackAccount) {
+			statements.push(
+				this.env.DB
+					.prepare(
+						`INSERT INTO game_participants (game_id, seat, account_id, name, email, created_at, updated_at)
+						 VALUES (?, 'black', ?, ?, ?, ?, ?)`,
+					)
+					.bind(this.gameId, blackConn.accountId, blackAccount.name, blackAccount.email, nowIso, nowIso),
+			);
+		}
+		if (whiteConn?.accountId && whiteAccount) {
+			statements.push(
+				this.env.DB
+					.prepare(
+						`INSERT INTO game_participants (game_id, seat, account_id, name, email, created_at, updated_at)
+						 VALUES (?, 'white', ?, ?, ?, ?, ?)`,
+					)
+					.bind(this.gameId, whiteConn.accountId, whiteAccount.name, whiteAccount.email, nowIso, nowIso),
+			);
+		}
+		await this.env.DB.batch(statements);
+
+		for (const [id, role] of nextRoles.entries()) {
+			const conn = this.connections.get(id);
+			if (conn) conn.role = role;
+		}
+		await Promise.all(
+			Array.from(this.connections.entries()).map(async ([id, conn]) => {
+				if (conn.role === "black" || conn.role === "white") {
+					await this.hydrateConnectionIdentity(id);
+				}
+			}),
+		);
+		if (blackConn) this.players.black = { token: blackConn.token };
+		else delete this.players.black;
+		if (whiteConn) this.players.white = { token: whiteConn.token };
+		else delete this.players.white;
+
+		this.rematchOffers = { black: false, white: false };
+		await this.updateGuestHostAbandonmentPolicy("assignLobbySeat");
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		// Handle WebSocket upgrade
 		const upgradeHeader = request.headers.get("Upgrade");
@@ -231,19 +580,31 @@ export class GameRoom implements DurableObject {
 		this.gameId = gameId;
 		
 		const game = await this.env.DB.prepare(
-			"SELECT black_token, white_token, status FROM games WHERE id = ?"
+			`SELECT
+			   black_token,
+			   white_token,
+			   status,
+			   COALESCE(games.host_account_id, games.black_player_id) AS host_account_id,
+			   host_account.provider AS host_provider
+			 FROM games
+			 LEFT JOIN accounts host_account ON host_account.id = COALESCE(games.host_account_id, games.black_player_id)
+			 WHERE games.id = ?`
 		).bind(gameId).first<{
 			black_token: string | null;
 			white_token: string | null;
 			status: string;
+			host_account_id: string | null;
+			host_provider: string | null;
 		}>();
 		
 		if (!game) {
 			ws.close(1008, "Game not found");
 			return;
 		}
+		this.hostAccountId = game.host_account_id;
+		this.hostIsGuest = game.host_provider === "guest";
 		
-		let role: "black" | "white" | "spectator";
+		let role: ConnectionRole;
 		if (token === game.black_token) {
 			role = "black";
 			this.players.black = { token };
@@ -254,7 +615,16 @@ export class GameRoom implements DurableObject {
 			role = "spectator";
 		}
 		
-		this.connections.set(connectionId, { ws, role, token });
+		this.connections.set(connectionId, {
+			ws,
+			role,
+			token,
+			displayName: role === "black" ? "Black Player" : role === "white" ? "White Player" : "Spectator",
+			isGuest: false,
+			accountMode: null,
+			accountId: null,
+		});
+		await this.hydrateConnectionIdentity(connectionId);
 		ws.accept();
 		this.logGame("ws.accept", {
 			connectionId,
@@ -266,6 +636,7 @@ export class GameRoom implements DurableObject {
 		await this.loadGameState();
 		await this.sendSync(ws, role);
 		this.broadcastRoomUpdate();
+		await this.updateGuestHostAbandonmentPolicy("ws.connect");
 
 		// Handle incoming messages
 		ws.addEventListener("message", async (event) => {
@@ -275,17 +646,18 @@ export class GameRoom implements DurableObject {
 					const message = JSON.parse(event.data);
 					// `time_sync` is expected to be frequent; logging it spams server logs.
 					const messageType = message?.t ?? null;
+					const currentRole = this.getConnectionRole(connectionId) ?? role;
 					if (messageType !== "time_sync") {
 						this.logGame("ws.message.inbound", {
 							connectionId,
-							role,
+							role: currentRole,
 							dataType: typeof event.data,
 							ctor: (event.data as any)?.constructor?.name ?? null,
 							byteLength: null,
 						});
 						this.logGame("ws.message.json", {
 							connectionId,
-							role,
+							role: currentRole,
 							type: messageType,
 						});
 					}
@@ -295,9 +667,10 @@ export class GameRoom implements DurableObject {
 					ArrayBuffer.isView(event.data) ||
 					event.data instanceof Blob
 				) {
+					const currentRole = this.getConnectionRole(connectionId) ?? role;
 					this.logGame("ws.message.inbound", {
 						connectionId,
-						role,
+						role: currentRole,
 						dataType: typeof event.data,
 						ctor: (event.data as any)?.constructor?.name ?? null,
 						byteLength:
@@ -327,39 +700,41 @@ export class GameRoom implements DurableObject {
 						const actionWord = view.getUint32(0, true); // little-endian
 						this.logGame("ws.message.action", {
 							connectionId,
-							role,
+							role: currentRole,
 							...this.describeAction(actionWord),
 							ply: this.gameState?.ply ?? null,
 						});
-						await this.handleActionWord(connectionId, actionWord, ws, role);
+						await this.handleActionWord(connectionId, actionWord, ws);
 					} else {
 						this.logGame("ws.message.ignored", {
 							connectionId,
-							role,
+							role: currentRole,
 							dataType: typeof event.data,
 							ctor: (event.data as any)?.constructor?.name ?? null,
 							reason: "binary_length_not_4",
 						});
 					}
 				} else {
+					const currentRole = this.getConnectionRole(connectionId) ?? role;
 					this.logGame("ws.message.inbound", {
 						connectionId,
-						role,
+						role: currentRole,
 						dataType: typeof event.data,
 						ctor: (event.data as any)?.constructor?.name ?? null,
 						byteLength: null,
 					});
 					this.logGame("ws.message.ignored", {
 						connectionId,
-						role,
+						role: currentRole,
 						dataType: typeof event.data,
 						ctor: (event.data as any)?.constructor?.name ?? null,
 					});
 				}
 			} catch (error) {
+				const currentRole = this.getConnectionRole(connectionId) ?? role;
 				this.logGame("ws.message.error", {
 					connectionId,
-					role,
+					role: currentRole,
 					error: error instanceof Error ? error.message : String(error),
 				});
 				this.sendError(ws, error instanceof Error ? error.message : "Unknown error");
@@ -367,15 +742,20 @@ export class GameRoom implements DurableObject {
 		});
 
 		ws.addEventListener("close", (event) => {
+			const currentRole = this.getConnectionRole(connectionId) ?? role;
 			this.connections.delete(connectionId);
 			this.logGame("ws.close", {
 				connectionId,
-				role,
+				role: currentRole,
 				code: event.code,
 				reason: event.reason,
 				wasClean: event.wasClean,
 			});
+			if (this.closingLobbySockets) {
+				return;
+			}
 			this.broadcastRoomUpdate();
+			void this.updateGuestHostAbandonmentPolicy("ws.close");
 			if (this.roomStatus === "ended") {
 				void this.purgeGuestOnlyHistoryIfRequired("ws.close");
 			}
@@ -399,12 +779,18 @@ export class GameRoom implements DurableObject {
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
 		const game = await this.env.DB.prepare(
 			supportsBlocked
-				? `SELECT status, initial_board, initial_turn, turn, ply, draw_offer_by, draw_offer_blocked,
-			        time_control_json, room_settings_json, setup_state_json, clock_black_ms, clock_white_ms, created_at, started_at
-			 FROM games WHERE id = ?`
-				: `SELECT status, initial_board, initial_turn, turn, ply, draw_offer_by,
-			        time_control_json, room_settings_json, setup_state_json, clock_black_ms, clock_white_ms, created_at, started_at
-			 FROM games WHERE id = ?`
+				? `SELECT games.status, games.initial_board, games.initial_turn, games.turn, games.ply, games.draw_offer_by, games.draw_offer_blocked,
+			        COALESCE(games.host_account_id, games.black_player_id) AS host_account_id, host_account.provider AS host_provider,
+			        games.time_control_json, games.room_settings_json, games.setup_state_json, games.clock_black_ms, games.clock_white_ms, games.created_at, games.started_at
+			 FROM games
+			 LEFT JOIN accounts host_account ON host_account.id = COALESCE(games.host_account_id, games.black_player_id)
+			 WHERE games.id = ?`
+				: `SELECT games.status, games.initial_board, games.initial_turn, games.turn, games.ply, games.draw_offer_by,
+			        COALESCE(games.host_account_id, games.black_player_id) AS host_account_id, host_account.provider AS host_provider,
+			        games.time_control_json, games.room_settings_json, games.setup_state_json, games.clock_black_ms, games.clock_white_ms, games.created_at, games.started_at
+			 FROM games
+			 LEFT JOIN accounts host_account ON host_account.id = COALESCE(games.host_account_id, games.black_player_id)
+			 WHERE games.id = ?`
 		).bind(gameId).first<{
 			status: string;
 			initial_board: Uint8Array;
@@ -413,6 +799,8 @@ export class GameRoom implements DurableObject {
 			ply: number;
 			draw_offer_by: number | null;
 			draw_offer_blocked?: number | null;
+			host_account_id: string | null;
+			host_provider: string | null;
 			time_control_json: string | null;
 			room_settings_json: string | null;
 			setup_state_json: string | null;
@@ -430,6 +818,8 @@ export class GameRoom implements DurableObject {
 			game.status === "active" || game.status === "ended" || game.status === "lobby"
 				? (game.status as RoomStatus)
 				: "lobby";
+		this.hostAccountId = game.host_account_id ?? null;
+		this.hostIsGuest = game.host_provider === "guest";
 		if (game.room_settings_json) {
 			try {
 				this.roomSettings = normalizeRoomSettings(JSON.parse(game.room_settings_json));
@@ -609,7 +999,7 @@ export class GameRoom implements DurableObject {
 		this.logGame("guest.cleanup.purged", { trigger });
 	}
 
-	private async sendSync(ws: WebSocket, role: "black" | "white" | "spectator"): Promise<void> {
+	private async sendSync(ws: WebSocket, role: ConnectionRole): Promise<void> {
 		if (!this.gameState) {
 			return;
 		}
@@ -724,13 +1114,15 @@ export class GameRoom implements DurableObject {
 	private broadcastRoomUpdate(): void {
 		const counts = this.getConnectionCounts();
 		const setupValidation = this.validateLobbySetupState();
-		const canStart = this.roomStatus === "lobby" && counts.black > 0 && counts.white > 0 && setupValidation.ok;
+		const canStart = this.roomStatus === "lobby" && this.hasBothPlayersConnected() && setupValidation.ok;
 		const rematchReady = this.rematchOffers.black && this.rematchOffers.white;
-		const message = JSON.stringify({
-			t: "room",
+		const roster = this.getRoomRoster();
+		const baseMessage = {
+			t: "room" as const,
 			roomStatus: this.roomStatus,
 			players: { black: counts.black, white: counts.white },
 			spectators: counts.spectator,
+			roster,
 			canStart,
 			rematch: { ...this.rematchOffers },
 			rematchReady,
@@ -739,8 +1131,15 @@ export class GameRoom implements DurableObject {
 				selections: setupValidation.selections,
 				issues: setupValidation.issues,
 			},
-		});
-		for (const { ws } of this.connections.values()) {
+		};
+		for (const [connectionId, conn] of this.connections.entries()) {
+			const message = JSON.stringify({
+				...baseMessage,
+				selfRole: conn.role,
+				selfConnectionId: connectionId,
+				selfIsHost: this.isHostConnection(conn),
+			});
+			const { ws } = conn;
 			if (ws.readyState === 1) {
 				ws.send(message);
 			}
@@ -812,6 +1211,7 @@ export class GameRoom implements DurableObject {
 		};
 		this.drawOfferLastOfferAtMsByColor = [null, null];
 		this.roomStatus = "active";
+		this.guestHostCleanupDeadlineMs = null;
 		this.rematchOffers = { black: false, white: false };
 		this.clockBlackMs = this.timeControl.initialMs.black;
 		this.clockWhiteMs = this.timeControl.initialMs.white;
@@ -905,9 +1305,71 @@ export class GameRoom implements DurableObject {
 					})
 				);
 			}
+		} else if (message.t === "lobby_identify") {
+			const conn = this.connections.get(connectionId);
+			if (!conn) return;
+			if (conn.role === "black" || conn.role === "white") {
+				await this.hydrateConnectionIdentity(connectionId);
+				this.broadcastRoomUpdate();
+				return;
+			}
+			const incomingMode: LobbyAccountMode =
+				message?.mode === "guest" ? "guest" : message?.mode === "token" ? "token" : null;
+			const normalizedName = this.normalizeLobbyName(
+				typeof message?.name === "string" ? message.name : null,
+				"Spectator",
+			);
+			const accountId =
+				typeof message?.accountId === "string" && message.accountId.length <= 96 ? message.accountId : null;
+			conn.displayName = normalizedName;
+			conn.accountId = accountId;
+			conn.accountMode = incomingMode;
+			conn.isGuest = incomingMode === "guest";
+
+			if (accountId) {
+				const snapshot = await this.resolveAccountSnapshot(accountId);
+				if (snapshot) {
+					conn.displayName = this.normalizeLobbyName(snapshot.name, normalizedName);
+					conn.isGuest = snapshot.isGuest;
+					conn.accountMode = snapshot.isGuest ? "guest" : "token";
+				}
+			}
+			this.broadcastRoomUpdate();
+			await this.updateGuestHostAbandonmentPolicy("lobby_identify");
+		} else if (message.t === "lobby_set_seat") {
+			const conn = this.connections.get(connectionId);
+			if (!conn || !this.isHostConnection(conn)) {
+				this.sendError(ws, "Only the host can reassign seats");
+				return;
+			}
+			if (this.roomStatus !== "lobby") {
+				this.sendError(ws, "Seats can only be changed in the lobby");
+				return;
+			}
+			const targetConnectionId =
+				typeof message.targetConnectionId === "string" ? message.targetConnectionId : null;
+			const seat: ConnectionRole | null =
+				message.seat === "black" || message.seat === "white" || message.seat === "spectator"
+					? message.seat
+					: null;
+			if (!targetConnectionId || !seat) {
+				this.sendError(ws, "Invalid seat reassignment request");
+				return;
+			}
+			try {
+				await this.assignLobbySeat(targetConnectionId, seat);
+				for (const current of this.connections.values()) {
+					if (current.ws.readyState === 1) {
+						await this.sendSync(current.ws, current.role);
+					}
+				}
+				this.broadcastRoomUpdate();
+			} catch (error) {
+				this.sendError(ws, error instanceof Error ? error.message : "Failed to reassign seat");
+			}
 		} else if (message.t === "start_game") {
 			const conn = this.connections.get(connectionId);
-			if (!conn || conn.role !== "black") {
+			if (!conn || !this.isHostConnection(conn)) {
 				this.sendError(ws, "Only the host can start the game");
 				return;
 			}
@@ -916,7 +1378,7 @@ export class GameRoom implements DurableObject {
 				return;
 			}
 			if (!this.hasBothPlayersConnected()) {
-				this.sendError(ws, "Both players must be connected");
+				this.sendError(ws, "Both seats must be filled and connected");
 				return;
 			}
 			const setupValidation = this.validateLobbySetupState();
@@ -972,7 +1434,7 @@ export class GameRoom implements DurableObject {
 			this.broadcastRoomUpdate();
 		} else if (message.t === "set_shared_setup") {
 			const conn = this.connections.get(connectionId);
-			if (!conn || conn.role !== "black") {
+			if (!conn || !this.isHostConnection(conn)) {
 				this.sendError(ws, "Only the host can set shared setup");
 				return;
 			}
@@ -1058,9 +1520,13 @@ export class GameRoom implements DurableObject {
 	private async handleActionWord(
 		connectionId: string,
 		actionWord: number,
-		ws: WebSocket,
-		role: "black" | "white" | "spectator"
+		ws: WebSocket
 	): Promise<void> {
+		const role = this.getConnectionRole(connectionId);
+		if (!role) {
+			this.sendError(ws, "Connection not registered");
+			return;
+		}
 		if (!this.gameState) {
 			this.logGame("action.reject", {
 				connectionId,
@@ -1721,31 +2187,37 @@ export class GameRoom implements DurableObject {
 	}
 
 	private async scheduleNextAlarm(): Promise<void> {
-		if (!this.gameState || !this.timeControl) return;
-		if (this.roomStatus !== "active" || this.gameState.status === "ended") {
-			await this.state.storage.deleteAlarm();
-			return;
+		let nextDeadline: number | null = null;
+		if (this.guestHostCleanupDeadlineMs !== null) {
+			nextDeadline = this.guestHostCleanupDeadlineMs;
 		}
 
-		let nextDeadline: number | null = null;
-		if (this.turnStartTime !== null) {
+		const hasActiveClock =
+			this.gameState &&
+			this.timeControl &&
+			this.roomStatus === "active" &&
+			this.gameState.status !== "ended";
+		if (hasActiveClock && this.turnStartTime !== null) {
 			const activeColor = this.gameState.turn === 0 ? "black" : "white";
 			const bufferMs = this.timeControl.bufferMs[activeColor];
 			const clockMs = activeColor === "black" ? this.clockBlackMs : this.clockWhiteMs;
 			const deadline = this.turnStartTime + bufferMs + clockMs;
 			if (Number.isFinite(deadline)) {
-				nextDeadline = deadline;
+				nextDeadline = nextDeadline === null ? deadline : Math.min(nextDeadline, deadline);
 			}
 		}
 
-		if (this.timeControl.maxGameMs != null && this.gameStartTime !== null) {
+		if (hasActiveClock && this.timeControl.maxGameMs != null && this.gameStartTime !== null) {
 			const maxDeadline = this.gameStartTime + this.timeControl.maxGameMs;
 			if (Number.isFinite(maxDeadline)) {
 				nextDeadline = nextDeadline === null ? maxDeadline : Math.min(nextDeadline, maxDeadline);
 			}
 		}
 
-		if (nextDeadline === null) return;
+		if (nextDeadline === null) {
+			await this.state.storage.deleteAlarm();
+			return;
+		}
 		await this.state.storage.setAlarm(new Date(nextDeadline));
 	}
 
@@ -1863,14 +2335,23 @@ export class GameRoom implements DurableObject {
 
 	async alarm(): Promise<void> {
 		await this.loadGameState();
+		const now = Date.now();
+		if (
+			this.guestHostCleanupDeadlineMs !== null &&
+			now >= this.guestHostCleanupDeadlineMs &&
+			(await this.purgeGuestHostAbandonedLobby("alarm.guest_host_timeout"))
+		) {
+			await this.state.storage.deleteAlarm();
+			return;
+		}
 		if (!this.gameState || this.roomStatus !== "active" || this.gameState.status === "ended") {
+			await this.scheduleNextAlarm();
 			return;
 		}
 		if (!this.gameId) {
 			this.gameId = (this.state.id as any).name || this.state.id.toString();
 		}
 		const gameId = this.gameId;
-		const now = Date.now();
 
 		if (this.timeControl?.maxGameMs != null && this.gameStartTime !== null) {
 			if (now - this.gameStartTime >= this.timeControl.maxGameMs) {
