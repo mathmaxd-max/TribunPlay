@@ -8,7 +8,9 @@ import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
 
 const googleBodySchema = z.object({
   googleIdToken: Str(),
-  turnstileToken: Str({ required: false }),
+  // Older clients may send `turnstileToken: null` when CAPTCHA is disabled.
+  // Treat null as "missing" so request validation doesn't hard-fail with 400.
+  turnstileToken: z.preprocess((value) => (value === null ? undefined : value), Str({ required: false })),
 });
 
 export class AuthGoogle extends OpenAPIRoute {

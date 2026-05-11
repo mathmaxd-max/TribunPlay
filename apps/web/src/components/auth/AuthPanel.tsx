@@ -112,10 +112,12 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     try {
       const captchaToken = getCaptchaTokenOrThrow();
       const googleIdToken = await requestGoogleIdToken(googleClientId);
+      const body: Record<string, unknown> = { googleIdToken };
+      if (captchaToken) body.turnstileToken = captchaToken;
       const response = await fetch(`${API_BASE}/api/auth/google`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ googleIdToken, turnstileToken: captchaToken }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -149,14 +151,15 @@ export default function AuthPanel({ googleClientId, onAuthSuccess }: Props) {
     try {
       const captchaToken = getCaptchaTokenOrThrow();
       const endpoint = mode === "login" ? "/api/auth/login" : "/api/auth/signup";
+      const body: Record<string, unknown> =
+        mode === "login"
+          ? { email: normalizedEmail, password }
+          : { email: normalizedEmail, password, name: name.trim() };
+      if (captchaToken) body.turnstileToken = captchaToken;
       const response = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          mode === "login"
-            ? { email: normalizedEmail, password, turnstileToken: captchaToken }
-            : { email: normalizedEmail, password, name: name.trim(), turnstileToken: captchaToken },
-        ),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {

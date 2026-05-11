@@ -16,7 +16,9 @@ const signupBodySchema = z.object({
   email: Str(),
   password: Str(),
   name: Str(),
-  turnstileToken: Str({ required: false }),
+  // Older clients may send `turnstileToken: null` when CAPTCHA is disabled.
+  // Treat null as "missing" so request validation doesn't hard-fail with 400.
+  turnstileToken: z.preprocess((value) => (value === null ? undefined : value), Str({ required: false })),
 });
 
 export class AuthSignup extends OpenAPIRoute {
