@@ -2,6 +2,37 @@ import { Link, useNavigate } from "react-router-dom";
 import { clearStoredIdentity, getStoredIdentity } from "../auth/identityStore";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
+const cardSectionStyle = {
+  borderRadius: "18px",
+  border: "2px solid #3c3226",
+  background: "rgba(255, 250, 242, 0.84)",
+  boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
+  padding: "18px",
+  display: "grid",
+  gap: "12px",
+} as const;
+
+const pillLinkStyle = {
+  width: "fit-content",
+  padding: "12px 18px",
+  borderRadius: "999px",
+  border: "2px solid #6f5a38",
+  background: "#f2d9b2",
+  color: "#2a2218",
+  fontWeight: 700,
+  textTransform: "uppercase" as const,
+  letterSpacing: "1px",
+  textDecoration: "none",
+};
+
+const labelStyle = {
+  fontSize: "11px",
+  fontWeight: 700,
+  letterSpacing: "1.3px",
+  textTransform: "uppercase" as const,
+  color: "#7a6543",
+};
+
 export default function Hub() {
   const navigate = useNavigate();
   const identity = getStoredIdentity();
@@ -42,169 +73,60 @@ export default function Hub() {
       </header>
 
       <main style={{ width: "100%", maxWidth: "940px", margin: "0 auto", padding: "20px 14px 24px", display: "grid", gap: "16px" }}>
-        <section
-          style={{
-            borderRadius: "18px",
-            border: "2px solid #3c3226",
-            background: "rgba(255, 250, 242, 0.84)",
-            boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
-            padding: "18px",
-            display: "grid",
-            gap: "10px",
-          }}
-        >
-          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.3px", textTransform: "uppercase", color: "#7a6543" }}>
-            Active Identity
-          </div>
+        <section style={{ ...cardSectionStyle, gap: "10px" }}>
+          <div style={labelStyle}>Active Identity</div>
           <div style={{ fontSize: "30px", fontWeight: 700, color: "#2c2318" }}>{identity?.name ?? "Unknown user"}</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
             {identity?.mode === "token" ? `Logged in as ${identity.email}` : "Playing as guest"}
           </div>
         </section>
 
-        <section
-          style={{
-            borderRadius: "18px",
-            border: "2px solid #3c3226",
-            background: "rgba(255, 250, 242, 0.84)",
-            boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
-            padding: "18px",
-            display: "grid",
-            gap: "12px",
-          }}
-        >
-          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.3px", textTransform: "uppercase", color: "#7a6543" }}>
-            Play
-          </div>
+        <section style={cardSectionStyle}>
+          <div style={labelStyle}>Play</div>
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Play with a friend</div>
-          <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
-            Create a room or join one with a code.
-          </div>
-          <Link
-            to="/play"
-            style={{
-              width: "fit-content",
-              padding: "12px 18px",
-              borderRadius: "999px",
-              border: "2px solid #6f5a38",
-              background: "#f2d9b2",
-              color: "#2a2218",
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "1px",
-              textDecoration: "none",
-            }}
-          >
+          <div style={{ color: "#5a4630", lineHeight: 1.45 }}>Create a room or join one with a code.</div>
+          <Link to="/play" style={pillLinkStyle}>
             Open Play with a Friend
           </Link>
         </section>
 
-        <section
-          style={{
-            borderRadius: "18px",
-            border: "2px solid #3c3226",
-            background: "rgba(255, 250, 242, 0.84)",
-            boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
-            padding: "18px",
-            display: "grid",
-            gap: "12px",
-          }}
-        >
-          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.3px", textTransform: "uppercase", color: "#7a6543" }}>
-            Review
-          </div>
+        <section style={cardSectionStyle}>
+          <div style={labelStyle}>Review</div>
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Game History</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
             Browse finished games and replay moves with step controls.
           </div>
-          <Link
-            to="/history"
-            style={{
-              width: "fit-content",
-              padding: "12px 18px",
-              borderRadius: "999px",
-              border: "2px solid #6f5a38",
-              background: "#f2d9b2",
-              color: "#2a2218",
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "1px",
-              textDecoration: "none",
-            }}
-          >
+          <Link to="/history" style={pillLinkStyle}>
             Open History
           </Link>
         </section>
 
-        <section
-          style={{
-            borderRadius: "18px",
-            border: "2px solid #3c3226",
-            background: "rgba(255, 250, 242, 0.84)",
-            boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
-            padding: "18px",
-            display: "grid",
-            gap: "12px",
-          }}
-        >
-          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.3px", textTransform: "uppercase", color: "#7a6543" }}>
-            Tools
-          </div>
+        <section style={cardSectionStyle}>
+          <div style={labelStyle}>Tools</div>
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Setup Explorer</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
             Explore and validate unit setups with hash import, brush editing, and rule checks.
           </div>
-          <Link
-            to="/setup-explorer"
-            style={{
-              width: "fit-content",
-              padding: "12px 18px",
-              borderRadius: "999px",
-              border: "2px solid #6f5a38",
-              background: "#f2d9b2",
-              color: "#2a2218",
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "1px",
-              textDecoration: "none",
-            }}
-          >
+          <Link to="/setup-explorer" style={pillLinkStyle}>
             Open Setup Explorer
           </Link>
         </section>
 
-        <section
-          style={{
-            borderRadius: "18px",
-            border: "2px solid #3c3226",
-            background: "rgba(255, 250, 242, 0.84)",
-            boxShadow: "0 18px 30px rgba(39, 30, 20, 0.15)",
-            padding: "18px",
-            display: "grid",
-            gap: "12px",
-          }}
-        >
-          <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.3px", textTransform: "uppercase", color: "#7a6543" }}>
-            Account
-          </div>
+        <section style={cardSectionStyle}>
+          <div style={labelStyle}>Clock</div>
+          <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Table Clock</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
-            Configure input behavior and board sound levels.
+            Over-the-board chess clock with buffer and increment, matching online play rules.
           </div>
-          <Link
-            to="/settings"
-            style={{
-              width: "fit-content",
-              padding: "12px 18px",
-              borderRadius: "999px",
-              border: "2px solid #6f5a38",
-              background: "#f2d9b2",
-              color: "#2a2218",
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "1px",
-              textDecoration: "none",
-            }}
-          >
+          <Link to="/clock" style={pillLinkStyle}>
+            Open Table Clock
+          </Link>
+        </section>
+
+        <section style={cardSectionStyle}>
+          <div style={labelStyle}>Account</div>
+          <div style={{ color: "#5a4630", lineHeight: 1.45 }}>Configure input behavior and board sound levels.</div>
+          <Link to="/settings" style={pillLinkStyle}>
             Open Settings
           </Link>
         </section>

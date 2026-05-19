@@ -36,6 +36,8 @@ import { getAccountSettings } from '../settings/accountSettings';
 import { areAllUnitIconsReady, preloadAllUnitIcons } from '../ui/unitIcons';
 import { filterSetupLibraryItems, type SetupLibrarySearchMode } from '../ui/setupLibraryFilters';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
+import { advanceClockSnapshot } from '../clock/advanceClockSnapshot';
+import { formatClockTime as formatTime } from '../clock/formatClockTime';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -360,24 +362,6 @@ const resolveEndInfo = (params: {
   }
 
   return { reason, winnerLabel };
-};
-
-const advanceClockSnapshot = (
-  clocks: ColorClock,
-  buffers: ColorClock,
-  activeColor: 'black' | 'white',
-  elapsedMs: number,
-): { clocksMs: ColorClock; buffersMs: ColorClock } => {
-  const elapsed = Math.max(0, elapsedMs);
-  const bufferStart = buffers[activeColor];
-  const bufferRemaining = Math.max(0, bufferStart - elapsed);
-  const clockDeduction = Math.max(0, elapsed - bufferStart);
-  const clockRemaining = Math.max(0, clocks[activeColor] - clockDeduction);
-
-  return {
-    clocksMs: { ...clocks, [activeColor]: clockRemaining },
-    buffersMs: { ...buffers, [activeColor]: bufferRemaining },
-  };
 };
 
 const digestBoard = (board: Uint8Array): { sum: number; xor: number; len: number } => {
@@ -5082,13 +5066,5 @@ export default function Game() {
     </div>
   );
 
-}
-
-// Helper function to format time in MM:SS format
-function formatTime(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
 

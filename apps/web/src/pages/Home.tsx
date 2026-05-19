@@ -12,38 +12,20 @@ import {
 } from '../auth/identityStore';
 import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
 import { renderTurnstile } from '../auth/turnstile';
-import { formatDurationHms } from '../utils/formatDuration';
 import { useHealthCheck } from '../utils/useHealthCheck';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
+import { ClockEditor } from '../ui/ClockEditor';
+import { buildLobbyTimeControl, isClockNonZero } from '../clock/buildTimeControl';
+import { DEFAULT_CLOCK_INPUT, type ClockField, type ClockInput } from '../clock/types';
 
 type RoomColorOption = 'black' | 'white' | 'random';
 type NextStartOption = 'same' | 'other' | 'random';
 type SetupMode = 'shared' | 'free';
-type ClockInput = {
-  initialSeconds: number | '';
-  bufferSeconds: number | '';
-  incrementSeconds: number | '';
-};
-
-type ClockField = keyof ClockInput;
-
-const DEFAULT_CLOCK: ClockInput = {
-  initialSeconds: 300,
-  bufferSeconds: 20,
-  incrementSeconds: 0,
-};
 
 const clampNumber = (value: number, fallback: number) => {
   if (!Number.isFinite(value)) return fallback;
   return Math.max(0, value);
 };
-
-const secondsToMs = (seconds: number) => Math.round(clampNumber(seconds, 0) * 1000);
-const minutesToMs = (minutes: number) => Math.round(clampNumber(minutes, 0) * 60000);
-
-const coerceSeconds = (value: number | ''): number => (value === '' ? 0 : clampNumber(value, 0));
-const isClockNonZero = (clock: { initialSeconds: number | ''; bufferSeconds: number | '' }): boolean =>
-  coerceSeconds(clock.initialSeconds) > 0 || coerceSeconds(clock.bufferSeconds) > 0;
 
 const sectionLabelStyle = {
   fontSize: '11px',
@@ -89,79 +71,6 @@ const spinButtonReset = `
   }
 `;
 
-function ClockEditor(props: {
-  title: string;
-  clock: ClockInput;
-  onChange: (field: ClockField, value: number | '') => void;
-  tone?: 'light' | 'dark';
-}) {
-  const { title, clock, onChange, tone = 'light' } = props;
-  const panelBg = tone === 'dark' ? '#f7ead6' : '#fffaf0';
-
-  const renderRow = (label: string, field: ClockField) => (
-    <div style={{ display: 'grid', gap: '7px' }}>
-      <div style={fieldLabelStyle}>{label}</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'center' }}>
-        <div>
-          <input
-            type="number"
-            inputMode="numeric"
-            min={0}
-            step={1}
-            value={clock[field]}
-            onChange={(event) => {
-              if (event.target.value === '') {
-                onChange(field, '');
-                return;
-              }
-              onChange(field, clampNumber(Number(event.target.value), 0));
-            }}
-            placeholder="0 Seconds"
-            style={inputStyle}
-          />
-        </div>
-        <div
-          style={{
-            ...inputStyle,
-            width: 'auto',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontFamily: '"JetBrains Mono", monospace',
-            fontSize: '14px',
-            fontWeight: 700,
-            letterSpacing: '0.2px',
-            color: '#2f2418',
-            background: 'rgba(255, 255, 255, 0.6)',
-            whiteSpace: 'nowrap',
-          }}
-          aria-label={`${label} preview`}
-          title="Preview"
-        >
-          {formatDurationHms(coerceSeconds(clock[field]))}
-        </div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div
-      style={{
-        padding: '14px',
-        borderRadius: '12px',
-        border: '1px solid #d7c5ab',
-        background: panelBg,
-        display: 'grid',
-        gap: '10px',
-      }}
-    >
-      <div style={{ fontWeight: 700, color: '#2f2418' }}>{title}</div>
-      {renderRow('Initial Time', 'initialSeconds')}
-      {renderRow('Buffer', 'bufferSeconds')}
-      {renderRow('Increment', 'incrementSeconds')}
-    </div>
-  );
-}
 
 export default function Home() {
   const initialIdentity = getStoredIdentity();
@@ -176,9 +85,9 @@ export default function Home() {
   const [armyMin, setArmyMin] = useState<number | ''>('');
   const [armyMax, setArmyMax] = useState<number | ''>('');
   const [sameClockSettings, setSameClockSettings] = useState(true);
-  const [sharedClock, setSharedClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
-  const [blackClock, setBlackClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
-  const [whiteClock, setWhiteClock] = useState<ClockInput>({ ...DEFAULT_CLOCK });
+  const [sharedClock, setSharedClock] = useState<ClockInput>({ ...DEFAULT_CLOCK_INPUT });
+  const [blackClock, setBlackClock] = useState<ClockInput>({ ...DEFAULT_CLOCK_INPUT });
+  const [whiteClock, setWhiteClock] = useState<ClockInput>({ ...DEFAULT_CLOCK_INPUT });
   const [maxGameEnabled, setMaxGameEnabled] = useState(false);
   const [maxGameMinutesTotal, setMaxGameMinutesTotal] = useState<number | ''>(60);
   const [loadingAction, setLoadingAction] = useState<'join' | 'create' | null>(null);
@@ -281,47 +190,15 @@ export default function Home() {
     }
   };
 
-  const normalizeClockInput = (clock: ClockInput) => ({
-    initialSeconds: coerceSeconds(clock.initialSeconds),
-    bufferSeconds: coerceSeconds(clock.bufferSeconds),
-    incrementSeconds: coerceSeconds(clock.incrementSeconds),
-  });
-
-  const buildTimeControl = () => {
-    const normalizedMaxMinutesTotal =
-      maxGameMinutesTotal === '' ? 0 : clampNumber(maxGameMinutesTotal, 0);
-    const maxGameMs =
-      maxGameEnabled && normalizedMaxMinutesTotal > 0 ? minutesToMs(normalizedMaxMinutesTotal) : null;
-
-    if (sameClockSettings) {
-      const normalized = normalizeClockInput(sharedClock);
-      return {
-        initialMs: secondsToMs(normalized.initialSeconds),
-        bufferMs: secondsToMs(normalized.bufferSeconds),
-        incrementMs: secondsToMs(normalized.incrementSeconds),
-        maxGameMs,
-      };
-    }
-
-    const normalizedBlack = normalizeClockInput(blackClock);
-    const normalizedWhite = normalizeClockInput(whiteClock);
-
-    return {
-      initialMs: {
-        black: secondsToMs(normalizedBlack.initialSeconds),
-        white: secondsToMs(normalizedWhite.initialSeconds),
-      },
-      bufferMs: {
-        black: secondsToMs(normalizedBlack.bufferSeconds),
-        white: secondsToMs(normalizedWhite.bufferSeconds),
-      },
-      incrementMs: {
-        black: secondsToMs(normalizedBlack.incrementSeconds),
-        white: secondsToMs(normalizedWhite.incrementSeconds),
-      },
-      maxGameMs,
-    };
-  };
+  const buildTimeControl = () =>
+    buildLobbyTimeControl({
+      sameClockSettings,
+      sharedClock,
+      blackClock,
+      whiteClock,
+      maxGameEnabled,
+      maxGameMinutesTotal,
+    });
 
   const toggleTribunHeight = (height: 1 | 2 | 3) => {
     setAllowedTribunHeights((prev) => {

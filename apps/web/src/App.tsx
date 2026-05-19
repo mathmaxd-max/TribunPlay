@@ -9,6 +9,7 @@ import Hub from "./pages/Hub";
 import History from "./pages/History";
 import Review from "./pages/Review";
 import SetupExplorer from "./pages/SetupExplorer";
+import Clock from "./pages/Clock";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import VerifyEmail from "./pages/VerifyEmail";
@@ -106,6 +107,14 @@ function App() {
           element={
             <RequireIdentity>
               <SetupExplorer />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/clock"
+          element={
+            <RequireIdentity>
+              <Clock />
             </RequireIdentity>
           }
         />
