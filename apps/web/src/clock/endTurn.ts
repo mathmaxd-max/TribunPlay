@@ -17,7 +17,7 @@ export const applyTurnEnd = (params: {
   mover: PlayerColor;
   elapsedMs: number;
 }): ApplyTurnEndResult => {
-  const { clocksMs, buffersMs, timeControl, mover, elapsedMs } = params;
+  const { clocksMs, timeControl, mover, elapsedMs } = params;
   const elapsed = Math.max(0, elapsedMs);
   const bufferFull = timeControl.bufferMs[mover];
   const timeOverBuffer = Math.max(0, elapsed - bufferFull);

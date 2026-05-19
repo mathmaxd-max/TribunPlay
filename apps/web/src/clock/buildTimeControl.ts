@@ -120,4 +120,15 @@ export const resolveStartColor = (option: StandaloneClockSettings['startColor'])
   return Math.random() < 0.5 ? 'black' : 'white';
 };
 
+export type NextStartOption = 'same' | 'other' | 'random';
+
 export const opponentOf = (color: 'black' | 'white'): 'black' | 'white' => (color === 'black' ? 'white' : 'black');
+
+export const resolveNextStartColor = (
+  option: NextStartOption,
+  previousStart: 'black' | 'white',
+): 'black' | 'white' => {
+  if (option === 'same') return previousStart;
+  if (option === 'other') return opponentOf(previousStart);
+  return Math.random() < 0.5 ? 'black' : 'white';
+};

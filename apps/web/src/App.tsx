@@ -11,6 +11,10 @@ import Review from "./pages/Review";
 import SetupExplorer from "./pages/SetupExplorer";
 import Clock from "./pages/Clock";
 import Settings from "./pages/Settings";
+import LocalLobby from "./pages/LocalLobby";
+import LocalGame from "./pages/LocalGame";
+import { loadLocalLobbyPayload } from "./play/localLobbySession";
+import type { LocalLobbyPayload } from "./play/types";
 import Login from "./pages/Login";
 import VerifyEmail from "./pages/VerifyEmail";
 import ResetPassword from "./pages/ResetPassword";
@@ -19,6 +23,14 @@ import Disclaimer from "./pages/Disclaimer";
 import Impressum from "./pages/Impressum";
 import { getStoredIdentity } from "./auth/identityStore";
 import type { ReactNode } from "react";
+
+function LocalGameRoute() {
+  const location = useLocation();
+  const statePayload = location.state as LocalLobbyPayload | null;
+  const sessionPayload = loadLocalLobbyPayload();
+  const remountKey = String(statePayload?.createdAtMs ?? sessionPayload?.createdAtMs ?? "default");
+  return <LocalGame key={remountKey} />;
+}
 
 function RequireIdentity({ children }: { children: ReactNode }) {
   const location = useLocation();
@@ -83,6 +95,22 @@ function App() {
           element={
             <RequireIdentity>
               <Home />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/local"
+          element={
+            <RequireIdentity>
+              <LocalLobby />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/local/play"
+          element={
+            <RequireIdentity>
+              <LocalGameRoute />
             </RequireIdentity>
           }
         />

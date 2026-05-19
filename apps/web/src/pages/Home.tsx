@@ -1,6 +1,5 @@
-import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import * as engine from '@tribunplay/engine';
 import {
   buildIdentityPayload,
   getStoredIdentity,
@@ -14,18 +13,8 @@ import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
 import { renderTurnstile } from '../auth/turnstile';
 import { useHealthCheck } from '../utils/useHealthCheck';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
-import { ClockEditor } from '../ui/ClockEditor';
-import { buildLobbyTimeControl, isClockNonZero } from '../clock/buildTimeControl';
-import { DEFAULT_CLOCK_INPUT, type ClockField, type ClockInput } from '../clock/types';
-
-type RoomColorOption = 'black' | 'white' | 'random';
-type NextStartOption = 'same' | 'other' | 'random';
-type SetupMode = 'shared' | 'free';
-
-const clampNumber = (value: number, fallback: number) => {
-  if (!Number.isFinite(value)) return fallback;
-  return Math.max(0, value);
-};
+import { PlaySettingsForm } from '../play/PlaySettingsForm';
+import type { PlayLobbySubmitPayload } from '../play/types';
 
 const sectionLabelStyle = {
   fontSize: '11px',
@@ -55,11 +44,6 @@ const inputStyle = {
   outline: 'none',
 };
 
-const selectStyle = {
-  ...inputStyle,
-  appearance: 'none' as const,
-};
-
 const spinButtonReset = `
   input[type='number']::-webkit-outer-spin-button,
   input[type='number']::-webkit-inner-spin-button {
@@ -76,20 +60,6 @@ export default function Home() {
   const initialIdentity = getStoredIdentity();
   const [code, setCode] = useState('');
   const [identity, setIdentity] = useState<StoredIdentity | null>(initialIdentity);
-  const [hostColor, setHostColor] = useState<RoomColorOption>('random');
-  const [startColor, setStartColor] = useState<RoomColorOption>('random');
-  const [nextStartColor, setNextStartColor] = useState<NextStartOption>('other');
-  const [customSetupsEnabled, setCustomSetupsEnabled] = useState(false);
-  const [setupMode, setSetupMode] = useState<SetupMode>('shared');
-  const [allowedTribunHeights, setAllowedTribunHeights] = useState<Array<1 | 2 | 3>>([1, 2, 3]);
-  const [armyMin, setArmyMin] = useState<number | ''>('');
-  const [armyMax, setArmyMax] = useState<number | ''>('');
-  const [sameClockSettings, setSameClockSettings] = useState(true);
-  const [sharedClock, setSharedClock] = useState<ClockInput>({ ...DEFAULT_CLOCK_INPUT });
-  const [blackClock, setBlackClock] = useState<ClockInput>({ ...DEFAULT_CLOCK_INPUT });
-  const [whiteClock, setWhiteClock] = useState<ClockInput>({ ...DEFAULT_CLOCK_INPUT });
-  const [maxGameEnabled, setMaxGameEnabled] = useState(false);
-  const [maxGameMinutesTotal, setMaxGameMinutesTotal] = useState<number | ''>(60);
   const [loadingAction, setLoadingAction] = useState<'join' | 'create' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
@@ -171,58 +141,6 @@ export default function Home() {
   });
 
   const isLoading = loadingAction !== null;
-
-  const setClockValue = (
-    setter: Dispatch<SetStateAction<ClockInput>>,
-    field: ClockField,
-    value: number | '',
-  ) => {
-    setter((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const handleSameClockToggle = (nextValue: boolean) => {
-    setSameClockSettings(nextValue);
-    if (nextValue) {
-      setSharedClock(blackClock);
-    } else {
-      setBlackClock(sharedClock);
-      setWhiteClock(sharedClock);
-    }
-  };
-
-  const buildTimeControl = () =>
-    buildLobbyTimeControl({
-      sameClockSettings,
-      sharedClock,
-      blackClock,
-      whiteClock,
-      maxGameEnabled,
-      maxGameMinutesTotal,
-    });
-
-  const toggleTribunHeight = (height: 1 | 2 | 3) => {
-    setAllowedTribunHeights((prev) => {
-      if (prev.includes(height)) {
-        const next = prev.filter((item) => item !== height);
-        return next.length > 0 ? next : prev;
-      }
-      return [...prev, height].sort((a, b) => a - b);
-    });
-  };
-
-  const buildSetupConfig = (): engine.SetupConfig => {
-    const config = engine.normalizeSetupConfig({
-      enabled: customSetupsEnabled,
-      mode: setupMode,
-      sharedSelection: null,
-      allowedTribunHeights,
-      armySize: {
-        min: armyMin === '' ? null : clampNumber(armyMin, 0),
-        max: armyMax === '' ? null : clampNumber(armyMax, 0),
-      },
-    });
-    return config;
-  };
 
   const requireIdentityPayload = () => {
     const current = getStoredIdentity();
@@ -313,30 +231,7 @@ export default function Home() {
     };
   }, [navigate]);
 
-  const handleCreateGame = async () => {
-    const canStartGame = sameClockSettings
-      ? isClockNonZero(sharedClock)
-      : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
-    if (!canStartGame) {
-      setError(
-        sameClockSettings
-          ? 'Clock invalid: initial time and buffer cannot both be 0.'
-          : 'Clock invalid: both players must have either initial time or buffer greater than 0.'
-      );
-      return;
-    }
-    if (customSetupsEnabled) {
-      if (armyMin !== '' && armyMax !== '' && armyMin > armyMax) {
-        setError('Setup constraints invalid: minimum army size cannot exceed maximum.');
-        return;
-      }
-      const config = buildSetupConfig();
-      if (config.allowedTribunHeights.length === 0) {
-        setError('Setup constraints invalid: at least one tribun height must be allowed.');
-        return;
-      }
-    }
-
+  const handleCreateGame = async (payload: PlayLobbySubmitPayload) => {
     setLoadingAction('create');
     setError(null);
     try {
@@ -345,10 +240,7 @@ export default function Home() {
       }
       const { current, payload: identityPayload } = requireIdentityPayload();
       const captchaToken = getGuestCaptchaTokenOrThrow(current.mode);
-      const timeControl = buildTimeControl();
-      const setupConfig = buildSetupConfig();
-      const setupSelections: engine.SetupSelectionsBySide = { black: null, white: null };
-      const roomSettings = { hostColor, startColor, nextStartColor, setupConfig, setupSelections };
+      const { timeControl, roomSettings } = payload;
       const doCreate = async (payload: unknown) =>
         fetch(`${API_BASE}/api/game/create`, {
           method: 'POST',
@@ -452,17 +344,8 @@ export default function Home() {
   const healthOk = Boolean(healthResult?.api.reachable && healthResult?.websocket.reachable);
   const hasIdentity = Boolean(identity);
   const guestTurnstileBlocking = guestTurnstileRequired && !turnstileToken;
-  const canStartGame = sameClockSettings
-    ? isClockNonZero(sharedClock)
-    : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
-  const clockInvalid = !canStartGame;
-  const createDisabled = isLoading || clockInvalid || !hasIdentity || guestTurnstileBlocking;
-  const createButtonLabel =
-    loadingAction === 'create'
-      ? 'Creating...'
-      : clockInvalid
-        ? 'Create Game (Invalid clock time)'
-        : 'Create Game';
+  const createDisabled = isLoading || !hasIdentity || guestTurnstileBlocking;
+  const createButtonLabel = loadingAction === 'create' ? 'Creating...' : 'Create Game';
 
   return (
     <div
@@ -698,323 +581,13 @@ export default function Home() {
             </div>
           </section>
 
-          <section
-            style={{
-              borderRadius: '18px',
-              border: '2px solid #3c3226',
-              background: 'rgba(255, 250, 242, 0.84)',
-              boxShadow: '0 18px 30px rgba(39, 30, 20, 0.15)',
-              padding: '18px',
-              display: 'grid',
-              gap: '14px',
-            }}
-          >
-            <div style={sectionLabelStyle}>Room Configuration</div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#2c2318' }}>Create Room</div>
-
-            <button
-              onClick={handleCreateGame}
-              disabled={createDisabled}
-              style={{
-                width: '100%',
-                padding: '12px 16px',
-                borderRadius: '999px',
-                border: '2px solid #6f5a38',
-                background: createDisabled ? '#d8c8ab' : '#f2d9b2',
-                color: '#2a2218',
-                fontWeight: 700,
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-                cursor: createDisabled ? 'not-allowed' : 'pointer',
-              }}
-            >
-              {createButtonLabel}
-            </button>
-
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-                gap: '10px',
-              }}
-            >
-              <div>
-                <div style={fieldLabelStyle}>Host Color</div>
-                <select
-                  value={hostColor}
-                  onChange={(event) => setHostColor(event.target.value as RoomColorOption)}
-                  style={selectStyle}
-                >
-                  <option value="random">Random</option>
-                  <option value="black">Black</option>
-                  <option value="white">White</option>
-                </select>
-              </div>
-              <div>
-                <div style={fieldLabelStyle}>Start Color</div>
-                <select
-                  value={startColor}
-                  onChange={(event) => setStartColor(event.target.value as RoomColorOption)}
-                  style={selectStyle}
-                >
-                  <option value="random">Random</option>
-                  <option value="black">Black</option>
-                  <option value="white">White</option>
-                </select>
-              </div>
-              <div>
-                <div style={fieldLabelStyle}>Next Start</div>
-                <select
-                  value={nextStartColor}
-                  onChange={(event) => setNextStartColor(event.target.value as NextStartOption)}
-                  style={selectStyle}
-                >
-                  <option value="other">Other</option>
-                  <option value="same">Same</option>
-                  <option value="random">Random</option>
-                </select>
-              </div>
-            </div>
-
-            <div
-              style={{
-                padding: '14px',
-                borderRadius: '12px',
-                border: '1px solid #d7c5ab',
-                background: '#fff7ea',
-                display: 'grid',
-                gap: '10px',
-              }}
-            >
-              <div style={sectionLabelStyle}>Setup Rules</div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 700 }}>
-                <input
-                  type="checkbox"
-                  checked={customSetupsEnabled}
-                  onChange={(event) => setCustomSetupsEnabled(event.target.checked)}
-                />
-                Custom setups enabled
-              </label>
-
-              {customSetupsEnabled && (
-                <div style={{ display: 'grid', gap: '10px' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                    <button
-                      type="button"
-                      onClick={() => setSetupMode('shared')}
-                      style={{
-                        padding: '8px 10px',
-                        borderRadius: '10px',
-                        border: '2px solid #6f5a38',
-                        background: setupMode === 'shared' ? '#f2d9b2' : '#fff6e8',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Shared setup
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSetupMode('free')}
-                      style={{
-                        padding: '8px 10px',
-                        borderRadius: '10px',
-                        border: '2px solid #6f5a38',
-                        background: setupMode === 'free' ? '#f2d9b2' : '#fff6e8',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Free setups
-                    </button>
-                  </div>
-
-                  <div style={{ fontSize: '13px', color: '#5a4630' }}>
-                    Setup hashes are selected in the game lobby after both players join.
-                    {setupMode === 'shared'
-                      ? ' In shared mode only the host chooses the shared setup and opponent flip there.'
-                      : ' In free mode each player chooses their own setup there.'}
-                  </div>
-
-                  <div style={{ display: 'grid', gap: '6px' }}>
-                    <div style={fieldLabelStyle}>Allowed Tribun Heights</div>
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                      {[1, 2, 3].map((height) => (
-                        <button
-                          key={height}
-                          type="button"
-                          onClick={() => toggleTribunHeight(height as 1 | 2 | 3)}
-                          style={{
-                            padding: '6px 10px',
-                            borderRadius: '8px',
-                            border: '2px solid #6f5a38',
-                            background: allowedTribunHeights.includes(height as 1 | 2 | 3) ? '#f2d9b2' : '#fff6e8',
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          {height}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                    <div>
-                      <div style={fieldLabelStyle}>Army Size Min</div>
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        value={armyMin}
-                        onChange={(event) => {
-                          if (event.target.value === '') {
-                            setArmyMin('');
-                            return;
-                          }
-                          setArmyMin(clampNumber(Number(event.target.value), 0));
-                        }}
-                        placeholder="No min"
-                        style={inputStyle}
-                      />
-                    </div>
-                    <div>
-                      <div style={fieldLabelStyle}>Army Size Max</div>
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        value={armyMax}
-                        onChange={(event) => {
-                          if (event.target.value === '') {
-                            setArmyMax('');
-                            return;
-                          }
-                          setArmyMax(clampNumber(Number(event.target.value), 0));
-                        }}
-                        placeholder="No max"
-                        style={inputStyle}
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div
-              style={{
-                padding: '14px',
-                borderRadius: '12px',
-                border: '1px solid #d7c5ab',
-                background: '#f8f0e2',
-                display: 'grid',
-                gap: '10px',
-              }}
-            >
-              <div style={sectionLabelStyle}>Clock Settings</div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 600 }}>
-                <input
-                  type="checkbox"
-                  checked={sameClockSettings}
-                  onChange={(event) => handleSameClockToggle(event.target.checked)}
-                />
-                Same for both colors
-              </label>
-
-              {sameClockSettings ? (
-                <ClockEditor
-                  title="Both Colors"
-                  clock={sharedClock}
-                  onChange={(field, value) => setClockValue(setSharedClock, field, value)}
-                />
-              ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px' }}>
-                  <ClockEditor
-                    title="Black"
-                    clock={blackClock}
-                    onChange={(field, value) => setClockValue(setBlackClock, field, value)}
-                    tone="dark"
-                  />
-                  <ClockEditor
-                    title="White"
-                    clock={whiteClock}
-                    onChange={(field, value) => setClockValue(setWhiteClock, field, value)}
-                    tone="dark"
-                  />
-                </div>
-              )}
-            </div>
-
-            <div
-              style={{
-                padding: '14px',
-                borderRadius: '12px',
-                border: '1px solid #d7c5ab',
-                background: '#fff7ea',
-                display: 'grid',
-                gap: '10px',
-              }}
-            >
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 700 }}>
-                <input
-                  type="checkbox"
-                  checked={maxGameEnabled}
-                  onChange={(event) => setMaxGameEnabled(event.target.checked)}
-                />
-                Max Game Time
-              </label>
-
-              {maxGameEnabled && (
-                <div style={{ display: 'grid', gap: '7px' }}>
-                  <div style={fieldLabelStyle}>Minutes</div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'center' }}>
-                    <div>
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        min={0}
-                        step={1}
-                        value={maxGameMinutesTotal}
-                        onChange={(event) => {
-                          if (event.target.value === '') {
-                            setMaxGameMinutesTotal('');
-                            return;
-                          }
-                          setMaxGameMinutesTotal(clampNumber(Number(event.target.value), 0));
-                        }}
-                        placeholder="0 Minutes"
-                        style={inputStyle}
-                      />
-                    </div>
-                    <div
-                      style={{
-                        ...inputStyle,
-                        width: 'auto',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontFamily: '"JetBrains Mono", monospace',
-                        fontSize: '14px',
-                        fontWeight: 700,
-                        letterSpacing: '0.2px',
-                        color: '#2f2418',
-                        background: 'rgba(255, 255, 255, 0.6)',
-                        whiteSpace: 'nowrap',
-                      }}
-                      aria-label="Max Game Time preview"
-                      title="Preview"
-                    >
-                      {(() => {
-                        const minutes = maxGameMinutesTotal === '' ? 0 : maxGameMinutesTotal || 0;
-                        if (minutes === 0) return '0m';
-                        return formatDurationHms(minutes * 60);
-                      })()}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </section>
+          <PlaySettingsForm
+            mode="online"
+            title="Create Room"
+            submitLabel={createButtonLabel}
+            submitDisabled={createDisabled}
+            onSubmit={handleCreateGame}
+          />
         </div>
 
         {error && (

@@ -91,6 +91,17 @@ export default function Hub() {
         </section>
 
         <section style={cardSectionStyle}>
+          <div style={labelStyle}>Local</div>
+          <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Local Game</div>
+          <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
+            Pass-and-play on one device with the same setup and clock rules as friend play.
+          </div>
+          <Link to="/local" style={pillLinkStyle}>
+            Open Local Game
+          </Link>
+        </section>
+
+        <section style={cardSectionStyle}>
           <div style={labelStyle}>Review</div>
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Game History</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
