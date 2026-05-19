@@ -18,7 +18,7 @@ This folder contains **agent- and human-readable** product milestone specs (M01â
 | **M04** | History page: account-only persistence, replay with animation and sound timing |
 | **M05** | Setup library, lobby setup rules, hash load, flip mechanic, library search |
 | **M06** | Local game: alternating colors, lobby UI without multiplayer |
-| **M07** | Analysis board: brush tool for arbitrary positions |
+| **M07** | Board Canvas: brush tool for arbitrary positions |
 | **M08** | Cross-page navigation and preserved back-navigation state |
 | **M09** | Interactive tutorial: chapters 1â€“7 plus extra chapters |
 | **M10** | Discord Activity + Discord sign-in for accounts |

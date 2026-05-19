@@ -124,6 +124,17 @@ export default function Hub() {
         </section>
 
         <section style={cardSectionStyle}>
+          <div style={labelStyle}>Tools</div>
+          <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Board Canvas</div>
+          <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
+            Paint any position on the full board with unit height, overwrite, enslave, and Tribun controls.
+          </div>
+          <Link to="/board-canvas" style={pillLinkStyle}>
+            Open Board Canvas
+          </Link>
+        </section>
+
+        <section style={cardSectionStyle}>
           <div style={labelStyle}>Clock</div>
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Table Clock</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>

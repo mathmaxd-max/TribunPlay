@@ -10,6 +10,7 @@ const STATIC_ROUTE_TITLES: Record<string, string> = {
   "/play": "Play with a Friend",
   "/history": "Game History",
   "/setup-explorer": "Setup Explorer",
+  "/board-canvas": "Board Canvas",
   "/clock": "Table Clock",
   "/settings": "Settings",
   "/datenschutz": "Datenschutz",

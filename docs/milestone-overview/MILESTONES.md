@@ -266,7 +266,7 @@ When creating a game lobby, the host MUST be able to configure:
 
 ### Dependencies
 
-- **M08** for navigation from Setup Explorer into games/analysis.
+- **M08** for navigation from Setup Explorer into games/Board Canvas.
 
 ### Related codebase
 
@@ -314,11 +314,11 @@ Provide a **local** mode: one human alternates **Black** and **White** on the sa
 
 ---
 
-## M07 — Analysis board (brush tool)
+## M07 — Board Canvas (brush tool)
 
 ### Objective
 
-An **analysis board** lets users set up **any possible board situation** via a **brush** tool (brushing logic is similar to the Setup Explorer).
+A **Board Canvas** lets users set up **any possible board situation** via a **brush** tool (brushing logic is similar to the Setup Explorer).
 
 ### Controls
 
@@ -350,6 +350,7 @@ An **analysis board** lets users set up **any possible board situation** via a *
 ### Notes
 
 - Brushing logic is **intentionally parallel** to Setup Explorer; reuse or share helpers where possible.
+- Navigation to/from other pages is deferred to **M08**.
 
 ### Acceptance criteria
 
@@ -358,7 +359,7 @@ An **analysis board** lets users set up **any possible board situation** via a *
 
 ### Dependencies
 
-- None required; **M08** links analysis to other pages.
+- None required; **M08** links Board Canvas to other pages.
 
 ### Related codebase
 
@@ -375,21 +376,21 @@ An **analysis board** lets users set up **any possible board situation** via a *
 
 ### Objective
 
-**Setup Explorer**, **Analysis board**, **Local game**, and **Friend game** MUST interoperate via navigation with **transfer of state** where specified, and **back navigation** MUST restore the **previous page’s state** (browser history or equivalent app state).
+**Setup Explorer**, **Board Canvas**, **Local game**, and **Friend game** MUST interoperate via navigation with **transfer of state** where specified, and **back navigation** MUST restore the **previous page’s state** (browser history or equivalent app state).
 
 ### Navigation requirements
 
-1. **Setup Explorer → Analysis board**  
+1. **Setup Explorer → Board Canvas**  
    Transfer **current board state**, including **opponent preview** if present.
 
 2. **Setup Explorer → Local or Friend game**  
    When the drawn setup is **hashable**, open game with: **custom setups enabled**, **free setups**, **no limit** on Tribun or army size.  
    If there is **no** opponent preview, use the **flipped** drawn setup as the opponent setup.
 
-3. **Analysis board → Setup Explorer**  
+3. **Board Canvas → Setup Explorer**  
    Link: **“Start from a setup”** (opens Setup Explorer in a defined initial state).
 
-4. **Analysis board → Local or Friend game**  
+4. **Board Canvas → Local or Friend game**  
    Initial position = **drawn** position. **Save guard**: **both** sides MUST have exactly **one** Tribun unit (and **all units MUST be valid**).
 
 5. **Back navigation**  
@@ -403,7 +404,7 @@ An **analysis board** lets users set up **any possible board situation** via a *
 
 ### Dependencies
 
-- **M05** (hash, flip), **M06** (local), **M07** (analysis).
+- **M05** (hash, flip), **M06** (local), **M07** (Board Canvas).
 
 ### Related codebase
 
@@ -415,15 +416,15 @@ An **analysis board** lets users set up **any possible board situation** via a *
 ```mermaid
 flowchart LR
   setupExplorer[SetupExplorer]
-  analysisBoard[AnalysisBoard]
+  boardCanvas[BoardCanvas]
   localGame[LocalGame]
   friendGame[FriendLobby_Game]
-  setupExplorer -->|"board state + preview"| analysisBoard
-  analysisBoard -->|"start from setup"| setupExplorer
+  setupExplorer -->|"board state + preview"| boardCanvas
+  boardCanvas -->|"start from setup"| setupExplorer
   setupExplorer -->|"hashable setup"| localGame
   setupExplorer -->|"hashable setup"| friendGame
-  analysisBoard -->|"valid position"| localGame
-  analysisBoard -->|"valid position"| friendGame
+  boardCanvas -->|"valid position"| localGame
+  boardCanvas -->|"valid position"| friendGame
 ```
 
 ---

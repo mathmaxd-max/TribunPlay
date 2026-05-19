@@ -9,6 +9,7 @@ import Hub from "./pages/Hub";
 import History from "./pages/History";
 import Review from "./pages/Review";
 import SetupExplorer from "./pages/SetupExplorer";
+import BoardCanvas from "./pages/BoardCanvas";
 import Clock from "./pages/Clock";
 import Settings from "./pages/Settings";
 import LocalLobby from "./pages/LocalLobby";
@@ -135,6 +136,14 @@ function App() {
           element={
             <RequireIdentity>
               <SetupExplorer />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/board-canvas"
+          element={
+            <RequireIdentity>
+              <BoardCanvas />
             </RequireIdentity>
           }
         />
