@@ -117,8 +117,8 @@ export class SetupLibraryCreate extends OpenAPIRoute {
         .bind(identity.accountId)
         .first<{ count: number }>();
       const count = Number(countRow?.count ?? 0);
-      if (count >= 5) {
-        return c.json({ error: "Setup library limit reached (max 5 setups)." }, 409);
+      if (count >= 2) {
+        return c.json({ error: "Setup library limit reached (max 2 setups)." }, 409);
       }
 
       const itemId = crypto.randomUUID();
