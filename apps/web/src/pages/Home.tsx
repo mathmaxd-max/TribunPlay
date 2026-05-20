@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import * as engine from '@tribunplay/engine';
 import {
   buildIdentityPayload,
   getStoredIdentity,
@@ -13,6 +14,8 @@ import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
 import { renderTurnstile } from '../auth/turnstile';
 import { useHealthCheck } from '../utils/useHealthCheck';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
+import { loadFriendLobbyPrefill } from '../navigation';
+import type { PlayLobbyPrefill } from '../navigation';
 import { PlaySettingsForm } from '../play/PlaySettingsForm';
 import type { PlayLobbySubmitPayload } from '../play/types';
 
@@ -66,6 +69,11 @@ export default function Home() {
   const turnstileHostRef = useRef<HTMLDivElement | null>(null);
   const turnstileResetRef = useRef<(() => void) | null>(null);
   const navigate = useNavigate();
+  const location = useLocation();
+  const locationState = (location.state ?? null) as { playLobbyPrefill?: PlayLobbyPrefill } | null;
+  const storedPrefill = useMemo(() => loadFriendLobbyPrefill(), []);
+  const friendPrefill = locationState?.playLobbyPrefill ?? storedPrefill;
+  const lockedPrefillState = friendPrefill?.positionLocked && friendPrefill.initialState ? friendPrefill.initialState : null;
 
   const guestTurnstileRequired = useMemo(
     () => identity?.mode === 'guest' && Boolean(TURNSTILE_SITE_KEY),
@@ -240,7 +248,18 @@ export default function Home() {
       }
       const { current, payload: identityPayload } = requireIdentityPayload();
       const captchaToken = getGuestCaptchaTokenOrThrow(current.mode);
-      const { timeControl, roomSettings } = payload;
+      const { timeControl } = payload;
+      const lockedStartColor =
+        lockedPrefillState?.turn === 0 ? 'black' : lockedPrefillState?.turn === 1 ? 'white' : null;
+      const roomSettings = lockedPrefillState
+        ? {
+            ...payload.roomSettings,
+            hostColor: lockedStartColor ?? payload.roomSettings.hostColor,
+            startColor: lockedStartColor ?? payload.roomSettings.startColor,
+            setupConfig: engine.normalizeSetupConfig({ enabled: false }),
+            setupSelections: { black: null, white: null },
+          }
+        : payload.roomSettings;
       const doCreate = async (payload: unknown) =>
         fetch(`${API_BASE}/api/game/create`, {
           method: 'POST',
@@ -248,6 +267,12 @@ export default function Home() {
           body: JSON.stringify({
             timeControl,
             roomSettings,
+            ...(lockedPrefillState
+              ? {
+                  boardBytesB64: engine.packBoard(Uint8Array.from(lockedPrefillState.board)),
+                  initialTurn: lockedPrefillState.turn,
+                }
+              : {}),
             identity: payload,
             ...(captchaToken ? { turnstileToken: captchaToken } : {}),
           }),
@@ -581,13 +606,15 @@ export default function Home() {
             </div>
           </section>
 
-          <PlaySettingsForm
-            mode="online"
-            title="Create Room"
-            submitLabel={createButtonLabel}
-            submitDisabled={createDisabled}
-            onSubmit={handleCreateGame}
-          />
+        <PlaySettingsForm
+          mode="online"
+          title="Create Room"
+          submitLabel={createButtonLabel}
+          submitDisabled={createDisabled}
+          onSubmit={handleCreateGame}
+          initialValues={friendPrefill?.initialValues}
+          hideSetup={Boolean(friendPrefill?.positionLocked)}
+        />
         </div>
 
         {error && (

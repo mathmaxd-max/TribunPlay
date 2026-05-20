@@ -388,10 +388,11 @@ A **Board Canvas** lets users set up **any possible board situation** via a **br
    If there is **no** opponent preview, use the **flipped** drawn setup as the opponent setup.
 
 3. **Board Canvas → Setup Explorer**  
-   Link: **“Start from a setup”** (opens Setup Explorer in a defined initial state).
+   Link: **“Start from a setup”** (returns to Setup Explorer with its previous state preserved via history/app snapshot restore).
 
-4. **Board Canvas → Local or Friend game**  
-   Initial position = **drawn** position. **Save guard**: **both** sides MUST have exactly **one** Tribun unit (and **all units MUST be valid**).
+4. **Board Canvas -> Local or Friend game**  
+   Initial position = **drawn** position. **Save guard**: **both** sides MUST have exactly **one** Tribun unit (and **all units MUST be valid**).  
+   For imported canvas/review positions, friend/local launch as a **fixed board position** with setup UI disabled and first move forced by imported `turn`.
 
 5. **Back navigation**  
    When traveling **back**, the **prior page’s state** MUST be preserved (scroll, toggles, board edits, etc.) per browser/app history expectations.
@@ -546,3 +547,4 @@ Teach rules **by playing**: chapters with text, diagrams, and **interactive boar
 |-------|--------|
 | Normative rules | [`docs/README.md`](../README.md) |
 | Milestone folder index | [`README.md`](README.md) |
+

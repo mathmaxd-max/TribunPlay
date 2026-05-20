@@ -8,6 +8,7 @@ import {
   type StoredIdentity,
 } from "../auth/identityStore";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
+import { navPillButtonStyle } from "../ui/pageNavStyles";
 
 type HistoryItem = {
   gameId: string;
@@ -202,21 +203,7 @@ export default function History() {
         }}
       >
         <PageHeaderBrand title="Game History" />
-        <button
-          type="button"
-          onClick={() => navigate("/hub")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: "999px",
-            background: "#f2d9b2",
-            border: "2px solid #6f5a38",
-            color: "#2a2218",
-            fontWeight: 700,
-            letterSpacing: "1px",
-            textTransform: "uppercase",
-            cursor: "pointer",
-          }}
-        >
+        <button type="button" onClick={() => navigate("/hub")} style={navPillButtonStyle}>
           Hub
         </button>
       </header>
@@ -237,7 +224,7 @@ export default function History() {
             Review Mode
           </div>
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Past Games</div>
-          <div style={{ color: "#5a4630" }}>Open any game to replay plies with forward and reverse step animations.</div>
+          <div style={{ color: "#5a4630" }}>Open any game to replay moves with forward and reverse step animations.</div>
         </div>
 
         {loading && <div style={cardStyle}>Loading history...</div>}

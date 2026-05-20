@@ -59,8 +59,7 @@ function RequireNonGuest({ children }: { children: ReactNode }) {
     return <Navigate to={`/?next=${encodeURIComponent(next)}`} replace />;
   }
   if (identity.mode === "guest") {
-    const next = `${location.pathname}${location.search}${location.hash}`;
-    return <Navigate to={`/guest?reason=restricted&next=${encodeURIComponent(next)}`} replace />;
+    return <Navigate to="/hub" replace />;
   }
   return <>{children}</>;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
 import { UnitGlyph as SharedUnitGlyph } from "../ui/UnitGlyph";
@@ -26,6 +26,19 @@ import {
 import { getFlippedSetupHash, normalizeSetupHashInput } from "../setupHashFlip";
 import { filterSetupLibraryItems, type SetupLibrarySearchMode } from "../ui/setupLibraryFilters";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
+import { ContinueMenu } from "../ui/ContinueMenu";
+import { navPillLinkStyle } from "../ui/pageNavStyles";
+import {
+  clearPageSnapshot,
+  loadPageSnapshot,
+  makeFreeUnrestrictedLobbyPrefill,
+  saveFriendLobbyPrefill,
+  saveLocalLobbyPrefill,
+  savePageSnapshot,
+  setupExplorerToBoardCanvasImport,
+  type SetupExplorerRouteState,
+  type SetupExplorerSnapshot,
+} from "../navigation";
 
 type Brush = "1" | "2" | "3" | "eraser";
 type TileCell = { height: 0 | 1 | 2 | 3; tribun: boolean };
@@ -360,6 +373,10 @@ function SetupUnitGlyph(props: {
 
 export default function SetupExplorer() {
   const { playSfx } = useBoardSfx();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const didHydrateRef = useRef(false);
+  const saveSnapshotRef = useRef<() => void>(() => undefined);
   const [unitIconsReady, setUnitIconsReady] = useState(() => areAllUnitIconsReady());
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
@@ -406,6 +423,104 @@ export default function SetupExplorer() {
   const [saveModalError, setSaveModalError] = useState<string | null>(null);
   const [librarySaveMessage, setLibrarySaveMessage] = useState<string | null>(null);
   const libraryEnabled = isSetupLibraryAvailable();
+
+  useEffect(() => {
+    if (didHydrateRef.current) return;
+    didHydrateRef.current = true;
+
+    const routeState = (location.state ?? null) as SetupExplorerRouteState | null;
+    const consumeRouteState = Boolean(routeState && Object.keys(routeState).length > 0);
+
+    if (routeState?.fresh === true) {
+      setOwnCells(makeEmptyCells());
+      setEnemyCells(makeEmptyCells());
+      setPreviewMode("empty");
+      setBrush("1");
+      setTribunBrush(false);
+      setOnlyEmpty(true);
+      setUserFlip180(false);
+      setPlayerColor("black");
+      setUnitViewMode("icon");
+      setDefenseMode("none");
+      setOwnHashInput("");
+      setEnemyHashInput("");
+      setOwnHashStatus("idle");
+      setEnemyHashStatus("idle");
+      clearPageSnapshot("setup-explorer");
+      window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
+    } else {
+      const snapshot = loadPageSnapshot<SetupExplorerSnapshot>("setup-explorer");
+      if (snapshot) {
+        setOwnCells(snapshot.ownCells.map((cell) => ({ ...cell })));
+        setEnemyCells(snapshot.enemyCells.map((cell) => ({ ...cell })));
+        setPreviewMode(snapshot.previewMode);
+        setBrush(snapshot.brush);
+        setTribunBrush(snapshot.tribunBrush);
+        setOnlyEmpty(snapshot.onlyEmpty);
+        setUserFlip180(snapshot.userFlip180);
+        setPlayerColor(snapshot.playerColor);
+        setUnitViewMode(snapshot.unitViewMode);
+        setDefenseMode(snapshot.defenseMode);
+        setOwnHashInput(snapshot.ownHashInput);
+        setEnemyHashInput(snapshot.enemyHashInput);
+        setOwnHashStatus(deriveHashStatus(snapshot.ownHashInput));
+        setEnemyHashStatus(deriveHashStatus(snapshot.enemyHashInput));
+        window.requestAnimationFrame(() => window.scrollTo({ top: snapshot.scrollY, behavior: "auto" }));
+      }
+    }
+
+    if (consumeRouteState) {
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, [location.pathname, location.state, navigate]);
+
+  useEffect(() => {
+    saveSnapshotRef.current = () => {
+      const snapshot: SetupExplorerSnapshot = {
+        ownCells: ownCells.map((cell) => ({ ...cell })),
+        enemyCells: enemyCells.map((cell) => ({ ...cell })),
+        previewMode,
+        brush,
+        tribunBrush,
+        onlyEmpty,
+        userFlip180,
+        playerColor,
+        unitViewMode,
+        defenseMode,
+        ownHashInput,
+        enemyHashInput,
+        scrollY: typeof window !== "undefined" ? window.scrollY : 0,
+      };
+      savePageSnapshot("setup-explorer", snapshot);
+    };
+  }, [
+    ownCells,
+    enemyCells,
+    previewMode,
+    brush,
+    tribunBrush,
+    onlyEmpty,
+    userFlip180,
+    playerColor,
+    unitViewMode,
+    defenseMode,
+    ownHashInput,
+    enemyHashInput,
+  ]);
+
+  useEffect(() => {
+    const persistSnapshot = () => saveSnapshotRef.current();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") persistSnapshot();
+    };
+    window.addEventListener("pagehide", persistSnapshot);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      persistSnapshot();
+      window.removeEventListener("pagehide", persistSnapshot);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -807,6 +922,38 @@ export default function SetupExplorer() {
     return { move, split, combination, total };
   }, [ownValidation.problems.length, ownValidation.hash, ownBoardContext.board, ownEngineColor]);
 
+  const boardCanvasImport = useMemo(
+    () =>
+      setupExplorerToBoardCanvasImport({
+        ownCells,
+        enemyCells,
+        previewMode,
+        playerColor,
+      }),
+    [ownCells, enemyCells, previewMode, playerColor],
+  );
+  const boardCanvasDisabledReason = boardCanvasImport ? null : "This setup cannot be mapped to Board Canvas.";
+  const ownSetupHash = ownValidation.problems.length === 0 && ownValidation.hash ? ownValidation.hash : null;
+  const enemyPreviewHash =
+    previewMode === "hash" && enemyHashStatus === "valid" && enemyHashInput.trim()
+      ? enemyHashInput.trim()
+      : null;
+  const localAndFriendPrefill = useMemo(() => {
+    if (!ownSetupHash) return null;
+    const whiteSelection = enemyPreviewHash
+      ? { hash: enemyPreviewHash, flip: false }
+      : { hash: ownSetupHash, flip: true };
+    return {
+      initialValues: makeFreeUnrestrictedLobbyPrefill({
+        black: { hash: ownSetupHash, flip: false },
+        white: whiteSelection,
+      }),
+    };
+  }, [enemyPreviewHash, ownSetupHash]);
+  const localAndFriendDisabledReason = ownSetupHash
+    ? null
+    : "Hashable own setup required before opening Local or Friend lobby.";
+
   const boardMetrics = useMemo(() => {
     const innerHexSize = 26;
     const borderWidth = 2;
@@ -1139,6 +1286,44 @@ export default function SetupExplorer() {
     applyPaint(cid, paintRef.current.button);
   };
 
+  const openBoardCanvas = () => {
+    if (!boardCanvasImport) return;
+    navigate("/board-canvas", { state: { boardCanvasImport } });
+  };
+
+  const openLocalLobby = () => {
+    if (!localAndFriendPrefill) return;
+    saveLocalLobbyPrefill(localAndFriendPrefill);
+    navigate("/local", { state: { playLobbyPrefill: localAndFriendPrefill } });
+  };
+
+  const openFriendLobby = () => {
+    if (!localAndFriendPrefill) return;
+    saveFriendLobbyPrefill(localAndFriendPrefill);
+    navigate("/play", { state: { playLobbyPrefill: localAndFriendPrefill } });
+  };
+
+  const continueMenuItems = [
+    {
+      label: "Open in Board Canvas",
+      onSelect: openBoardCanvas,
+      disabled: !boardCanvasImport,
+      disabledReason: boardCanvasDisabledReason ?? undefined,
+    },
+    {
+      label: "Start Local Game",
+      onSelect: openLocalLobby,
+      disabled: !localAndFriendPrefill,
+      disabledReason: localAndFriendDisabledReason ?? undefined,
+    },
+    {
+      label: "Open Friend Lobby",
+      onSelect: openFriendLobby,
+      disabled: !localAndFriendPrefill,
+      disabledReason: localAndFriendDisabledReason ?? undefined,
+    },
+  ];
+
   const segmentedWrapStyle = {
     display: "inline-flex",
     borderRadius: "999px",
@@ -1261,21 +1446,8 @@ export default function SetupExplorer() {
       >
         <PageHeaderBrand title="Setup Explorer" />
         <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-          <Link
-            to="/hub"
-            style={{
-              padding: "8px 14px",
-              borderRadius: "999px",
-              border: "2px solid #6f5a38",
-              background: "#f2d9b2",
-              color: "#2a2218",
-              fontWeight: 700,
-              textDecoration: "none",
-              letterSpacing: "1px",
-              textTransform: "uppercase",
-              fontSize: "12px",
-            }}
-          >
+          <ContinueMenu items={continueMenuItems} />
+          <Link to="/hub" style={navPillLinkStyle}>
             Back to Hub
           </Link>
         </div>
@@ -2244,5 +2416,3 @@ export default function SetupExplorer() {
     </div>
   );
 }
-
-

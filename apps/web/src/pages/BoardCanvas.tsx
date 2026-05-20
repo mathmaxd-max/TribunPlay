@@ -1,13 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 import { SplitUnitGlyph, UnitGlyph, type UnitGlyphMode } from "../ui/UnitGlyph";
+import { ContinueMenu } from "../ui/ContinueMenu";
+import { navPillLinkStyle } from "../ui/pageNavStyles";
 import { areAllUnitIconsReady, preloadAllUnitIcons } from "../ui/unitIcons";
 import { useBoardSfx } from "../audio/boardSfx";
 import { applyLeftBrush, applyRightErase, type BrushToolState } from "../boardCanvas/brushActions";
 import { createEmptyCanvasBoard, getValidBoardCids, toEngineState, type SideToMove } from "../boardCanvas/boardState";
+import {
+  buildContinueTargetsFromEngineState,
+  clearPageSnapshot,
+  fromBoardCanvasArray,
+  loadPageSnapshot,
+  saveFriendLobbyPrefill,
+  saveLocalLobbyPrefill,
+  savePageSnapshot,
+  toBoardCanvasArray,
+  type BoardCanvasRouteState,
+  type BoardCanvasSnapshot,
+} from "../navigation";
 
 type PaintButton = 0 | 2;
 type UnitViewMode = "icon" | "number";
@@ -100,6 +114,10 @@ const OPCODE_GROUPS: ReadonlyArray<{ title: string; opcodes: ReadonlyArray<numbe
 ];
 
 export default function BoardCanvas() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const didHydrateRef = useRef(false);
+  const saveSnapshotRef = useRef<() => void>(() => undefined);
   const [board, setBoard] = useState<Uint8Array>(() => createEmptyCanvasBoard());
   const [sideToMove, setSideToMove] = useState<SideToMove>("black");
   const [tool, setTool] = useState<BrushToolState>({
@@ -114,6 +132,7 @@ export default function BoardCanvas() {
   const [userFlip180, setUserFlip180] = useState(false);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
   const [clearModalOpen, setClearModalOpen] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const boardRef = useRef(board);
   const paintRef = useRef<{ active: boolean; button: PaintButton; lastCid: number | null }>({
@@ -123,6 +142,79 @@ export default function BoardCanvas() {
   });
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const { playSfx } = useBoardSfx();
+
+  useEffect(() => {
+    if (didHydrateRef.current) return;
+    didHydrateRef.current = true;
+
+    const routeState = (location.state ?? null) as BoardCanvasRouteState | null;
+    const consumeRouteState = Boolean(routeState && Object.keys(routeState).length > 0);
+
+    if (routeState?.fresh === true) {
+      setBoard(createEmptyCanvasBoard());
+      setSideToMove("black");
+      setTool({
+        activeColor: 0,
+        height: 1,
+        tribun: false,
+        enslave: false,
+        overwrite: false,
+      });
+      setUserFlip180(false);
+      setUnitViewMode("icon");
+      setStatusMessage(null);
+      clearPageSnapshot("board-canvas");
+      window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
+    } else if (routeState?.boardCanvasImport) {
+      setBoard(fromBoardCanvasArray(routeState.boardCanvasImport.board));
+      setSideToMove(routeState.boardCanvasImport.sideToMove);
+      setStatusMessage(null);
+      window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
+    } else {
+      const snapshot = loadPageSnapshot<BoardCanvasSnapshot>("board-canvas");
+      if (snapshot) {
+        setBoard(fromBoardCanvasArray(snapshot.board));
+        setSideToMove(snapshot.sideToMove);
+        setTool(snapshot.tool);
+        setUserFlip180(snapshot.userFlip180);
+        setUnitViewMode(snapshot.unitViewMode);
+        setStatusMessage(null);
+        window.requestAnimationFrame(() => window.scrollTo({ top: snapshot.scrollY, behavior: "auto" }));
+      }
+    }
+
+    if (consumeRouteState) {
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, [location.pathname, location.state, navigate]);
+
+  useEffect(() => {
+    saveSnapshotRef.current = () => {
+      const snapshot: BoardCanvasSnapshot = {
+        board: toBoardCanvasArray(board),
+        sideToMove,
+        tool,
+        userFlip180,
+        unitViewMode,
+        scrollY: typeof window !== "undefined" ? window.scrollY : 0,
+      };
+      savePageSnapshot("board-canvas", snapshot);
+    };
+  }, [board, sideToMove, tool, userFlip180, unitViewMode]);
+
+  useEffect(() => {
+    const persistSnapshot = () => saveSnapshotRef.current();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") persistSnapshot();
+    };
+    window.addEventListener("pagehide", persistSnapshot);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      persistSnapshot();
+      window.removeEventListener("pagehide", persistSnapshot);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -303,6 +395,60 @@ export default function BoardCanvas() {
     }
   }, [board, sideToMove]);
 
+  const canvasStateValidation = useMemo(() => toEngineState({ board, sideToMove }), [board, sideToMove]);
+  const continueTargets = useMemo(
+    () => (canvasStateValidation.ok ? buildContinueTargetsFromEngineState(canvasStateValidation.state) : null),
+    [canvasStateValidation],
+  );
+
+  const openSetupExplorer = () => {
+    setStatusMessage(null);
+    navigate("/setup-explorer");
+  };
+
+  const openLocalFromCanvas = () => {
+    if (!canvasStateValidation.ok || !continueTargets?.localPrefill) {
+      setStatusMessage(`Cannot continue: ${canvasStateValidation.ok ? "position is invalid." : canvasStateValidation.issues[0]}`);
+      return;
+    }
+    setStatusMessage(null);
+    saveLocalLobbyPrefill(continueTargets.localPrefill);
+    navigate("/local", { state: { playLobbyPrefill: continueTargets.localPrefill } });
+  };
+
+  const openFriendFromCanvas = () => {
+    if (!continueTargets?.friendPrefill) {
+      setStatusMessage("Friend lobby is unavailable for this position.");
+      return;
+    }
+    setStatusMessage(null);
+    saveFriendLobbyPrefill(continueTargets.friendPrefill);
+    navigate("/play", { state: { playLobbyPrefill: continueTargets.friendPrefill } });
+  };
+
+  const continueMenuItems = [
+    {
+      label: "Back to Setup Explorer",
+      onSelect: openSetupExplorer,
+    },
+    {
+      label: "Start Local Game",
+      onSelect: openLocalFromCanvas,
+      disabled: !continueTargets?.localPrefill,
+      disabledReason: !canvasStateValidation.ok ? canvasStateValidation.issues[0] : undefined,
+    },
+    {
+      label: "Open Friend Lobby",
+      onSelect: openFriendFromCanvas,
+      disabled: !continueTargets?.friendPrefill,
+      disabledReason: !continueTargets ? (canvasStateValidation.ok ? "Friend lobby is unavailable for this position." : canvasStateValidation.issues[0]) : undefined,
+    },
+  ];
+
+  useEffect(() => {
+    setStatusMessage(null);
+  }, [board, sideToMove]);
+
   const applyPaint = (cid: number, button: PaintButton) => {
     const result = button === 2 ? applyRightErase(boardRef.current, cid, { enslave: tool.enslave }) : applyLeftBrush(boardRef.current, cid, tool);
     if (!result) {
@@ -385,23 +531,12 @@ export default function BoardCanvas() {
         }}
       >
         <PageHeaderBrand title="Board Canvas" />
-        <Link
-          to="/hub"
-          style={{
-            padding: "8px 14px",
-            borderRadius: "999px",
-            border: "2px solid #7f6a4a",
-            background: "#f2d9b2",
-            color: "#2a2218",
-            textDecoration: "none",
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: "0.8px",
-            fontSize: "12px",
-          }}
-        >
-          Back to Hub
-        </Link>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <ContinueMenu items={continueMenuItems} />
+          <Link to="/hub" style={navPillLinkStyle}>
+            Back to Hub
+          </Link>
+        </div>
       </header>
 
       <main style={{ width: "100%", maxWidth: "1160px", margin: "0 auto", padding: "12px", display: "grid", gap: "12px", flex: 1, minHeight: 0 }}>
@@ -703,7 +838,9 @@ export default function BoardCanvas() {
           <div style={{ display: "grid", gap: "6px", fontSize: "13px", color: "#5a4630" }}>
             <div>Side to move: <span style={{ fontFamily: '"JetBrains Mono", monospace', fontWeight: 700 }}>{statsInfo.sideLabel}</span></div>
             <div>Legal moves: <span style={{ fontFamily: '"JetBrains Mono", monospace', fontWeight: 700 }}>{statsInfo.legalLabel}</span></div>
-            <div style={{ whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }} title={statsInfo.statusLabel}>Status: {statsInfo.statusLabel}</div>
+            <div style={{ whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }} title={statusMessage ?? statsInfo.statusLabel}>
+              Status: {statusMessage ?? statsInfo.statusLabel}
+            </div>
             <div style={{ display: "grid", gap: "2px" }}>
               <div style={{ fontWeight: 700 }}>Move generation</div>
               {statsInfo.opcodeGroups.map((group) => (

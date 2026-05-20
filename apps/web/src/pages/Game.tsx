@@ -59,6 +59,8 @@ type RoomPresence = {
   players: { black: number; white: number };
   spectators: number;
   canStart?: boolean;
+  startBlockReason?: string | null;
+  fixedStartColor?: 'black' | 'white' | null;
   rematch?: { black: boolean; white: boolean };
   rematchReady?: boolean;
 };
@@ -1516,6 +1518,11 @@ export default function Game() {
                 players,
                 spectators,
                 canStart: message.canStart,
+                startBlockReason: typeof message.startBlockReason === 'string' ? message.startBlockReason : null,
+                fixedStartColor:
+                  message.fixedStartColor === 'black' || message.fixedStartColor === 'white'
+                    ? message.fixedStartColor
+                    : null,
                 rematch: message.rematch,
                 rematchReady: message.rematchReady,
               });
@@ -3708,6 +3715,10 @@ export default function Game() {
     selfConnectionId ? rosterRowsForIdentity.find((entry) => entry.connectionId === selfConnectionId) ?? null : null;
   const seatsFilled = Boolean(effectiveRoster.black && effectiveRoster.white);
   const setupIssues = roomSetup.issues ?? [];
+  const fixedPositionLocked = !roomSetup.config.enabled;
+  const fixedFirstMoveColor =
+    roomPresence.fixedStartColor ??
+    (gameState ? (gameState.turn === 0 ? 'black' : 'white') : null);
   const canHostStart =
     roomStatus === 'lobby' &&
     selfIsHost &&
@@ -3767,7 +3778,7 @@ export default function Game() {
       ? canHostStart
         ? 'Start Game'
         : seatsFilled
-        ? 'Waiting for players'
+        ? 'Resolve start requirements'
         : 'Fill both seats'
       : 'Waiting for host';
 
@@ -4497,6 +4508,21 @@ export default function Game() {
                 gap: '10px',
               }}
             >
+              {fixedPositionLocked && fixedFirstMoveColor && (
+                <div
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: '10px',
+                    border: '1px solid #c4b08f',
+                    background: '#f8ecd8',
+                    color: '#4a3720',
+                    fontSize: '13px',
+                    fontWeight: 700,
+                  }}
+                >
+                  Fixed position: {fixedFirstMoveColor === 'black' ? 'Black' : 'White'} moves first.
+                </div>
+              )}
               <div
                 style={{
                   fontSize: '11px',
@@ -4547,7 +4573,9 @@ export default function Game() {
               {!canHostStart && (
                 <div style={{ fontSize: '12px', color: '#7a6543' }}>
                   {selfIsHost
-                    ? setupIssues.length > 0
+                    ? roomPresence.startBlockReason
+                      ? roomPresence.startBlockReason
+                      : setupIssues.length > 0
                       ? `Resolve setup issues before starting: ${setupIssues[0]?.message ?? 'invalid setup'}`
                       : seatsFilled
                       ? 'Both seated players must be connected before starting.'
@@ -4826,12 +4854,9 @@ export default function Game() {
                   <div>Buffer: {formatClockPair(timeControl.bufferMs)}</div>
                   <div>Increment: {formatClockPair(timeControl.incrementMs)}</div>
                   <div>Max game time: {maxGameLabel}</div>
-                  <div>
-                    Custom setups:{' '}
-                    {roomSetup.config.enabled ? `${roomSetup.config.mode === 'shared' ? 'Shared' : 'Free'}` : 'Disabled'}
-                  </div>
-                  {roomSetup.config.enabled && (
+                  {roomSetup.config.enabled ? (
                     <>
+                      <div>Custom setups: {roomSetup.config.mode === 'shared' ? 'Shared' : 'Free'}</div>
                       <div>
                         Allowed tribun heights:{' '}
                         {roomSetup.config.allowedTribunHeights.length > 0
@@ -4854,6 +4879,10 @@ export default function Game() {
                         </>
                       )}
                     </>
+                  ) : (
+                    <div>
+                      Position: fixed custom board{fixedFirstMoveColor ? ` (${fixedFirstMoveColor} to move)` : ''}.
+                    </div>
                   )}
                 </div>
               </div>
@@ -5067,4 +5096,3 @@ export default function Game() {
   );
 
 }
-

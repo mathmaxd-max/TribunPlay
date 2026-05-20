@@ -68,10 +68,45 @@ const createGameBodySchema = z.object({
     })
     .optional(),
   boardBytesB64: z.string().optional(),
+  /** Side to move for imported `boardBytesB64` / `unitsByCid` / `customPosition` boards. */
+  initialTurn: z.union([z.literal(0), z.literal(1)]).optional(),
   unitsByCid: z.record(z.string(), z.array(z.number())).optional(),
   identity: identitySchema,
   turnstileToken: Str({ required: false }),
 });
+
+const isSlavePropertyValid = (primary: engine.Height, secondary: engine.Height): boolean => {
+  if (secondary <= 0) return true;
+  if (primary <= 0) return false;
+  return primary <= 4 && primary * 2 >= secondary;
+};
+
+const validateCustomInitialBoard = (board: Uint8Array): string | null => {
+  let blackTribuns = 0;
+  let whiteTribuns = 0;
+
+  for (let cid = 0; cid < board.length; cid += 1) {
+    if (!engine.isValidTile(cid)) continue;
+    const unit = engine.unitByteToUnit(board[cid]);
+    if (!unit) continue;
+
+    if (!isSlavePropertyValid(unit.p, unit.s)) {
+      return `Slave property violated at cid ${cid}`;
+    }
+    if (unit.tribun && unit.s > 0) {
+      return `Tribun cannot be a slave at cid ${cid}`;
+    }
+    if (unit.tribun) {
+      if (unit.color === 0) blackTribuns += 1;
+      else whiteTribuns += 1;
+    }
+  }
+
+  if (blackTribuns !== 1 || whiteTribuns !== 1) {
+    return `Each side must have exactly one Tribun (black=${blackTribuns}, white=${whiteTribuns}).`;
+  }
+  return null;
+};
 
 export class GameCreate extends OpenAPIRoute {
   schema = {
@@ -178,6 +213,7 @@ export class GameCreate extends OpenAPIRoute {
     const code = this.generateFriendCode();
     const token = crypto.randomUUID();
 
+    const hasCustomBoardInput = Boolean(body.boardBytesB64 || body.unitsByCid || body.customPosition);
     let initialBoard: Uint8Array;
     if (body.boardBytesB64) {
       initialBoard = engine.createInitialBoard(body.boardBytesB64);
@@ -189,7 +225,13 @@ export class GameCreate extends OpenAPIRoute {
       initialBoard = engine.createInitialBoard();
     }
 
-    const initialTurn = 0;
+    if (hasCustomBoardInput) {
+      const boardIssue = validateCustomInitialBoard(initialBoard);
+      if (boardIssue) {
+        return c.json({ error: boardIssue }, 400);
+      }
+    }
+
     const rawSettings = body.roomSettings ?? null;
     const hostColor =
       rawSettings && ["black", "white", "random"].includes(rawSettings.hostColor)
@@ -203,6 +245,14 @@ export class GameCreate extends OpenAPIRoute {
       rawSettings && ["same", "other", "random"].includes(rawSettings.nextStartColor)
         ? rawSettings.nextStartColor
         : "other";
+    const initialTurn: engine.Color =
+      body.initialTurn === 0 || body.initialTurn === 1
+        ? body.initialTurn
+        : startColor === "black"
+        ? 0
+        : startColor === "white"
+        ? 1
+        : 0;
     const rawSetupConfig = rawSettings?.setupConfig;
     const setupConfigInput: Partial<engine.SetupConfig> = {
       enabled: Boolean(rawSetupConfig?.enabled),
@@ -244,6 +294,13 @@ export class GameCreate extends OpenAPIRoute {
           }
         : null,
     };
+    if (hasCustomBoardInput) {
+      const fixedStartColor = initialTurn === 0 ? "black" : "white";
+      roomSettings.startColor = fixedStartColor;
+      roomSettings.setupConfig = engine.normalizeSetupConfig({ enabled: false });
+      setupSelections.black = null;
+      setupSelections.white = null;
+    }
     if (roomSettings.setupConfig.enabled) {
       if (roomSettings.setupConfig.mode === "shared") {
         if (roomSettings.setupConfig.sharedSelection?.hash) {
@@ -300,7 +357,7 @@ export class GameCreate extends OpenAPIRoute {
           JSON.stringify(body.timeControl || {}),
           JSON.stringify(roomSettings),
           JSON.stringify(setupSelections),
-          0,
+          initialTurn,
           resolvedIdentity.accountId,
         ),
     ]);

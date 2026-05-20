@@ -13,6 +13,7 @@ import { formatClockTime as formatTime } from '../clock/formatClockTime';
 import { lobbyPayloadToTimeControl, opponentOf, resolveNextStartColor } from '../clock/buildTimeControl';
 import { applyTurnEnd } from '../clock/endTurn';
 import type { ColorClock, PlayerColor, TimeControl } from '../clock/types';
+import { deserializeEngineState } from '../navigation';
 import { loadLocalLobbyPayload, saveLocalLobbyPayload } from '../play/localLobbySession';
 import type { LocalLobbyPayload } from '../play/types';
 import { PlayerControlCluster } from '../ui/PlayerControlCluster';
@@ -96,6 +97,7 @@ const formatColorName = (color: engine.Color | null | undefined): string => {
 
 const toClockColor = (color: engine.Color): PlayerColor => (color === 0 ? 'black' : 'white');
 const toEngineColor = (color: PlayerColor): engine.Color => (color === 'black' ? 0 : 1);
+const clockColorFromStateTurn = (state: engine.State): PlayerColor => toClockColor(state.turn);
 
 const hasTurnActions = (state: engine.State): boolean => {
   const legal = engine.generateLegalActions(state);
@@ -110,6 +112,12 @@ const hasTurnActions = (state: engine.State): boolean => {
 
 const buildInitialLocalState = (payload: LocalLobbyPayload): { state: engine.State; timeControl: TimeControl } => {
   const timeControl = lobbyPayloadToTimeControl(payload.timeControl);
+  if (payload.initialState) {
+    return {
+      timeControl,
+      state: deserializeEngineState(payload.initialState),
+    };
+  }
   const { roomSettings } = payload;
   const board =
     roomSettings.setupConfig.enabled
@@ -169,7 +177,9 @@ export default function LocalGame() {
   const [timeControl] = useState<TimeControl>(() => (boot && !('error' in boot) ? boot.timeControl : lobbyPayloadToTimeControl(payload?.timeControl ?? { initialMs: 300000, bufferMs: 20000, incrementMs: 0, maxGameMs: null })));
   const [clocksMs, setClocksMs] = useState<ColorClock>(() => ({ ...(timeControl.initialMs ?? { black: 300000, white: 300000 }) }));
   const [bufferMsRemaining, setBufferMsRemaining] = useState<ColorClock>(() => ({ ...(timeControl.bufferMs ?? { black: 20000, white: 20000 }) }));
-  const [activeClockColor, setActiveClockColor] = useState<PlayerColor>(() => payload?.resolvedStartColor ?? 'black');
+  const [activeClockColor, setActiveClockColor] = useState<PlayerColor>(() => (
+    boot && !('error' in boot) ? clockColorFromStateTurn(boot.state) : payload?.resolvedStartColor ?? 'black'
+  ));
   const [clockRunning, setClockRunning] = useState(false);
   const [gameStarted, setGameStarted] = useState(false);
   const [pendingClockTapColor, setPendingClockTapColor] = useState<PlayerColor | null>(null);
@@ -193,6 +203,7 @@ export default function LocalGame() {
     white: null,
   });
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
+  const initialOrientationAppliedRef = useRef(false);
   const uiStateRef = useRef<UIState>({ type: 'idle' });
   const messageTimeoutRef = useRef<number | null>(null);
   const clocksRef = useRef(clocksMs);
@@ -202,6 +213,25 @@ export default function LocalGame() {
   const turnStartBufferRef = useRef<number | null>(null);
   const playedEndRef = useRef(false);
   const { playSfx } = useBoardSfx();
+
+  useEffect(() => {
+    if (!gameState) return;
+    const expected = clockColorFromStateTurn(gameState);
+    setActiveClockColor(expected);
+    if (import.meta.env.DEV && activeClockColor !== expected) {
+      console.assert(
+        activeClockColor === expected,
+        `Clock/turn mismatch at boot: active=${activeClockColor}, turn=${expected}`,
+      );
+    }
+  }, [gameState?.turn]);
+
+  useEffect(() => {
+    if (!gameState || !isWideLayout || !autoFlipEnabled || initialOrientationAppliedRef.current) return;
+    // Keep the side to move at the bottom when booting imported local positions.
+    setIsFlipped(gameState.turn === 0);
+    initialOrientationAppliedRef.current = true;
+  }, [gameState, isWideLayout, autoFlipEnabled]);
 
   useEffect(() => {
     uiStateRef.current = uiState;

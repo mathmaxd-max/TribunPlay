@@ -46,6 +46,15 @@ export type LocalLobbyPayload = {
   resolvedStartColor: 'black' | 'white';
   timeControl: LobbyTimeControlPayload;
   roomSettings: PlayLobbySubmitPayload['roomSettings'];
+  initialState?: {
+    board: number[];
+    turn: engine.Color;
+    ply: number;
+    drawOfferBy: engine.Color | null;
+    drawOfferBlocked: engine.Color | null;
+    status: 'active' | 'ended';
+    winner: engine.Color | null;
+  };
 };
 
 export const DEFAULT_PLAY_LOBBY_VALUES: PlayLobbyFormValues = {

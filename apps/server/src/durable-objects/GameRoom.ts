@@ -1070,6 +1070,26 @@ export class GameRoom implements DurableObject {
 		return counts.black > 0 && counts.white > 0;
 	}
 
+	private hostHasSeat(role: ConnectionRole): boolean {
+		if (!this.hostAccountId) return false;
+		for (const conn of this.connections.values()) {
+			if (conn.accountId === this.hostAccountId && conn.role === role) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private getLockedPositionStartIssue(): string | null {
+		if (this.roomSettings.setupConfig.enabled) return null;
+		const requiredStartColor = this.currentStartColor ?? 0;
+		const requiredSeat: ConnectionRole = requiredStartColor === 0 ? "black" : "white";
+		if (!this.hostHasSeat(requiredSeat)) {
+			return `Fixed position starts with ${requiredSeat}. Host must take the ${requiredSeat} seat before starting.`;
+		}
+		return null;
+	}
+
 	private getEffectiveLobbySelections(): engine.SetupSelectionsBySide {
 		const setupConfig = this.roomSettings.setupConfig;
 		if (setupConfig.enabled && setupConfig.mode === "shared" && setupConfig.sharedSelection) {
@@ -1114,9 +1134,23 @@ export class GameRoom implements DurableObject {
 	private broadcastRoomUpdate(): void {
 		const counts = this.getConnectionCounts();
 		const setupValidation = this.validateLobbySetupState();
-		const canStart = this.roomStatus === "lobby" && this.hasBothPlayersConnected() && setupValidation.ok;
+		const seatsReady = this.hasBothPlayersConnected();
+		const lockedPositionStartIssue = this.getLockedPositionStartIssue();
+		const canStart =
+			this.roomStatus === "lobby" &&
+			seatsReady &&
+			setupValidation.ok &&
+			lockedPositionStartIssue === null;
 		const rematchReady = this.rematchOffers.black && this.rematchOffers.white;
 		const roster = this.getRoomRoster();
+		const startBlockReason =
+			this.roomStatus !== "lobby"
+				? "Game already started."
+				: !seatsReady
+				? "Both seats must be filled and connected."
+				: !setupValidation.ok
+				? setupValidation.issues[0]?.message ?? "Setup configuration is incomplete."
+				: lockedPositionStartIssue;
 		const baseMessage = {
 			t: "room" as const,
 			roomStatus: this.roomStatus,
@@ -1124,6 +1158,13 @@ export class GameRoom implements DurableObject {
 			spectators: counts.spectator,
 			roster,
 			canStart,
+			startBlockReason,
+			fixedStartColor:
+				this.roomSettings.setupConfig.enabled || this.currentStartColor === null
+					? null
+					: this.currentStartColor === 1
+					? "white"
+					: "black",
 			rematch: { ...this.rematchOffers },
 			rematchReady,
 			setup: {
@@ -1175,9 +1216,12 @@ export class GameRoom implements DurableObject {
 			this.gameId = (this.state.id as any).name || this.state.id.toString();
 		}
 
+		const isLockedPositionStart = mode === "start" && !this.roomSettings.setupConfig.enabled;
 		const startColor =
 			mode === "start"
-				? this.resolveStartColor(this.roomSettings.startColor)
+				? isLockedPositionStart
+					? (this.currentStartColor ?? 0)
+					: this.resolveStartColor(this.roomSettings.startColor)
 				: this.resolveNextStartColor();
 		this.currentStartColor = startColor;
 		const nowIso = new Date().toISOString();
@@ -1379,6 +1423,11 @@ export class GameRoom implements DurableObject {
 			}
 			if (!this.hasBothPlayersConnected()) {
 				this.sendError(ws, "Both seats must be filled and connected");
+				return;
+			}
+			const lockedPositionIssue = this.getLockedPositionStartIssue();
+			if (lockedPositionIssue) {
+				this.sendError(ws, lockedPositionIssue);
 				return;
 			}
 			const setupValidation = this.validateLobbySetupState();

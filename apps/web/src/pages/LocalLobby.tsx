@@ -1,5 +1,9 @@
-import { useNavigate } from 'react-router-dom';
+import { useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { resolveStartColor } from '../clock/buildTimeControl';
+import { toPlayerColor } from '../navigation';
+import { loadLocalLobbyPrefill } from '../navigation';
+import type { PlayLobbyPrefill } from '../navigation';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
 import { PlaySettingsForm } from '../play/PlaySettingsForm';
 import { saveLocalLobbyPayload } from '../play/localLobbySession';
@@ -7,14 +11,31 @@ import type { LocalLobbyPayload, PlayLobbySubmitPayload } from '../play/types';
 
 export default function LocalLobby() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const locationState = (location.state ?? null) as { playLobbyPrefill?: PlayLobbyPrefill } | null;
+  const storedPrefill = useMemo(() => loadLocalLobbyPrefill(), []);
+  const localPrefill = locationState?.playLobbyPrefill ?? storedPrefill;
 
   const handleStartLocalGame = (payload: PlayLobbySubmitPayload) => {
+    const prefillStartColor =
+      localPrefill?.resolvedStartColor ??
+      (localPrefill?.initialState ? toPlayerColor(localPrefill.initialState.turn) : null);
+    const resolvedStartColor = prefillStartColor ?? resolveStartColor(payload.roomSettings.startColor);
+    const roomSettings = localPrefill?.positionLocked
+      ? {
+          ...payload.roomSettings,
+          startColor: resolvedStartColor,
+          setupConfig: { ...payload.roomSettings.setupConfig, enabled: false },
+          setupSelections: { black: null, white: null },
+        }
+      : payload.roomSettings;
     const localPayload: LocalLobbyPayload = {
       mode: 'local',
       createdAtMs: Date.now(),
-      resolvedStartColor: resolveStartColor(payload.roomSettings.startColor),
+      resolvedStartColor,
       timeControl: payload.timeControl,
-      roomSettings: payload.roomSettings,
+      roomSettings,
+      initialState: localPrefill?.initialState,
     };
     saveLocalLobbyPayload(localPayload);
     navigate('/local/play', { state: localPayload });
@@ -68,7 +89,14 @@ export default function LocalLobby() {
       </div>
 
       <div style={{ width: '100%', maxWidth: '860px', margin: '0 auto', padding: '20px 14px 24px', display: 'grid', gap: '16px' }}>
-        <PlaySettingsForm mode="local" title="Start Local Game" submitLabel="Start Local Game" onSubmit={handleStartLocalGame} />
+        <PlaySettingsForm
+          mode="local"
+          title="Start Local Game"
+          submitLabel="Start Local Game"
+          onSubmit={handleStartLocalGame}
+          initialValues={localPrefill?.initialValues}
+          hideSetup={Boolean(localPrefill?.positionLocked)}
+        />
       </div>
     </div>
   );

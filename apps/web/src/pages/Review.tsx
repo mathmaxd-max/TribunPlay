@@ -23,6 +23,13 @@ import { useBoardSfx, type BoardSfxEvent } from "../audio/boardSfx";
 import { preloadBoardAssets } from "../audio/boardSfx";
 import { areAllUnitIconsReady, preloadAllUnitIcons } from "../ui/unitIcons";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
+import { ContinueMenu } from "../ui/ContinueMenu";
+import { navPillButtonStyle, navPillLinkStyle } from "../ui/pageNavStyles";
+import {
+  buildContinueTargetsFromEngineState,
+  saveFriendLobbyPrefill,
+  saveLocalLobbyPrefill,
+} from "../navigation";
 
 type ReplayAction = {
   ply: number;
@@ -672,6 +679,53 @@ export default function Review() {
 
   const stepLabel = `${currentIndex} / ${actions.length}`;
   const activeState = states[currentIndex] ?? null;
+  const continueTargets = useMemo(
+    () => (activeState ? buildContinueTargetsFromEngineState(activeState) : null),
+    [activeState],
+  );
+  const continueBlocked = loading || !!error || !!activeAnimation || !continueTargets;
+
+  const openBoardCanvasFromReview = () => {
+    if (!continueTargets) return;
+    navigate("/board-canvas", { state: { boardCanvasImport: continueTargets.boardCanvasImport } });
+  };
+
+  const openLocalFromReview = () => {
+    if (!continueTargets) return;
+    saveLocalLobbyPrefill(continueTargets.localPrefill);
+    navigate("/local", { state: { playLobbyPrefill: continueTargets.localPrefill } });
+  };
+
+  const openFriendFromReview = () => {
+    if (!continueTargets?.friendPrefill) return;
+    saveFriendLobbyPrefill(continueTargets.friendPrefill);
+    navigate("/play", { state: { playLobbyPrefill: continueTargets.friendPrefill } });
+  };
+
+  const continueMenuItems = [
+    {
+      label: "Open in Board Canvas",
+      onSelect: openBoardCanvasFromReview,
+      disabled: continueBlocked,
+      disabledReason: continueBlocked ? "Wait for replay to finish loading." : undefined,
+    },
+    {
+      label: "Start Local Game",
+      onSelect: openLocalFromReview,
+      disabled: continueBlocked,
+      disabledReason: continueBlocked ? "Wait for replay to finish loading." : undefined,
+    },
+    {
+      label: "Open Friend Lobby",
+      onSelect: openFriendFromReview,
+      disabled: continueBlocked || !continueTargets?.friendPrefill,
+      disabledReason:
+        continueBlocked
+          ? "Wait for replay to finish loading."
+          : undefined,
+    },
+  ];
+
   const resultLabel = useMemo(() => {
     if (!game) return "-";
     if (game.winnerColor === null) return "Draw";
@@ -707,38 +761,12 @@ export default function Review() {
         }}
       >
         <PageHeaderBrand title="Review Mode" />
-        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-          <Link
-            to="/history"
-            style={{
-              padding: "8px 14px",
-              borderRadius: "999px",
-              background: "#f2d9b2",
-              border: "2px solid #6f5a38",
-              color: "#2a2218",
-              fontWeight: 700,
-              letterSpacing: "1px",
-              textTransform: "uppercase",
-              textDecoration: "none",
-            }}
-          >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <ContinueMenu items={continueMenuItems} />
+          <Link to="/history" style={navPillLinkStyle}>
             History
           </Link>
-          <button
-            type="button"
-            onClick={() => navigate("/hub")}
-            style={{
-              padding: "8px 14px",
-              borderRadius: "999px",
-              background: "#f2d9b2",
-              border: "2px solid #6f5a38",
-              color: "#2a2218",
-              fontWeight: 700,
-              letterSpacing: "1px",
-              textTransform: "uppercase",
-              cursor: "pointer",
-            }}
-          >
+          <button type="button" onClick={() => navigate("/hub")} style={navPillButtonStyle}>
             Hub
           </button>
         </div>
@@ -846,21 +874,6 @@ export default function Review() {
                 >
                   End
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setIsFlipped((prev) => !prev)}
-                  style={{
-                    padding: "9px 12px",
-                    borderRadius: "999px",
-                    border: "2px solid #6f5a38",
-                    background: "#f2d9b2",
-                    color: "#2a2218",
-                    fontWeight: 700,
-                    cursor: "pointer",
-                  }}
-                >
-                  Flip
-                </button>
                 <div
                   style={{
                     padding: "9px 12px",
@@ -871,7 +884,7 @@ export default function Review() {
                     fontWeight: 700,
                   }}
                 >
-                  Ply: {stepLabel}
+                  Move: {stepLabel}
                 </div>
               </div>
             </div>
@@ -886,8 +899,37 @@ export default function Review() {
                 height: "min(72vh, 720px)",
                 minHeight: "420px",
                 position: "relative",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
               }}
             >
+              <button
+                type="button"
+                onClick={() => setIsFlipped((prev) => !prev)}
+                title="Flip board"
+                aria-label="Flip board"
+                style={{
+                  position: "absolute",
+                  top: "8px",
+                  right: "8px",
+                  width: "24px",
+                  height: "24px",
+                  borderRadius: "6px",
+                  border: `2px solid ${isFlipped ? "#111" : "#1c1a16"}`,
+                  background: isFlipped ? "#111" : "#f6f0e6",
+                  color: isFlipped ? "#f6f0e6" : "#1c1a16",
+                  fontSize: "10px",
+                  fontWeight: 700,
+                  letterSpacing: "0.5px",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  boxShadow: "0 6px 12px rgba(20, 15, 10, 0.18)",
+                  zIndex: 2,
+                }}
+              />
               {renderBoard()}
             </div>
           </>

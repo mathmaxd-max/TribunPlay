@@ -106,10 +106,32 @@ export default function Hub() {
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Game History</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
             Browse finished games and replay moves with step controls.
+            {identity?.mode === "guest" && (
+              <span style={{ display: "block", marginTop: "8px" }}>
+                Sign up to save and review games.
+              </span>
+            )}
           </div>
-          <Link to="/history" style={pillLinkStyle}>
-            Open History
-          </Link>
+          {identity?.mode === "token" ? (
+            <Link to="/history" style={pillLinkStyle}>
+              Open History
+            </Link>
+          ) : (
+            <button
+              type="button"
+              disabled
+              title="Game history requires a free account. Sign up from Settings or the welcome page."
+              style={{
+                ...pillLinkStyle,
+                opacity: 0.55,
+                cursor: "not-allowed",
+                background: "#e6dccf",
+                border: "2px solid #9a8a72",
+              }}
+            >
+              Open History
+            </button>
+          )}
         </section>
 
         <section style={cardSectionStyle}>

@@ -96,19 +96,21 @@ type PlaySettingsFormProps = {
   submitDisabled?: boolean;
   onSubmit: (payload: PlayLobbySubmitPayload) => void;
   initialValues?: Partial<PlayLobbyFormValues>;
+  hideSetup?: boolean;
 };
 
 export function PlaySettingsForm(props: PlaySettingsFormProps) {
-  const { mode, title, submitLabel, submitDisabled = false, onSubmit, initialValues } = props;
+  const { mode, title, submitLabel, submitDisabled = false, onSubmit, initialValues, hideSetup = false } = props;
   const initial = useMemo(
     () => ({ ...DEFAULT_PLAY_LOBBY_VALUES, ...initialValues }),
     [initialValues],
   );
+  const lockedStartColor: RoomColorOption = initial.startColor === 'black' || initial.startColor === 'white' ? initial.startColor : 'black';
 
   const [hostColor, setHostColor] = useState<RoomColorOption>(initial.hostColor);
   const [startColor, setStartColor] = useState<RoomColorOption>(initial.startColor);
   const [nextStartColor, setNextStartColor] = useState<NextStartOption>(initial.nextStartColor);
-  const [customSetupsEnabled, setCustomSetupsEnabled] = useState(initial.customSetupsEnabled);
+  const [customSetupsEnabled, setCustomSetupsEnabled] = useState(hideSetup ? false : initial.customSetupsEnabled);
   const [setupMode, setSetupMode] = useState<engine.SetupMode>(initial.setupMode);
   const [allowedTribunHeights, setAllowedTribunHeights] = useState<Array<1 | 2 | 3>>(initial.allowedTribunHeights);
   const [armyMin, setArmyMin] = useState<number | ''>(initial.armyMin);
@@ -165,10 +167,10 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
 
   const buildSetupConfig = (): engine.SetupConfig =>
     engine.normalizeSetupConfig({
-      enabled: customSetupsEnabled,
+      enabled: hideSetup ? false : customSetupsEnabled,
       mode: setupMode,
       sharedSelection:
-        customSetupsEnabled && setupMode === 'shared' && sharedSetupHash.trim()
+        !hideSetup && customSetupsEnabled && setupMode === 'shared' && sharedSetupHash.trim()
           ? {
               hash: sharedSetupHash.trim(),
               flipBlack: sharedFlipBlack,
@@ -183,7 +185,7 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
     });
 
   const buildSetupSelections = (): engine.SetupSelectionsBySide => {
-    if (!customSetupsEnabled) {
+    if (hideSetup || !customSetupsEnabled) {
       return { black: null, white: null };
     }
     if (setupMode === 'shared') {
@@ -207,19 +209,19 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
       );
       return;
     }
-    if (customSetupsEnabled && armyMin !== '' && armyMax !== '' && armyMin > armyMax) {
+    if (!hideSetup && customSetupsEnabled && armyMin !== '' && armyMax !== '' && armyMin > armyMax) {
       setError('Setup constraints invalid: minimum army size cannot exceed maximum.');
       return;
     }
 
     const setupConfig = buildSetupConfig();
-    if (customSetupsEnabled && setupConfig.allowedTribunHeights.length === 0) {
+    if (!hideSetup && customSetupsEnabled && setupConfig.allowedTribunHeights.length === 0) {
       setError('Setup constraints invalid: at least one tribun height must be allowed.');
       return;
     }
 
     const setupSelections = buildSetupSelections();
-    if (mode === 'local' && customSetupsEnabled) {
+    if (mode === 'local' && !hideSetup && customSetupsEnabled) {
       if (setupMode === 'shared' && !setupSelections.black?.hash) {
         setError('Shared setup hash is required for local custom setup games.');
         return;
@@ -246,8 +248,8 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
         maxGameMinutesTotal,
       }),
       roomSettings: {
-        hostColor,
-        startColor,
+        hostColor: hideSetup ? lockedStartColor : hostColor,
+        startColor: hideSetup ? lockedStartColor : startColor,
         nextStartColor,
         setupConfig,
         setupSelections,
@@ -302,7 +304,7 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
           gap: '10px',
         }}
       >
-        {mode !== 'local' ? (
+        {!hideSetup && mode !== 'local' ? (
           <div>
             <div style={fieldLabelStyle}>Host Color</div>
             <select
@@ -316,18 +318,27 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
             </select>
           </div>
         ) : null}
-        <div>
-          <div style={fieldLabelStyle}>Start Color</div>
-          <select
-            value={startColor}
-            onChange={(event) => setStartColor(event.target.value as RoomColorOption)}
-            style={selectStyle}
-          >
-            <option value="random">Random</option>
-            <option value="black">Black</option>
-            <option value="white">White</option>
-          </select>
-        </div>
+        {!hideSetup ? (
+          <div>
+            <div style={fieldLabelStyle}>Start Color</div>
+            <select
+              value={startColor}
+              onChange={(event) => setStartColor(event.target.value as RoomColorOption)}
+              style={selectStyle}
+            >
+              <option value="random">Random</option>
+              <option value="black">Black</option>
+              <option value="white">White</option>
+            </select>
+          </div>
+        ) : (
+          <div>
+            <div style={fieldLabelStyle}>First Move</div>
+            <div style={{ ...inputStyle, fontWeight: 700 }}>
+              {lockedStartColor === 'black' ? 'Black' : 'White'}
+            </div>
+          </div>
+        )}
         <div>
           <div style={fieldLabelStyle}>Next Start</div>
           <select
@@ -342,6 +353,7 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
         </div>
       </div>
 
+      {!hideSetup ? (
       <div
         style={{
           padding: '14px',
@@ -511,6 +523,7 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
           </div>
         ) : null}
       </div>
+      ) : null}
 
       <div
         style={{
@@ -588,6 +601,8 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
       <div style={helperCardStyle}>
         {mode === 'local'
           ? 'Local mode keeps everything on this device. There is no room code, no waiting, and no server match lifecycle.'
+          : hideSetup
+          ? 'Friend mode creates a server-backed room from this fixed position. Setup inputs are disabled for this room.'
           : 'Friend mode creates a server-backed room. Setup selection happens in the shared match lobby after both players join.'}
       </div>
     </section>
