@@ -3,15 +3,82 @@ import { Link } from "react-router-dom";
 import * as engine from "@tribunplay/engine";
 import { getBaseColor, getHexagonColor, type HexagonState } from "../hexagonColors";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
-import { SplitUnitGlyph, UnitGlyph } from "../ui/UnitGlyph";
+import { SplitUnitGlyph, UnitGlyph, type UnitGlyphMode } from "../ui/UnitGlyph";
 import { areAllUnitIconsReady, preloadAllUnitIcons } from "../ui/unitIcons";
 import { useBoardSfx } from "../audio/boardSfx";
 import { applyLeftBrush, applyRightErase, type BrushToolState } from "../boardCanvas/brushActions";
 import { createEmptyCanvasBoard, getValidBoardCids, toEngineState, type SideToMove } from "../boardCanvas/boardState";
 
 type PaintButton = 0 | 2;
+type UnitViewMode = "icon" | "number";
+
+const TRASH_ICON_URL = new URL("../assets/game/setup/Trash.webp", import.meta.url).href;
+const TRASH_OUTLINE_URL = new URL("../assets/game/setup/_Trash.webp", import.meta.url).href;
 
 const HEIGHT_OPTIONS: ReadonlyArray<BrushToolState["height"]> = [1, 2, 3, 4, 6, 8, "eraser"];
+
+function brushPreviewColors(activeColor: 0 | 1, tribun: boolean): { fill: string; stroke: string } {
+  const isBlack = activeColor === 0;
+  return {
+    fill: tribun ? (isBlack ? "#AE0000" : "#00B4FF") : isBlack ? "#000" : "#fff",
+    stroke: tribun ? (isBlack ? "#000" : "#fff") : isBlack ? "#fff" : "#000",
+  };
+}
+
+function effectiveGlyphMode(viewMode: UnitViewMode, iconsReady: boolean): UnitGlyphMode {
+  return viewMode === "icon" && iconsReady ? "icon" : "number";
+}
+
+function TrashGlyph(props: { sizePx: number; fillColor: string; outlineColor: string }) {
+  const { sizePx, fillColor, outlineColor } = props;
+
+  return (
+    <span
+      aria-label="Eraser"
+      style={{
+        position: "relative",
+        display: "inline-block",
+        width: `${sizePx}px`,
+        height: `${sizePx}px`,
+        userSelect: "none",
+        pointerEvents: "none",
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundColor: outlineColor,
+          WebkitMaskImage: `url(${TRASH_OUTLINE_URL})`,
+          WebkitMaskRepeat: "no-repeat",
+          WebkitMaskPosition: "center",
+          WebkitMaskSize: "contain",
+          maskImage: `url(${TRASH_OUTLINE_URL})`,
+          maskRepeat: "no-repeat",
+          maskPosition: "center",
+          maskSize: "contain",
+        }}
+      />
+      <span
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundColor: fillColor,
+          WebkitMaskImage: `url(${TRASH_ICON_URL})`,
+          WebkitMaskRepeat: "no-repeat",
+          WebkitMaskPosition: "center",
+          WebkitMaskSize: "contain",
+          maskImage: `url(${TRASH_ICON_URL})`,
+          maskRepeat: "no-repeat",
+          maskPosition: "center",
+          maskSize: "contain",
+        }}
+      />
+    </span>
+  );
+}
 const OPCODE_LABELS: Record<number, string> = {
   0: "MOVE",
   1: "KILL",
@@ -43,8 +110,10 @@ export default function BoardCanvas() {
     overwrite: false,
   });
   const [unitIconsReady, setUnitIconsReady] = useState(() => areAllUnitIconsReady());
+  const [unitViewMode, setUnitViewMode] = useState<UnitViewMode>("icon");
   const [userFlip180, setUserFlip180] = useState(false);
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
+  const [clearModalOpen, setClearModalOpen] = useState(false);
 
   const boardRef = useRef(board);
   const paintRef = useRef<{ active: boolean; button: PaintButton; lastCid: number | null }>({
@@ -120,6 +189,12 @@ export default function BoardCanvas() {
     }
     return next;
   }, [board, validCids]);
+
+  const brushPreview = useMemo(
+    () => brushPreviewColors(tool.activeColor, tool.tribun),
+    [tool.activeColor, tool.tribun],
+  );
+  const glyphMode = effectiveGlyphMode(unitViewMode, unitIconsReady);
 
   const boardMetrics = useMemo(() => {
     const innerHexSize = 26;
@@ -252,6 +327,15 @@ export default function BoardCanvas() {
     applyPaint(cid, paintRef.current.button);
   };
 
+  const confirmClearBoard = () => {
+    const empty = createEmptyCanvasBoard();
+    boardRef.current = empty;
+    setBoard(empty);
+    paintRef.current.active = false;
+    paintRef.current.lastCid = null;
+    setClearModalOpen(false);
+  };
+
   const segmentedWrapStyle = {
     display: "inline-flex",
     borderRadius: "999px",
@@ -342,6 +426,15 @@ export default function BoardCanvas() {
                 White
               </button>
             </div>
+            <div style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "1.2px", color: "#7a6543", textTransform: "uppercase" }}>Units</div>
+            <div style={segmentedWrapStyle}>
+              <button type="button" onClick={() => setUnitViewMode("icon")} style={segmentedButtonStyle(unitViewMode === "icon")}>
+                Icons
+              </button>
+              <button type="button" onClick={() => setUnitViewMode("number")} style={segmentedButtonStyle(unitViewMode === "number")}>
+                Numbers
+              </button>
+            </div>
           </div>
 
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
@@ -363,10 +456,23 @@ export default function BoardCanvas() {
                       letterSpacing: "0.4px",
                       cursor: "pointer",
                       padding: "8px 12px",
-                      minWidth: "46px",
+                      minWidth: "56px",
+                      height: "40px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
                     }}
                   >
-                    {height === "eraser" ? "Eraser" : height}
+                    {height === "eraser" ? (
+                      <TrashGlyph sizePx={18} fillColor={brushPreview.fill} outlineColor={brushPreview.stroke} />
+                    ) : (
+                      <UnitGlyph
+                        mode={glyphMode}
+                        unit={{ height, tribun: tool.tribun }}
+                        sizePx={22}
+                        numberColor={brushPreview}
+                      />
+                    )}
                   </button>
                 );
               })}
@@ -403,6 +509,23 @@ export default function BoardCanvas() {
                 </button>
               );
             })}
+            <button
+              type="button"
+              onClick={() => setClearModalOpen(true)}
+              style={{
+                borderRadius: "999px",
+                border: "2px solid #6f5a38",
+                background: "#fff6e8",
+                color: "#2a2218",
+                fontWeight: 700,
+                letterSpacing: "0.6px",
+                textTransform: "uppercase",
+                cursor: "pointer",
+                padding: "8px 12px",
+              }}
+            >
+              Clear
+            </button>
           </div>
 
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
@@ -526,7 +649,7 @@ export default function BoardCanvas() {
                           ? unit.s > 0
                             ? (
                               <SplitUnitGlyph
-                                mode={unitIconsReady ? "icon" : "number"}
+                                mode={glyphMode}
                                 primary={{ height: unit.s, tribun: false }}
                                 secondary={{ height: unit.p, tribun: unit.tribun }}
                                 sizePx={unit.tribun ? 42 : 37}
@@ -539,7 +662,7 @@ export default function BoardCanvas() {
                             )
                             : (
                               <UnitGlyph
-                                mode={unitIconsReady ? "icon" : "number"}
+                                mode={glyphMode}
                                 unit={{ height: unit.p, tribun: unit.tribun }}
                                 sizePx={36}
                                 numberColor={{ fill: textColor ?? "#fff", stroke: strokeColor ?? "#000" }}
@@ -598,6 +721,71 @@ export default function BoardCanvas() {
           </div>
         </section>
       </main>
+
+      {clearModalOpen ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(14, 10, 6, 0.58)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "14px",
+            zIndex: 65,
+          }}
+          onClick={() => setClearModalOpen(false)}
+        >
+          <div
+            style={{
+              width: "min(420px, 92vw)",
+              borderRadius: "16px",
+              border: "2px solid #3c3226",
+              background: "#fffaf0",
+              padding: "24px",
+              display: "grid",
+              gap: "10px",
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div style={{ fontSize: "18px", fontWeight: 700, color: "#2a2218" }}>Clear board?</div>
+            <p style={{ margin: 0, color: "#5a4630", lineHeight: 1.5, fontSize: "14px" }}>
+              All tiles will be removed. This cannot be undone.
+            </p>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => setClearModalOpen(false)}
+                style={{
+                  border: "1px solid #6f5a38",
+                  borderRadius: "8px",
+                  background: "#fff6e8",
+                  padding: "6px 10px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmClearBoard}
+                style={{
+                  border: "2px solid #5b2a2a",
+                  borderRadius: "8px",
+                  background: "#8b3b3b",
+                  color: "#f8f1e7",
+                  padding: "6px 10px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Clear board
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
