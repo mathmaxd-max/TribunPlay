@@ -1,6 +1,7 @@
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import * as engine from "@tribunplay/engine";
 import { countBoardMoveActions, isReviewRelevantAction } from "../lib/reviewActions";
+import { createRematchGame, type CreateRematchGameResult, type RematchParticipant } from "../lib/rematchGame";
 
 type ColorClock = { black: number; white: number };
 type TimeControl = {
@@ -1290,16 +1291,18 @@ export class GameRoom implements DurableObject {
 		return Math.random() < 0.5 ? 0 : 1;
 	}
 
-	private async startNewGame(mode: "start" | "next"): Promise<void> {
-		await this.loadGameState();
+	private buildNextRoundSnapshot(mode: "start" | "next"): {
+		startColor: engine.Color;
+		nextInitialBoard: Uint8Array;
+		effectiveSetupSelections: engine.SetupSelectionsBySide;
+		nowIso: string;
+		nowMs: number;
+	} {
 		if (!this.timeControl) {
 			throw new Error("Time control not loaded");
 		}
 		if (!this.initialBoard && !this.roomSettings.setupConfig.enabled) {
 			throw new Error("Initial board not loaded");
-		}
-		if (!this.gameId) {
-			this.gameId = (this.state.id as any).name || this.state.id.toString();
 		}
 
 		const isLockedPositionStart = mode === "start" && this.isPositionLocked();
@@ -1309,7 +1312,6 @@ export class GameRoom implements DurableObject {
 					? (this.currentStartColor ?? 0)
 					: this.resolveStartColor(this.roomSettings.startColor)
 				: this.resolveNextStartColor();
-		this.currentStartColor = startColor;
 		const nowIso = new Date().toISOString();
 		const nowMs = Date.parse(nowIso);
 		const setupConfig = this.roomSettings.setupConfig;
@@ -1329,12 +1331,34 @@ export class GameRoom implements DurableObject {
 		} else {
 			nextInitialBoard = new Uint8Array(this.initialBoard!);
 		}
-		this.initialBoard = new Uint8Array(nextInitialBoard);
-		this.setupSelections = effectiveSetupSelections;
 
+		return {
+			startColor,
+			nextInitialBoard,
+			effectiveSetupSelections,
+			nowIso,
+			nowMs,
+		};
+	}
+
+	private applyActiveRoundSnapshot(
+		snapshot: {
+			startColor: engine.Color;
+			nextInitialBoard: Uint8Array;
+			effectiveSetupSelections: engine.SetupSelectionsBySide;
+			nowMs: number;
+		},
+	): void {
+		if (!this.timeControl) {
+			throw new Error("Time control not loaded");
+		}
+
+		this.currentStartColor = snapshot.startColor;
+		this.initialBoard = new Uint8Array(snapshot.nextInitialBoard);
+		this.setupSelections = snapshot.effectiveSetupSelections;
 		this.gameState = {
-			board: new Uint8Array(nextInitialBoard),
-			turn: startColor,
+			board: new Uint8Array(snapshot.nextInitialBoard),
+			turn: snapshot.startColor,
 			ply: 0,
 			drawOfferBy: null,
 			drawOfferBlocked: null,
@@ -1347,12 +1371,133 @@ export class GameRoom implements DurableObject {
 		this.clockWhiteMs = this.timeControl.initialMs.white;
 		this.bufferBlackMs = this.timeControl.bufferMs.black;
 		this.bufferWhiteMs = this.timeControl.bufferMs.white;
-		this.turnStartTime = nowMs;
-		this.gameStartTime = nowMs;
+		this.turnStartTime = snapshot.nowMs;
+		this.gameStartTime = snapshot.nowMs;
 		this.actionLog = [];
+		this.legalSet = new Set(Array.from(engine.generateLegalActions(this.gameState)));
+	}
 
-		const legalActions = engine.generateLegalActions(this.gameState);
-		this.legalSet = new Set(Array.from(legalActions));
+	private async resolveRematchPlayerContext(): Promise<{
+		blackPlayerId: string | null;
+		whitePlayerId: string | null;
+		hostAccountId: string | null;
+		participants: RematchParticipant[];
+	}> {
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+
+		let blackPlayerId: string | null = null;
+		let whitePlayerId: string | null = null;
+		let hostAccountId = this.hostAccountId;
+
+		const row = await this.env.DB.prepare(
+			"SELECT black_player_id, white_player_id, host_account_id FROM games WHERE id = ?",
+		)
+			.bind(this.gameId)
+			.first<{
+				black_player_id: string | null;
+				white_player_id: string | null;
+				host_account_id: string | null;
+			}>();
+
+		if (row) {
+			blackPlayerId = row.black_player_id;
+			whitePlayerId = row.white_player_id;
+			hostAccountId = row.host_account_id ?? hostAccountId;
+		}
+
+		const participants: RematchParticipant[] = [];
+		for (const conn of this.connections.values()) {
+			if (conn.role !== "black" && conn.role !== "white") continue;
+			if (!conn.accountId) continue;
+			if (conn.role === "black") blackPlayerId = blackPlayerId ?? conn.accountId;
+			if (conn.role === "white") whitePlayerId = whitePlayerId ?? conn.accountId;
+			const snapshot = await this.resolveAccountSnapshot(conn.accountId);
+			participants.push({
+				seat: conn.role,
+				accountId: conn.accountId,
+				name: this.normalizeLobbyName(snapshot?.name ?? conn.displayName, conn.role === "black" ? "Black Player" : "White Player"),
+				email: snapshot?.email ?? null,
+			});
+		}
+
+		return { blackPlayerId, whitePlayerId, hostAccountId, participants };
+	}
+
+	private broadcastRematchReady(created: CreateRematchGameResult): void {
+		for (const conn of this.connections.values()) {
+			if (conn.ws.readyState !== 1) continue;
+			const seat = conn.role;
+			const token =
+				seat === "black" ? created.blackToken : seat === "white" ? created.whiteToken : undefined;
+			const payload = JSON.stringify({
+				t: "rematch_ready",
+				code: created.code,
+				gameId: created.gameId,
+				seat,
+				...(token ? { token } : {}),
+			});
+			conn.ws.send(payload);
+		}
+	}
+
+	private closeConnectionsAfterRematch(): void {
+		for (const conn of this.connections.values()) {
+			if (conn.ws.readyState === 1) {
+				try {
+					conn.ws.close(1000, "rematch");
+				} catch {}
+			}
+		}
+		this.connections.clear();
+		delete this.players.black;
+		delete this.players.white;
+	}
+
+	private async startRematchAsNewGame(): Promise<void> {
+		await this.loadGameState();
+		const snapshot = this.buildNextRoundSnapshot("next");
+		const playerContext = await this.resolveRematchPlayerContext();
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		const sourceGameId = this.gameId;
+
+		const created = await createRematchGame(this.env.DB, {
+			sourceGameId,
+			hostAccountId: playerContext.hostAccountId,
+			blackPlayerId: playerContext.blackPlayerId,
+			whitePlayerId: playerContext.whitePlayerId,
+			timeControlJson: JSON.stringify(this.timeControl ?? DEFAULT_TIME_CONTROL),
+			roomSettingsJson: JSON.stringify(this.roomSettings),
+			setupStateJson: JSON.stringify(snapshot.effectiveSetupSelections),
+			initialBoard: snapshot.nextInitialBoard,
+			startColor: snapshot.startColor,
+			clockBlackMs: this.timeControl!.initialMs.black,
+			clockWhiteMs: this.timeControl!.initialMs.white,
+			participants: playerContext.participants,
+			supportsDrawOfferBlocked: supportsBlocked,
+		});
+
+		this.logGame("rematch.created", {
+			previousGameId: sourceGameId,
+			gameId: created.gameId,
+			code: created.code,
+		});
+
+		this.broadcastRematchReady(created);
+		this.guestHostCleanupDeadlineMs = null;
+		await this.state.storage.deleteAlarm();
+		this.closeConnectionsAfterRematch();
+	}
+
+	private async startNewGame(): Promise<void> {
+		await this.loadGameState();
+		if (!this.gameId) {
+			this.gameId = (this.state.id as any).name || this.state.id.toString();
+		}
+
+		const snapshot = this.buildNextRoundSnapshot("start");
+		this.applyActiveRoundSnapshot(snapshot);
 
 		await this.env.DB.prepare("DELETE FROM game_actions WHERE game_id = ?")
 			.bind(this.gameId)
@@ -1365,21 +1510,21 @@ export class GameRoom implements DurableObject {
 				   clock_black_ms = ?, clock_white_ms = ?, status = ?, winner_color = ?, end_opcode = ?, end_reason = ?,
 				   initial_board = ?, setup_state_json = ?, started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
 			).bind(
-				this.gameState.ply,
-				this.gameState.turn,
-				startColor,
-				this.gameState.drawOfferBy,
-				this.gameState.drawOfferBlocked,
+				this.gameState!.ply,
+				this.gameState!.turn,
+				snapshot.startColor,
+				this.gameState!.drawOfferBy,
+				this.gameState!.drawOfferBlocked,
 				this.clockBlackMs,
 				this.clockWhiteMs,
 				"active",
 				null,
 				null,
 				null,
-				nextInitialBoard,
+				snapshot.nextInitialBoard,
 				JSON.stringify(this.setupSelections),
-				nowIso,
-				startColor,
+				snapshot.nowIso,
+				snapshot.startColor,
 				this.gameId
 			).run();
 		} else {
@@ -1388,20 +1533,20 @@ export class GameRoom implements DurableObject {
 				   clock_black_ms = ?, clock_white_ms = ?, status = ?, winner_color = ?, end_opcode = ?, end_reason = ?,
 				   initial_board = ?, setup_state_json = ?, started_at = ?, ended_at = NULL, starting_player_color = ? WHERE id = ?`
 			).bind(
-				this.gameState.ply,
-				this.gameState.turn,
-				startColor,
-				this.gameState.drawOfferBy,
+				this.gameState!.ply,
+				this.gameState!.turn,
+				snapshot.startColor,
+				this.gameState!.drawOfferBy,
 				this.clockBlackMs,
 				this.clockWhiteMs,
 				"active",
 				null,
 				null,
 				null,
-				nextInitialBoard,
+				snapshot.nextInitialBoard,
 				JSON.stringify(this.setupSelections),
-				nowIso,
-				startColor,
+				snapshot.nowIso,
+				snapshot.startColor,
 				this.gameId
 			).run();
 		}
@@ -1552,7 +1697,7 @@ export class GameRoom implements DurableObject {
 				this.sendError(ws, setupValidation.issues[0]?.message ?? "Setup configuration is incomplete");
 				return;
 			}
-			await this.startNewGame("start");
+			await this.startNewGame();
 		} else if (message.t === "set_setup_selection") {
 			const conn = this.connections.get(connectionId);
 			if (!conn || conn.role === "spectator") {
@@ -1679,7 +1824,7 @@ export class GameRoom implements DurableObject {
 				this.sendError(ws, "Both players must offer a rematch first");
 				return;
 			}
-			await this.startNewGame("next");
+			await this.startRematchAsNewGame();
 		}
 	}
 

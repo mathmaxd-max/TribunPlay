@@ -5,6 +5,7 @@ import * as engine from "@tribunplay/engine";
 import { identitySchema, resolveIdentity, toHttpError } from "../lib/identity";
 import { resolveTurnstileServerConfig, verifyTurnstile } from "../lib/turnstile";
 import { consumeAuthAttempt, resetAuthAttempt } from "../lib/authRateLimit";
+import { generateFriendCode } from "../lib/rematchGame";
 
 const createGameBodySchema = z.object({
   timeControl: z
@@ -210,7 +211,7 @@ export class GameCreate extends OpenAPIRoute {
     }
 
     const gameId = crypto.randomUUID();
-    const code = this.generateFriendCode();
+    const code = generateFriendCode();
     const token = crypto.randomUUID();
 
     const hasCustomBoardInput = Boolean(body.boardBytesB64 || body.unitsByCid || body.customPosition);
@@ -385,14 +386,5 @@ export class GameCreate extends OpenAPIRoute {
         mode: resolvedIdentity.mode,
       },
     };
-  }
-
-  private generateFriendCode(): string {
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let code = "";
-    for (let i = 0; i < 6; i++) {
-      code += chars[Math.floor(Math.random() * chars.length)];
-    }
-    return code;
   }
 }

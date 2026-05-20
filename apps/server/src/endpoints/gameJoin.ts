@@ -69,18 +69,6 @@ export class GameJoin extends OpenAPIRoute {
       hostHeader: c.req.header("Host") ?? undefined,
     });
 
-    if (turnstileConfig.enabled && body.identity.mode === "guest") {
-      const captcha = await verifyTurnstile({
-        enabled: true,
-        secretKey: turnstileConfig.secretKey,
-        token: body.turnstileToken,
-        remoteIp: clientIp,
-      });
-      if (captcha.success === false) {
-        return c.json({ error: captcha.error }, 400);
-      }
-    }
-
     if (body.identity.mode === "guest") {
       try {
         // M01 additional non-invasive bot protection (guest): per-IP limiting on joining games.
@@ -114,6 +102,22 @@ export class GameJoin extends OpenAPIRoute {
 
     if (game.status !== "lobby" && game.status !== "active") {
       return c.json({ error: "Game is not joinable" }, 400);
+    }
+
+    const isReturningPlayer =
+      game.black_player_id === resolvedIdentity.accountId ||
+      game.white_player_id === resolvedIdentity.accountId;
+
+    if (turnstileConfig.enabled && body.identity.mode === "guest" && !isReturningPlayer) {
+      const captcha = await verifyTurnstile({
+        enabled: true,
+        secretKey: turnstileConfig.secretKey,
+        token: body.turnstileToken,
+        remoteIp: clientIp,
+      });
+      if (captcha.success === false) {
+        return c.json({ error: captcha.error }, 400);
+      }
     }
 
     const gameId = game.id;

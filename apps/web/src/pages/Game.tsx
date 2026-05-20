@@ -1408,11 +1408,6 @@ export default function Game() {
               throw new Error(errData.error || 'Failed to join game');
             }
           } else {
-            const errData = await joinResponse.json().catch(() => ({ error: 'Failed to join game' }));
-            throw new Error(errData.error || 'Failed to join game');
-          }
-
-          if (joinResponse.ok) {
             const joinData = await joinResponse.json();
             gameId = joinData.gameId;
             token = joinData.token;
@@ -1424,7 +1419,6 @@ export default function Game() {
               setStoredIdentity(mergedIdentity);
             }
 
-            // Store for future use
             localStorage.setItem(`game_token_${code}`, token);
             localStorage.setItem(`game_id_${code}`, gameId);
             localStorage.setItem(`game_seat_${code}`, seat);
@@ -1687,6 +1681,36 @@ export default function Game() {
               });
               const newValidator = new LegalBloomValidator(legalMsg.bloom, legalMsg.ply);
               setValidator(newValidator);
+            } else if (message.t === 'rematch_ready') {
+              const nextCode =
+                typeof message.code === 'string' && message.code.trim() ? message.code.trim().toUpperCase() : null;
+              if (!nextCode) {
+                setError('Rematch failed: missing game code.');
+                return;
+              }
+              const nextGameId = typeof message.gameId === 'string' ? message.gameId : null;
+              const rematchSeat =
+                message.seat === 'black' || message.seat === 'white' || message.seat === 'spectator'
+                  ? message.seat
+                  : null;
+              const rematchToken = typeof message.token === 'string' ? message.token : null;
+              logGame('rematch_ready.recv', {
+                nextCode,
+                gameId: nextGameId,
+                seat: rematchSeat,
+                hasToken: Boolean(rematchToken),
+              });
+              if (rematchToken && nextGameId && (rematchSeat === 'black' || rematchSeat === 'white')) {
+                localStorage.setItem(`game_token_${nextCode}`, rematchToken);
+                localStorage.setItem(`game_id_${nextCode}`, nextGameId);
+                localStorage.setItem(`game_seat_${nextCode}`, rematchSeat);
+              }
+              stopReconnectRef.current = true;
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.close();
+              }
+              navigate(`/game/${nextCode}`, { replace: true });
+              return;
             } else if (message.t === 'lobby_closed') {
               stopReconnectRef.current = true;
               if (code) {
@@ -1862,8 +1886,10 @@ export default function Game() {
             wsRef.current = null;
           }
           if (mounted) {
-            setConnectionState('disconnected');
-            if (closeEvent.reason === 'lobby_closed') {
+            if (closeEvent.reason !== 'rematch') {
+              setConnectionState('disconnected');
+            }
+            if (closeEvent.reason === 'lobby_closed' || closeEvent.reason === 'rematch') {
               stopReconnectRef.current = true;
             }
             if (!stopReconnectRef.current) {
