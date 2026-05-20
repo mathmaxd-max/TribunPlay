@@ -14,7 +14,7 @@ import { API_BASE, TURNSTILE_SITE_KEY } from '../config';
 import { renderTurnstile } from '../auth/turnstile';
 import { useHealthCheck } from '../utils/useHealthCheck';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
-import { loadFriendLobbyPrefill } from '../navigation';
+import { clearFriendLobbyPrefill, saveFriendLobbyPrefill } from '../navigation';
 import type { PlayLobbyPrefill } from '../navigation';
 import { PlaySettingsForm } from '../play/PlaySettingsForm';
 import type { PlayLobbySubmitPayload } from '../play/types';
@@ -71,9 +71,17 @@ export default function Home() {
   const navigate = useNavigate();
   const location = useLocation();
   const locationState = (location.state ?? null) as { playLobbyPrefill?: PlayLobbyPrefill } | null;
-  const storedPrefill = useMemo(() => loadFriendLobbyPrefill(), []);
-  const friendPrefill = locationState?.playLobbyPrefill ?? storedPrefill;
+  const routedPrefill = locationState?.playLobbyPrefill ?? null;
+  const friendPrefill = routedPrefill;
   const lockedPrefillState = friendPrefill?.positionLocked && friendPrefill.initialState ? friendPrefill.initialState : null;
+
+  useEffect(() => {
+    if (routedPrefill) {
+      saveFriendLobbyPrefill(routedPrefill);
+      return;
+    }
+    clearFriendLobbyPrefill();
+  }, [routedPrefill]);
 
   const guestTurnstileRequired = useMemo(
     () => identity?.mode === 'guest' && Boolean(TURNSTILE_SITE_KEY),
@@ -304,6 +312,7 @@ export default function Home() {
       localStorage.setItem(`game_token_${data.code}`, data.token);
       localStorage.setItem(`game_id_${data.code}`, data.gameId);
       localStorage.setItem(`game_seat_${data.code}`, data.seat ?? 'spectator');
+      clearFriendLobbyPrefill();
       navigate(`/game/${data.code}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');

@@ -15,13 +15,13 @@ import {
   clearPageSnapshot,
   fromBoardCanvasArray,
   loadPageSnapshot,
-  saveFriendLobbyPrefill,
   saveLocalLobbyPrefill,
   savePageSnapshot,
   toBoardCanvasArray,
   type BoardCanvasRouteState,
   type BoardCanvasSnapshot,
 } from "../navigation";
+import { openFriendLobbyFromPrefill } from "../play/createFriendGame";
 
 type PaintButton = 0 | 2;
 type UnitViewMode = "icon" | "number";
@@ -133,6 +133,7 @@ export default function BoardCanvas() {
   const [boardViewportWidth, setBoardViewportWidth] = useState(0);
   const [clearModalOpen, setClearModalOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [creatingFriendLobby, setCreatingFriendLobby] = useState(false);
 
   const boardRef = useRef(board);
   const paintRef = useRef<{ active: boolean; button: PaintButton; lastCid: number | null }>({
@@ -416,14 +417,20 @@ export default function BoardCanvas() {
     navigate("/local", { state: { playLobbyPrefill: continueTargets.localPrefill } });
   };
 
-  const openFriendFromCanvas = () => {
+  const openFriendFromCanvas = async () => {
     if (!continueTargets?.friendPrefill) {
       setStatusMessage("Friend lobby is unavailable for this position.");
       return;
     }
     setStatusMessage(null);
-    saveFriendLobbyPrefill(continueTargets.friendPrefill);
-    navigate("/play", { state: { playLobbyPrefill: continueTargets.friendPrefill } });
+    setCreatingFriendLobby(true);
+    try {
+      await openFriendLobbyFromPrefill(navigate, continueTargets.friendPrefill);
+    } catch (err) {
+      setStatusMessage(err instanceof Error ? err.message : "Failed to create friend lobby.");
+    } finally {
+      setCreatingFriendLobby(false);
+    }
   };
 
   const continueMenuItems = [
@@ -438,10 +445,16 @@ export default function BoardCanvas() {
       disabledReason: !canvasStateValidation.ok ? canvasStateValidation.issues[0] : undefined,
     },
     {
-      label: "Open Friend Lobby",
-      onSelect: openFriendFromCanvas,
-      disabled: !continueTargets?.friendPrefill,
-      disabledReason: !continueTargets ? (canvasStateValidation.ok ? "Friend lobby is unavailable for this position." : canvasStateValidation.issues[0]) : undefined,
+      label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
+      onSelect: () => void openFriendFromCanvas(),
+      disabled: creatingFriendLobby || !continueTargets?.friendPrefill,
+      disabledReason: creatingFriendLobby
+        ? "Creating lobby..."
+        : !continueTargets
+          ? canvasStateValidation.ok
+            ? "Friend lobby is unavailable for this position."
+            : canvasStateValidation.issues[0]
+          : undefined,
     },
   ];
 

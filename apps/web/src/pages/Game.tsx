@@ -38,6 +38,9 @@ import { filterSetupLibraryItems, type SetupLibrarySearchMode } from '../ui/setu
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
 import { advanceClockSnapshot } from '../clock/advanceClockSnapshot';
 import { formatClockTime as formatTime } from '../clock/formatClockTime';
+import type { LobbyTimeControlPayload } from '../clock/types';
+import { LobbyClockSettings } from '../ui/LobbyClockSettings';
+import { clearFriendLobbyPrefill } from '../navigation';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type Role = 'black' | 'white' | 'spectator';
@@ -48,6 +51,7 @@ type RoomSettings = {
   hostColor: 'black' | 'white' | 'random';
   startColor: 'black' | 'white' | 'random';
   nextStartColor: 'same' | 'other' | 'random';
+  positionLocked?: boolean;
   setupConfig: engine.SetupConfig;
 };
 type RoomSetupState = {
@@ -225,6 +229,7 @@ const normalizeRoomSettings = (raw?: Partial<RoomSettings> | null): RoomSettings
   hostColor: raw?.hostColor === 'black' || raw?.hostColor === 'white' ? raw.hostColor : 'random',
   startColor: raw?.startColor === 'black' || raw?.startColor === 'white' ? raw.startColor : 'random',
   nextStartColor: raw?.nextStartColor === 'same' || raw?.nextStartColor === 'random' ? raw.nextStartColor : 'other',
+  positionLocked: Boolean(raw?.positionLocked),
   setupConfig: engine.normalizeSetupConfig(raw?.setupConfig),
 });
 
@@ -649,6 +654,7 @@ export default function Game() {
   const [showEndModal, setShowEndModal] = useState(false);
   const [showSurrenderConfirm, setShowSurrenderConfirm] = useState(false);
   const [cancellingLobby, setCancellingLobby] = useState(false);
+  const [clockSettingsBusy, setClockSettingsBusy] = useState(false);
   const [gameState, setGameState] = useState<engine.State | null>(null);
   const gameStateRef = useRef<engine.State | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1638,6 +1644,7 @@ export default function Game() {
                 setGameStartTimeMs(null);
                 setTotalGameTimeMs(0);
               }
+              setClockSettingsBusy(false);
             } else if (message.t === 'clock') {
               logGame('clock.recv', {
                 turn: message.turn ?? null,
@@ -1697,6 +1704,7 @@ export default function Game() {
                 message: message.message ?? null,
                 localPly: gameStateRef.current?.ply ?? null,
               });
+              setClockSettingsBusy(false);
               setError(message.message);
               commitUiState({ type: 'idle' }, { idleReason: 'none' });
               requestSync();
@@ -1969,6 +1977,19 @@ export default function Game() {
     wsRef.current.send(JSON.stringify({ t: type }));
   };
 
+  const sendUpdateTimeControl = (payload: LobbyTimeControlPayload) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+    if (!selfIsHost || roomStatus !== 'lobby') {
+      setError('Only the host can update clock settings in the lobby.');
+      return;
+    }
+    setClockSettingsBusy(true);
+    wsRef.current.send(JSON.stringify({ t: 'update_time_control', timeControl: payload }));
+  };
+
   const togglePresenceCollapsed = () => {
     setPresenceCollapsed((prev) => {
       const next = !prev;
@@ -2160,6 +2181,7 @@ export default function Game() {
       localStorage.removeItem(`game_token_${code}`);
       localStorage.removeItem(`game_id_${code}`);
       localStorage.removeItem(`game_seat_${code}`);
+      clearFriendLobbyPrefill();
       navigate('/hub', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to close lobby');
@@ -3715,10 +3737,8 @@ export default function Game() {
     selfConnectionId ? rosterRowsForIdentity.find((entry) => entry.connectionId === selfConnectionId) ?? null : null;
   const seatsFilled = Boolean(effectiveRoster.black && effectiveRoster.white);
   const setupIssues = roomSetup.issues ?? [];
-  const fixedPositionLocked = !roomSetup.config.enabled;
-  const fixedFirstMoveColor =
-    roomPresence.fixedStartColor ??
-    (gameState ? (gameState.turn === 0 ? 'black' : 'white') : null);
+  const fixedFirstMoveColor = roomPresence.fixedStartColor ?? null;
+  const fixedPositionLocked = fixedFirstMoveColor !== null;
   const canHostStart =
     roomStatus === 'lobby' &&
     selfIsHost &&
@@ -3750,16 +3770,6 @@ export default function Game() {
     if (value === 'random') return 'Random';
     return 'Unknown';
   };
-  const formatClockPair = (clock: ColorClock) => {
-    if (clock.black === clock.white) {
-      return formatTime(clock.black);
-    }
-    return `Black ${formatTime(clock.black)} / White ${formatTime(clock.white)}`;
-  };
-  const maxGameLabel =
-    timeControl.maxGameMs != null && Number.isFinite(timeControl.maxGameMs)
-      ? formatTime(timeControl.maxGameMs)
-      : 'Infinite';
   const nextGameHint = rematchReady
     ? null
     : role === 'spectator'
@@ -4508,21 +4518,6 @@ export default function Game() {
                 gap: '10px',
               }}
             >
-              {fixedPositionLocked && fixedFirstMoveColor && (
-                <div
-                  style={{
-                    padding: '10px 12px',
-                    borderRadius: '10px',
-                    border: '1px solid #c4b08f',
-                    background: '#f8ecd8',
-                    color: '#4a3720',
-                    fontSize: '13px',
-                    fontWeight: 700,
-                  }}
-                >
-                  Fixed position: {fixedFirstMoveColor === 'black' ? 'Black' : 'White'} moves first.
-                </div>
-              )}
               <div
                 style={{
                   fontSize: '11px',
@@ -4850,10 +4845,14 @@ export default function Game() {
                   <div>Host color: {formatOption(roomSettings.hostColor)}</div>
                   <div>Start color: {formatOption(roomSettings.startColor)}</div>
                   <div>Next start: {formatNextStart(roomSettings.nextStartColor)}</div>
-                  <div>Initial: {formatClockPair(timeControl.initialMs)}</div>
-                  <div>Buffer: {formatClockPair(timeControl.bufferMs)}</div>
-                  <div>Increment: {formatClockPair(timeControl.incrementMs)}</div>
-                  <div>Max game time: {maxGameLabel}</div>
+                </div>
+                <LobbyClockSettings
+                  timeControl={timeControl}
+                  editable={selfIsHost}
+                  busy={clockSettingsBusy}
+                  onApply={(payload) => sendUpdateTimeControl(payload)}
+                />
+                <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
                   {roomSetup.config.enabled ? (
                     <>
                       <div>Custom setups: {roomSetup.config.mode === 'shared' ? 'Shared' : 'Free'}</div>
@@ -4879,10 +4878,12 @@ export default function Game() {
                         </>
                       )}
                     </>
-                  ) : (
+                  ) : fixedPositionLocked ? (
                     <div>
                       Position: fixed custom board{fixedFirstMoveColor ? ` (${fixedFirstMoveColor} to move)` : ''}.
                     </div>
+                  ) : (
+                    <div>Position: standard starting layout.</div>
                   )}
                 </div>
               </div>

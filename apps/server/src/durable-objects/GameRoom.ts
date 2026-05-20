@@ -1,5 +1,6 @@
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import * as engine from "@tribunplay/engine";
+import { countBoardMoveActions, isReviewRelevantAction } from "../lib/reviewActions";
 
 type ColorClock = { black: number; white: number };
 type TimeControl = {
@@ -13,6 +14,8 @@ type RoomSettings = {
 	hostColor: "black" | "white" | "random";
 	startColor: "black" | "white" | "random";
 	nextStartColor: "same" | "other" | "random";
+	/** True when the lobby was created from an imported board (canvas/replay continue). */
+	positionLocked?: boolean;
 	setupConfig: engine.SetupConfig;
 };
 type ConnectionRole = "black" | "white" | "spectator";
@@ -104,8 +107,25 @@ const normalizeRoomSettings = (raw: any): RoomSettings => {
 		hostColor,
 		startColor,
 		nextStartColor,
+		positionLocked: Boolean(raw.positionLocked),
 		setupConfig: engine.normalizeSetupConfig(raw.setupConfig),
 	};
+};
+
+const boardsEqual = (left: Uint8Array, right: Uint8Array): boolean => {
+	if (left.length !== right.length) return false;
+	for (let i = 0; i < left.length; i += 1) {
+		if (left[i] !== right[i]) return false;
+	}
+	return true;
+};
+
+/** Games created before `positionLocked` existed stored a custom board with setups disabled. */
+const inferPositionLocked = (roomSettings: RoomSettings, initialBoard: Uint8Array): boolean => {
+	if (roomSettings.positionLocked) return true;
+	if (roomSettings.setupConfig.enabled) return false;
+	const defaultBoard = engine.createInitialBoard();
+	return !boardsEqual(initialBoard, defaultBoard);
 };
 
 const normalizeSetupSelections = (raw: any): engine.SetupSelectionsBySide => {
@@ -144,6 +164,7 @@ export class GameRoom implements DurableObject {
 	private supportsDrawOfferBlocked: boolean | null = null;
 	private isGuestOnlyMatchCache: boolean | null = null;
 	private hasPurgedGuestOnlyHistory = false;
+	private hasFinalizedEndedHistory = false;
 
 	/**
 	 * Guardrails for draw offer UX:
@@ -757,7 +778,7 @@ export class GameRoom implements DurableObject {
 			this.broadcastRoomUpdate();
 			void this.updateGuestHostAbandonmentPolicy("ws.close");
 			if (this.roomStatus === "ended") {
-				void this.purgeGuestOnlyHistoryIfRequired("ws.close");
+				void this.finalizeEndedGameHistory("ws.close");
 			}
 		});
 	}
@@ -999,6 +1020,66 @@ export class GameRoom implements DurableObject {
 		this.logGame("guest.cleanup.purged", { trigger });
 	}
 
+	private async purgeShortGameHistory(trigger: string, moveCount: number): Promise<void> {
+		if (!this.gameId) return;
+		await this.env.DB.batch([
+			this.env.DB.prepare("DELETE FROM game_actions WHERE game_id = ?").bind(this.gameId),
+			this.env.DB.prepare("DELETE FROM game_participants WHERE game_id = ?").bind(this.gameId),
+			this.env.DB.prepare("DELETE FROM games WHERE id = ?").bind(this.gameId),
+		]);
+		this.hasPurgedGuestOnlyHistory = true;
+		this.logGame("short.cleanup.purged", { trigger, moveCount });
+	}
+
+	private async finalizeEndedGameHistory(trigger: string): Promise<void> {
+		if (this.hasFinalizedEndedHistory) return;
+		if (!this.gameId) return;
+		if (this.roomStatus !== "ended" && this.gameState?.status !== "ended") return;
+
+		this.hasFinalizedEndedHistory = true;
+
+		const actionsResult = await this.env.DB.prepare(
+			"SELECT action_u32, actor_color, created_at FROM game_actions WHERE game_id = ? ORDER BY ply ASC",
+		)
+			.bind(this.gameId)
+			.all<{ action_u32: number; actor_color: number | null; created_at: string }>();
+
+		const rows = actionsResult.results ?? [];
+		const filtered = rows.filter((row) => isReviewRelevantAction(row.action_u32));
+		const moveCount = countBoardMoveActions(filtered.map((row) => row.action_u32));
+
+		await this.env.DB.prepare("DELETE FROM game_actions WHERE game_id = ?").bind(this.gameId).run();
+
+		if (filtered.length > 0) {
+			const insertStatements = filtered.map((row, ply) =>
+				this.env.DB.prepare(
+					"INSERT INTO game_actions (game_id, ply, action_u32, actor_color, created_at) VALUES (?, ?, ?, ?, ?)",
+				).bind(this.gameId, ply, row.action_u32 >>> 0, row.actor_color, row.created_at),
+			);
+			await this.env.DB.batch(insertStatements);
+		}
+
+		this.actionLog = filtered.map((row) => row.action_u32 >>> 0);
+
+		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
+		if (supportsBlocked) {
+			await this.env.DB.prepare(
+				"UPDATE games SET draw_offer_by = NULL, draw_offer_blocked = NULL WHERE id = ?",
+			)
+				.bind(this.gameId)
+				.run();
+		} else {
+			await this.env.DB.prepare("UPDATE games SET draw_offer_by = NULL WHERE id = ?").bind(this.gameId).run();
+		}
+
+		if (moveCount < 4) {
+			await this.purgeShortGameHistory(trigger, moveCount);
+			return;
+		}
+
+		await this.purgeGuestOnlyHistoryIfRequired(trigger);
+	}
+
 	private async sendSync(ws: WebSocket, role: ConnectionRole): Promise<void> {
 		if (!this.gameState) {
 			return;
@@ -1080,8 +1161,13 @@ export class GameRoom implements DurableObject {
 		return false;
 	}
 
+	private isPositionLocked(): boolean {
+		if (!this.initialBoard) return Boolean(this.roomSettings.positionLocked);
+		return inferPositionLocked(this.roomSettings, this.initialBoard);
+	}
+
 	private getLockedPositionStartIssue(): string | null {
-		if (this.roomSettings.setupConfig.enabled) return null;
+		if (!this.isPositionLocked()) return null;
 		const requiredStartColor = this.currentStartColor ?? 0;
 		const requiredSeat: ConnectionRole = requiredStartColor === 0 ? "black" : "white";
 		if (!this.hostHasSeat(requiredSeat)) {
@@ -1160,7 +1246,7 @@ export class GameRoom implements DurableObject {
 			canStart,
 			startBlockReason,
 			fixedStartColor:
-				this.roomSettings.setupConfig.enabled || this.currentStartColor === null
+				!this.isPositionLocked() || this.currentStartColor === null
 					? null
 					: this.currentStartColor === 1
 					? "white"
@@ -1216,7 +1302,7 @@ export class GameRoom implements DurableObject {
 			this.gameId = (this.state.id as any).name || this.state.id.toString();
 		}
 
-		const isLockedPositionStart = mode === "start" && !this.roomSettings.setupConfig.enabled;
+		const isLockedPositionStart = mode === "start" && this.isPositionLocked();
 		const startColor =
 			mode === "start"
 				? isLockedPositionStart
@@ -1411,6 +1497,37 @@ export class GameRoom implements DurableObject {
 			} catch (error) {
 				this.sendError(ws, error instanceof Error ? error.message : "Failed to reassign seat");
 			}
+		} else if (message.t === "update_time_control") {
+			const conn = this.connections.get(connectionId);
+			if (!conn || !this.isHostConnection(conn)) {
+				this.sendError(ws, "Only the host can update clock settings");
+				return;
+			}
+			if (this.roomStatus !== "lobby") {
+				this.sendError(ws, "Clock settings can only be changed in the lobby");
+				return;
+			}
+			if (!this.gameId) {
+				this.sendError(ws, "Game not ready");
+				return;
+			}
+			const nextTimeControl = normalizeTimeControl(message.timeControl);
+			this.timeControl = nextTimeControl;
+			this.clockBlackMs = nextTimeControl.initialMs.black;
+			this.clockWhiteMs = nextTimeControl.initialMs.white;
+			this.bufferBlackMs = nextTimeControl.bufferMs.black;
+			this.bufferWhiteMs = nextTimeControl.bufferMs.white;
+			await this.env.DB.prepare(
+				"UPDATE games SET time_control_json = ?, clock_black_ms = ?, clock_white_ms = ? WHERE id = ?",
+			)
+				.bind(JSON.stringify(nextTimeControl), this.clockBlackMs, this.clockWhiteMs, this.gameId)
+				.run();
+			for (const current of this.connections.values()) {
+				if (current.ws.readyState === 1) {
+					await this.sendSync(current.ws, current.role);
+				}
+			}
+			this.broadcastRoomUpdate();
 		} else if (message.t === "start_game") {
 			const conn = this.connections.get(connectionId);
 			if (!conn || !this.isHostConnection(conn)) {
@@ -1806,7 +1923,7 @@ export class GameRoom implements DurableObject {
 			this.turnStartTime = null;
 			this.rematchOffers = { black: false, white: false };
 			this.broadcastRoomUpdate();
-			await this.purgeGuestOnlyHistoryIfRequired("action.gameEnded");
+			await this.finalizeEndedGameHistory("action.gameEnded");
 		}
 		const endedForNoMoves = await this.maybeEndOnNoMoves(gameId, legalList);
 		if (!endedForNoMoves) {
@@ -2035,7 +2152,7 @@ export class GameRoom implements DurableObject {
 			this.gameState = endedState;
 			this.roomStatus = "ended";
 			this.turnStartTime = null;
-			await this.purgeGuestOnlyHistoryIfRequired("end.no_moves.idempotent");
+			await this.finalizeEndedGameHistory("end.no_moves.idempotent");
 			await this.scheduleNextAlarm();
 			return;
 		}
@@ -2090,7 +2207,7 @@ export class GameRoom implements DurableObject {
 		this.turnStartTime = null;
 		this.rematchOffers = { black: false, white: false };
 		this.broadcastRoomUpdate();
-		await this.purgeGuestOnlyHistoryIfRequired("end.no_moves");
+		await this.finalizeEndedGameHistory("end.no_moves");
 	}
 
 	private async applyTimeoutEnd(loserColor: engine.Color, gameId: string): Promise<void> {
@@ -2147,7 +2264,7 @@ export class GameRoom implements DurableObject {
 			this.gameState = endedState;
 			this.roomStatus = "ended";
 			this.turnStartTime = null;
-			await this.purgeGuestOnlyHistoryIfRequired("end.timeout.idempotent");
+			await this.finalizeEndedGameHistory("end.timeout.idempotent");
 			await this.scheduleNextAlarm();
 			return;
 		}
@@ -2202,7 +2319,7 @@ export class GameRoom implements DurableObject {
 		this.turnStartTime = null;
 		this.rematchOffers = { black: false, white: false };
 		this.broadcastRoomUpdate();
-		await this.purgeGuestOnlyHistoryIfRequired("end.timeout");
+		await this.finalizeEndedGameHistory("end.timeout");
 	}
 
 	private getClockSnapshot(
@@ -2324,7 +2441,7 @@ export class GameRoom implements DurableObject {
 			this.gameState = endedState;
 			this.roomStatus = "ended";
 			this.turnStartTime = null;
-			await this.purgeGuestOnlyHistoryIfRequired("end.max_game.idempotent");
+			await this.finalizeEndedGameHistory("end.max_game.idempotent");
 			await this.scheduleNextAlarm();
 			return;
 		}
@@ -2379,7 +2496,7 @@ export class GameRoom implements DurableObject {
 		this.turnStartTime = null;
 		this.rematchOffers = { black: false, white: false };
 		this.broadcastRoomUpdate();
-		await this.purgeGuestOnlyHistoryIfRequired("end.max_game");
+		await this.finalizeEndedGameHistory("end.max_game");
 	}
 
 	async alarm(): Promise<void> {

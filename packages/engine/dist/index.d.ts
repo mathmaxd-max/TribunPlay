@@ -44,6 +44,10 @@ export declare function decodeAction(action: number): {
     opcode: number;
     fields: Record<string, number>;
 };
+/** Board moves (0–9), terminal END (11), and draw accept (10, action 2) belong in replay history. */
+export declare function isReviewRelevantAction(actionU32: number): boolean;
+export declare function isBoardMoveOpcode(opcodeValue: number): boolean;
+export declare function countBoardMoveActions(actionWords: readonly number[]): number;
 export declare function packBoard(board: Uint8Array): string;
 export declare function unpackBoard(b64: string): Uint8Array;
 export interface TileChange {

@@ -32,13 +32,13 @@ import {
   clearPageSnapshot,
   loadPageSnapshot,
   makeFreeUnrestrictedLobbyPrefill,
-  saveFriendLobbyPrefill,
   saveLocalLobbyPrefill,
   savePageSnapshot,
   setupExplorerToBoardCanvasImport,
   type SetupExplorerRouteState,
   type SetupExplorerSnapshot,
 } from "../navigation";
+import { openFriendLobbyFromPrefill } from "../play/createFriendGame";
 
 type Brush = "1" | "2" | "3" | "eraser";
 type TileCell = { height: 0 | 1 | 2 | 3; tribun: boolean };
@@ -422,6 +422,8 @@ export default function SetupExplorer() {
   /** Shown inside the save overlay — `librarySaveMessage` sits beneath it and stays hidden while the modal is open. */
   const [saveModalError, setSaveModalError] = useState<string | null>(null);
   const [librarySaveMessage, setLibrarySaveMessage] = useState<string | null>(null);
+  const [creatingFriendLobby, setCreatingFriendLobby] = useState(false);
+  const [continueStatusMessage, setContinueStatusMessage] = useState<string | null>(null);
   const libraryEnabled = isSetupLibraryAvailable();
 
   useEffect(() => {
@@ -1297,10 +1299,17 @@ export default function SetupExplorer() {
     navigate("/local", { state: { playLobbyPrefill: localAndFriendPrefill } });
   };
 
-  const openFriendLobby = () => {
+  const openFriendLobby = async () => {
     if (!localAndFriendPrefill) return;
-    saveFriendLobbyPrefill(localAndFriendPrefill);
-    navigate("/play", { state: { playLobbyPrefill: localAndFriendPrefill } });
+    setContinueStatusMessage(null);
+    setCreatingFriendLobby(true);
+    try {
+      await openFriendLobbyFromPrefill(navigate, localAndFriendPrefill);
+    } catch (err) {
+      setContinueStatusMessage(err instanceof Error ? err.message : "Failed to create friend lobby.");
+    } finally {
+      setCreatingFriendLobby(false);
+    }
   };
 
   const continueMenuItems = [
@@ -1317,10 +1326,12 @@ export default function SetupExplorer() {
       disabledReason: localAndFriendDisabledReason ?? undefined,
     },
     {
-      label: "Open Friend Lobby",
-      onSelect: openFriendLobby,
-      disabled: !localAndFriendPrefill,
-      disabledReason: localAndFriendDisabledReason ?? undefined,
+      label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
+      onSelect: () => void openFriendLobby(),
+      disabled: creatingFriendLobby || !localAndFriendPrefill,
+      disabledReason: creatingFriendLobby
+        ? "Creating lobby..."
+        : localAndFriendDisabledReason ?? undefined,
     },
   ];
 
@@ -1452,6 +1463,23 @@ export default function SetupExplorer() {
           </Link>
         </div>
       </header>
+
+      {continueStatusMessage ? (
+        <div
+          style={{
+            margin: "0 20px",
+            padding: "10px 14px",
+            borderRadius: "10px",
+            border: "2px solid #8b3b3b",
+            background: "#f7d7d5",
+            color: "#5c1c16",
+            fontWeight: 600,
+            fontSize: "13px",
+          }}
+        >
+          {continueStatusMessage}
+        </div>
+      ) : null}
 
       {librarySearchTarget && libraryEnabled && (
         <div

@@ -27,9 +27,9 @@ import { ContinueMenu } from "../ui/ContinueMenu";
 import { navPillButtonStyle, navPillLinkStyle } from "../ui/pageNavStyles";
 import {
   buildContinueTargetsFromEngineState,
-  saveFriendLobbyPrefill,
   saveLocalLobbyPrefill,
 } from "../navigation";
+import { openFriendLobbyFromPrefill } from "../play/createFriendGame";
 
 type ReplayAction = {
   ply: number;
@@ -108,7 +108,7 @@ const formatDateTime = (value: string | null): string => {
   return new Date(parsed).toLocaleString();
 };
 
-const isReplayMoveOpcode = (opcode: number): boolean => opcode >= 0 && opcode <= 9;
+const isReplayStepAction = (actionU32: number): boolean => engine.isBoardMoveOpcode(engine.opcode(actionU32 >>> 0));
 
 const mapStepSound = (forwardBefore: engine.State, forwardAfter: engine.State): BoardSfxEvent | null => {
   if (forwardBefore.status !== "ended" && forwardAfter.status === "ended") {
@@ -122,6 +122,7 @@ export default function Review() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [creatingFriendLobby, setCreatingFriendLobby] = useState(false);
   const [game, setGame] = useState<ReplayGame | null>(null);
   const [actions, setActions] = useState<number[]>([]);
   const [states, setStates] = useState<engine.State[]>([]);
@@ -234,7 +235,7 @@ export default function Review() {
           if (decoded.opcode === 9 && next.status === "ended") {
             detectedTribunCaptureAttackerCid = decoded.fields.attackerCid;
           }
-          if (isReplayMoveOpcode(decoded.opcode)) {
+          if (isReplayStepAction(actionWord)) {
             replayActions.push(actionWord >>> 0);
             replayStates.push(next);
           }
@@ -683,7 +684,7 @@ export default function Review() {
     () => (activeState ? buildContinueTargetsFromEngineState(activeState) : null),
     [activeState],
   );
-  const continueBlocked = loading || !!error || !!activeAnimation || !continueTargets;
+  const continueBlocked = loading || !!error || !!activeAnimation || !continueTargets || creatingFriendLobby;
 
   const openBoardCanvasFromReview = () => {
     if (!continueTargets) return;
@@ -696,10 +697,17 @@ export default function Review() {
     navigate("/local", { state: { playLobbyPrefill: continueTargets.localPrefill } });
   };
 
-  const openFriendFromReview = () => {
+  const openFriendFromReview = async () => {
     if (!continueTargets?.friendPrefill) return;
-    saveFriendLobbyPrefill(continueTargets.friendPrefill);
-    navigate("/play", { state: { playLobbyPrefill: continueTargets.friendPrefill } });
+    setCreatingFriendLobby(true);
+    setError(null);
+    try {
+      await openFriendLobbyFromPrefill(navigate, continueTargets.friendPrefill);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create friend lobby.");
+    } finally {
+      setCreatingFriendLobby(false);
+    }
   };
 
   const continueMenuItems = [
@@ -716,11 +724,12 @@ export default function Review() {
       disabledReason: continueBlocked ? "Wait for replay to finish loading." : undefined,
     },
     {
-      label: "Open Friend Lobby",
-      onSelect: openFriendFromReview,
+      label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
+      onSelect: () => void openFriendFromReview(),
       disabled: continueBlocked || !continueTargets?.friendPrefill,
-      disabledReason:
-        continueBlocked
+      disabledReason: creatingFriendLobby
+        ? "Creating lobby..."
+        : continueBlocked
           ? "Wait for replay to finish loading."
           : undefined,
     },

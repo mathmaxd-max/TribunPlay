@@ -278,6 +278,7 @@ export class GameCreate extends OpenAPIRoute {
       hostColor,
       startColor,
       nextStartColor,
+      positionLocked: hasCustomBoardInput,
       setupConfig: engine.normalizeSetupConfig(setupConfigInput),
     };
     const setupSelections: engine.SetupSelectionsBySide = {
@@ -297,6 +298,7 @@ export class GameCreate extends OpenAPIRoute {
     if (hasCustomBoardInput) {
       const fixedStartColor = initialTurn === 0 ? "black" : "white";
       roomSettings.startColor = fixedStartColor;
+      roomSettings.positionLocked = true;
       roomSettings.setupConfig = engine.normalizeSetupConfig({ enabled: false });
       setupSelections.black = null;
       setupSelections.white = null;

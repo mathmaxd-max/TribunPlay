@@ -7,6 +7,7 @@ import {
   type AuthSuccessResponse,
   type StoredIdentity,
 } from "../auth/identityStore";
+import { ConfirmModal } from "../ui/ConfirmModal";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 import { navPillButtonStyle } from "../ui/pageNavStyles";
 
@@ -76,6 +77,7 @@ export default function History() {
   const [error, setError] = useState<string | null>(null);
   const [games, setGames] = useState<HistoryItem[]>([]);
   const [deletingGameId, setDeletingGameId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<HistoryItem | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -134,9 +136,6 @@ export default function History() {
   }, []);
 
   const handleDeleteGame = async (gameId: string) => {
-    const confirmed = window.confirm("Delete this game from your history?");
-    if (!confirmed) return;
-
     setDeletingGameId(gameId);
     setError(null);
     try {
@@ -168,6 +167,7 @@ export default function History() {
       }
 
       setGames((previous) => previous.filter((item) => item.gameId !== gameId));
+      setDeleteTarget(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete history game");
     } finally {
@@ -272,7 +272,7 @@ export default function History() {
               </Link>
               <button
                 type="button"
-                onClick={() => handleDeleteGame(game.gameId)}
+                onClick={() => setDeleteTarget(game)}
                 disabled={deletingGameId === game.gameId}
                 style={{
                   display: "inline-block",
@@ -293,6 +293,29 @@ export default function History() {
           </div>
         ))}
       </main>
+
+      <ConfirmModal
+        open={deleteTarget !== null}
+        title="Delete game from history?"
+        message={
+          deleteTarget
+            ? `Remove your game against ${deleteTarget.opponent.name ?? "Unknown"} from history? This cannot be undone.`
+            : ""
+        }
+        confirmLabel="Delete"
+        busy={deletingGameId !== null}
+        danger
+        onCancel={() => {
+          if (deletingGameId === null) {
+            setDeleteTarget(null);
+          }
+        }}
+        onConfirm={() => {
+          if (deleteTarget) {
+            void handleDeleteGame(deleteTarget.gameId);
+          }
+        }}
+      />
     </div>
   );
 }

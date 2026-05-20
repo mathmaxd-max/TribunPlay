@@ -274,6 +274,35 @@ export function decodeAction(action: number): { opcode: number; fields: Record<s
   return { opcode: op, fields };
 }
 
+/** Board moves (0–9), terminal END (11), and draw accept (10, action 2) belong in replay history. */
+export function isReviewRelevantAction(actionU32: number): boolean {
+  const { opcode, fields } = decodeAction(actionU32 >>> 0);
+  if (opcode >= 0 && opcode <= 9) {
+    return true;
+  }
+  if (opcode === 11) {
+    return true;
+  }
+  if (opcode === 10 && fields.drawAction === 2) {
+    return true;
+  }
+  return false;
+}
+
+export function isBoardMoveOpcode(opcodeValue: number): boolean {
+  return opcodeValue >= 0 && opcodeValue <= 9;
+}
+
+export function countBoardMoveActions(actionWords: readonly number[]): number {
+  let count = 0;
+  for (const word of actionWords) {
+    if (isBoardMoveOpcode(opcode(word >>> 0))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 // Board packing/unpacking
 export function packBoard(board: Uint8Array): string {
   // Convert Uint8Array to base64

@@ -3,6 +3,7 @@ import { z } from "zod";
 import * as engine from "@tribunplay/engine";
 import type { AppContext } from "../types";
 import { getAuthIdentityFromAccessToken, toAuthSessionHttpError } from "../lib/authSession";
+import { isReviewRelevantAction } from "../lib/reviewActions";
 
 type GameRow = {
   id: string;
@@ -141,7 +142,9 @@ export class HistoryGame extends OpenAPIRoute {
       .bind(gameId)
       .all<ActionRow>();
 
-    const actionRows = actionsResult.results ?? [];
+    const actionRows = (actionsResult.results ?? []).filter((row) =>
+      isReviewRelevantAction(row.action_u32),
+    );
     const actionWords = actionRows.map((row) => row.action_u32 >>> 0);
 
     let parsedTimeControl: unknown = null;

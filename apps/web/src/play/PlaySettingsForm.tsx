@@ -161,9 +161,9 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
     setError(null);
   };
 
-  const canStartGame = sameClockSettings
-    ? isClockNonZero(sharedClock)
-    : isClockNonZero(blackClock) && isClockNonZero(whiteClock);
+  const canStartGame =
+    mode === 'online' ||
+    (sameClockSettings ? isClockNonZero(sharedClock) : isClockNonZero(blackClock) && isClockNonZero(whiteClock));
 
   const buildSetupConfig = (): engine.SetupConfig =>
     engine.normalizeSetupConfig({
@@ -201,7 +201,7 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
   };
 
   const handleSubmit = () => {
-    if (!canStartGame) {
+    if (mode !== 'online' && !canStartGame) {
       setError(
         sameClockSettings
           ? 'Clock invalid: initial time and buffer cannot both be 0.'
@@ -238,15 +238,26 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
     }
 
     setError(null);
+    const clockSource =
+      mode === 'online'
+        ? {
+            sameClockSettings: initial.sameClockSettings,
+            sharedClock: initial.sharedClock,
+            blackClock: initial.blackClock,
+            whiteClock: initial.whiteClock,
+            maxGameEnabled: initial.maxGameEnabled,
+            maxGameMinutesTotal: initial.maxGameMinutesTotal,
+          }
+        : {
+            sameClockSettings,
+            sharedClock,
+            blackClock,
+            whiteClock,
+            maxGameEnabled,
+            maxGameMinutesTotal,
+          };
     onSubmit({
-      timeControl: buildLobbyTimeControl({
-        sameClockSettings,
-        sharedClock,
-        blackClock,
-        whiteClock,
-        maxGameEnabled,
-        maxGameMinutesTotal,
-      }),
+      timeControl: buildLobbyTimeControl(clockSource),
       roomSettings: {
         hostColor: hideSetup ? lockedStartColor : hostColor,
         startColor: hideSetup ? lockedStartColor : startColor,
@@ -525,6 +536,8 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
       </div>
       ) : null}
 
+      {mode !== 'online' ? (
+      <>
       <div
         style={{
           padding: '14px',
@@ -597,13 +610,15 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
           </div>
         ) : null}
       </div>
+      </>
+      ) : null}
 
       <div style={helperCardStyle}>
         {mode === 'local'
           ? 'Local mode keeps everything on this device. There is no room code, no waiting, and no server match lifecycle.'
           : hideSetup
-          ? 'Friend mode creates a server-backed room from this fixed position. Setup inputs are disabled for this room.'
-          : 'Friend mode creates a server-backed room. Setup selection happens in the shared match lobby after both players join.'}
+          ? 'Friend mode creates a server-backed room from this fixed position. Clock and setup are configured in the match lobby.'
+          : 'Friend mode creates a server-backed room. Clock and setup are configured in the match lobby after both players join.'}
       </div>
     </section>
   );
