@@ -14,6 +14,8 @@ import Clock from "./pages/Clock";
 import Settings from "./pages/Settings";
 import LocalLobby from "./pages/LocalLobby";
 import LocalGame from "./pages/LocalGame";
+import TutorialIndex from "./pages/TutorialIndex";
+import TutorialChapter from "./pages/TutorialChapter";
 import { loadLocalLobbyPayload } from "./play/localLobbySession";
 import type { LocalLobbyPayload } from "./play/types";
 import Login from "./pages/Login";
@@ -159,6 +161,22 @@ function App() {
           element={
             <RequireIdentity>
               <Settings />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/tutorial"
+          element={
+            <RequireIdentity>
+              <TutorialIndex />
+            </RequireIdentity>
+          }
+        />
+        <Route
+          path="/tutorial/:chapterId"
+          element={
+            <RequireIdentity>
+              <TutorialChapter />
             </RequireIdentity>
           }
         />

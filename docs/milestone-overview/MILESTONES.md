@@ -432,6 +432,9 @@ flowchart LR
 
 ## M09 — Interactive tutorial
 
+Routes: `/tutorial` and `/tutorial/:chapterId`.
+Board layouts: `apps/web/src/tutorial/boards.json`.
+
 ### Objective
 
 Teach rules **by playing**: chapters with text, diagrams, and **interactive boards** with **restricted move types** per chapter.
@@ -547,4 +550,5 @@ Teach rules **by playing**: chapters with text, diagrams, and **interactive boar
 |-------|--------|
 | Normative rules | [`docs/README.md`](../README.md) |
 | Milestone folder index | [`README.md`](README.md) |
+
 

@@ -156,6 +156,17 @@ export default function Hub() {
         </section>
 
         <section style={cardSectionStyle}>
+          <div style={labelStyle}>Learn</div>
+          <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Tutorial</div>
+          <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
+            Learn rules chapter by chapter with guided boards.
+          </div>
+          <Link to="/tutorial" style={pillLinkStyle}>
+            Open Tutorial
+          </Link>
+        </section>
+
+        <section style={cardSectionStyle}>
           <div style={labelStyle}>Tools</div>
           <div style={{ fontSize: "28px", fontWeight: 700, color: "#2c2318" }}>Setup Explorer</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
