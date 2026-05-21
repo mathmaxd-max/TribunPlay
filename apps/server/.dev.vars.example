@@ -2,6 +2,8 @@
 # Production: use `wrangler secret put AUTH_TOKEN_SECRET` etc., and dashboard
 # Variables / wrangler.jsonc for non-secret vars like TURNSTILE_ENABLED.
 
+# Override production wrangler.jsonc vars for local dev:
+TURNSTILE_ENABLED=false
 # TURNSTILE_ENABLED=true
 # TURNSTILE_SECRET_KEY=
 # GOOGLE_CLIENT_ID=

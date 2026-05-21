@@ -5,12 +5,9 @@
   "observability": {
     "enabled": true
   },
-  "vars": {
-    // Enable Turnstile verification on auth endpoints.
-    // Secret key MUST be set as a Wrangler secret:
-    //   wrangler secret put TURNSTILE_SECRET_KEY
-    "TURNSTILE_ENABLED": "false"
-  },
+  // Do not add routes or production vars here — they are managed in the Cloudflare dashboard.
+  // Deploy uses keep_vars so dashboard settings are not wiped. Local overrides: .dev.vars
+  "keep_vars": true,
   "durable_objects": {
     "bindings": [
       {

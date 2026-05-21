@@ -5,7 +5,8 @@
 	"description": "Cloudflare Worker + Durable Object server for Tribun multiplayer",
 	"type": "module",
 	"scripts": {
-		"deploy": "wrangler deploy",
+		"deploy": "wrangler deploy -c wrangler.deploy.jsonc --keep-vars --strict",
+		"deploy:check": "wrangler deploy -c wrangler.deploy.jsonc --keep-vars --strict --dry-run",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types"

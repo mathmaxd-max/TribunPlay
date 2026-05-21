@@ -1,0 +1,48 @@
+{
+  // Deploy-only config: must match the Cloudflare Worker dashboard so Wrangler does not
+  // try to remove dashboard routes/vars. Not used for `wrangler dev` (see wrangler.jsonc).
+  // If you change production settings in the dashboard, update this file to match (same values).
+  "name": "tribunplay-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-11",
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true
+  },
+  "keep_vars": true,
+  "routes": [
+    {
+      "pattern": "api.tribun-ppc.com",
+      "zone_name": "tribun-ppc.com",
+      "custom_domain": true,
+      "enabled": true,
+      "previews_enabled": false
+    }
+  ],
+  "vars": {
+    "TURNSTILE_ENABLED": "true",
+    "EMAIL_FROM": "noreply@tribun-ppc.com"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GAME_ROOM",
+        "class_name": "GameRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GameRoom"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tribunplay-db",
+      "database_id": "8fd460fd-40c4-4ae6-8d39-0af9649cc11a"
+    }
+  ]
+}

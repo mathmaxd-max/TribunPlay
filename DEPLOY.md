@@ -35,7 +35,19 @@ After merging or committing server code:
 npm run deploy:server
 ```
 
-If you added or changed **Worker secrets** or dashboard vars (e.g. Turnstile, email), set them in the Cloudflare Worker UI or with `wrangler secret put <NAME>` — they are not deployed from Git.
+Production **routes** and **vars** are edited in the **Cloudflare Worker dashboard**. `npm run deploy:server` uses `apps/server/wrangler.deploy.jsonc`, which must mirror the dashboard (same routes, vars, `workers_dev`, `preview_urls`, etc.). `keep_vars` keeps extra dashboard-only vars; `--strict` **aborts** deploy if Wrangler still detects a risky config mismatch.
+
+Preview deploy without uploading:
+
+```bash
+npm run deploy:check --workspace=apps/server
+```
+
+If you change production settings in the dashboard, update `wrangler.deploy.jsonc` to match, or run deploy interactively and accept Wrangler’s offer to sync the file from the dashboard.
+
+Local dev uses `wrangler.jsonc` + `.dev.vars` only (not `wrangler.deploy.jsonc`).
+
+**Secrets** (`TURNSTILE_SECRET_KEY`, `AUTH_TOKEN_SECRET`, …): `wrangler secret put` or dashboard — never in Git.
 
 ---
 
