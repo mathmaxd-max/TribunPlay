@@ -39,6 +39,7 @@ import {
   type SetupExplorerSnapshot,
 } from "../navigation";
 import { openFriendLobbyFromPrefill } from "../play/createFriendGame";
+import { canCreateFriendLobbyFromTooling } from "../play/friendLobbyAccess";
 
 type Brush = "1" | "2" | "3" | "eraser";
 type TileCell = { height: 0 | 1 | 2 | 3; tribun: boolean };
@@ -1325,14 +1326,18 @@ export default function SetupExplorer() {
       disabled: !localAndFriendPrefill,
       disabledReason: localAndFriendDisabledReason ?? undefined,
     },
-    {
-      label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
-      onSelect: () => void openFriendLobby(),
-      disabled: creatingFriendLobby || !localAndFriendPrefill,
-      disabledReason: creatingFriendLobby
-        ? "Creating lobby..."
-        : localAndFriendDisabledReason ?? undefined,
-    },
+    ...(canCreateFriendLobbyFromTooling()
+      ? [
+          {
+            label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
+            onSelect: () => void openFriendLobby(),
+            disabled: creatingFriendLobby || !localAndFriendPrefill,
+            disabledReason: creatingFriendLobby
+              ? "Creating lobby..."
+              : localAndFriendDisabledReason ?? undefined,
+          },
+        ]
+      : []),
   ];
 
   const segmentedWrapStyle = {

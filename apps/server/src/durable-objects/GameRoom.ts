@@ -189,6 +189,7 @@ export class GameRoom implements DurableObject {
 	private initialBoard: Uint8Array | null = null;
 	private currentStartColor: engine.Color | null = null;
 	private rematchOffers: { black: boolean; white: boolean } = { black: false, white: false };
+	private rematchSwapPlayerSeats = false;
 	private hostAccountId: string | null = null;
 	private hostIsGuest: boolean = false;
 	private guestHostCleanupDeadlineMs: number | null = null;
@@ -1152,29 +1153,19 @@ export class GameRoom implements DurableObject {
 		return counts.black > 0 && counts.white > 0;
 	}
 
-	private hostHasSeat(role: ConnectionRole): boolean {
-		if (!this.hostAccountId) return false;
-		for (const conn of this.connections.values()) {
-			if (conn.accountId === this.hostAccountId && conn.role === role) {
-				return true;
-			}
-		}
-		return false;
-	}
-
 	private isPositionLocked(): boolean {
 		if (!this.initialBoard) return Boolean(this.roomSettings.positionLocked);
 		return inferPositionLocked(this.roomSettings, this.initialBoard);
 	}
 
 	private getLockedPositionStartIssue(): string | null {
-		if (!this.isPositionLocked()) return null;
-		const requiredStartColor = this.currentStartColor ?? 0;
-		const requiredSeat: ConnectionRole = requiredStartColor === 0 ? "black" : "white";
-		if (!this.hostHasSeat(requiredSeat)) {
-			return `Fixed position starts with ${requiredSeat}. Host must take the ${requiredSeat} seat before starting.`;
-		}
 		return null;
+	}
+
+	private getFixedPositionInitialTurn(): engine.Color {
+		if (this.roomSettings.startColor === "white") return 1;
+		if (this.roomSettings.startColor === "black") return 0;
+		return this.currentStartColor ?? 0;
 	}
 
 	private getEffectiveLobbySelections(): engine.SetupSelectionsBySide {
@@ -1307,7 +1298,9 @@ export class GameRoom implements DurableObject {
 
 		const isLockedPositionStart = mode === "start" && this.isPositionLocked();
 		const startColor =
-			mode === "start"
+			mode === "next" && this.isPositionLocked()
+				? this.getFixedPositionInitialTurn()
+				: mode === "start"
 				? isLockedPositionStart
 					? (this.currentStartColor ?? 0)
 					: this.resolveStartColor(this.roomSettings.startColor)
@@ -1428,7 +1421,10 @@ export class GameRoom implements DurableObject {
 	private broadcastRematchReady(created: CreateRematchGameResult): void {
 		for (const conn of this.connections.values()) {
 			if (conn.ws.readyState !== 1) continue;
-			const seat = conn.role;
+			let seat = conn.role;
+			if (this.rematchSwapPlayerSeats && (seat === "black" || seat === "white")) {
+				seat = seat === "black" ? "white" : "black";
+			}
 			const token =
 				seat === "black" ? created.blackToken : seat === "white" ? created.whiteToken : undefined;
 			const payload = JSON.stringify({
@@ -1461,12 +1457,25 @@ export class GameRoom implements DurableObject {
 		const playerContext = await this.resolveRematchPlayerContext();
 		const supportsBlocked = await this.ensureDrawOfferBlockedSupport();
 		const sourceGameId = this.gameId;
+		const swapSeats = this.isPositionLocked();
+		this.rematchSwapPlayerSeats = swapSeats;
+		const rematchParticipants = swapSeats
+			? playerContext.participants.map((participant) => ({
+					...participant,
+					seat:
+						participant.seat === "black"
+							? ("white" as const)
+							: participant.seat === "white"
+							? ("black" as const)
+							: participant.seat,
+				}))
+			: playerContext.participants;
 
 		const created = await createRematchGame(this.env.DB, {
 			sourceGameId,
 			hostAccountId: playerContext.hostAccountId,
-			blackPlayerId: playerContext.blackPlayerId,
-			whitePlayerId: playerContext.whitePlayerId,
+			blackPlayerId: swapSeats ? playerContext.whitePlayerId : playerContext.blackPlayerId,
+			whitePlayerId: swapSeats ? playerContext.blackPlayerId : playerContext.whitePlayerId,
 			timeControlJson: JSON.stringify(this.timeControl ?? DEFAULT_TIME_CONTROL),
 			roomSettingsJson: JSON.stringify(this.roomSettings),
 			setupStateJson: JSON.stringify(snapshot.effectiveSetupSelections),
@@ -1474,7 +1483,8 @@ export class GameRoom implements DurableObject {
 			startColor: snapshot.startColor,
 			clockBlackMs: this.timeControl!.initialMs.black,
 			clockWhiteMs: this.timeControl!.initialMs.white,
-			participants: playerContext.participants,
+			participants: rematchParticipants,
+			swapParticipantSeats: swapSeats,
 			supportsDrawOfferBlocked: supportsBlocked,
 		});
 

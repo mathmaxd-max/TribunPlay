@@ -6,7 +6,6 @@ export type NextStartOption = 'same' | 'other' | 'random';
 export type PlayMode = 'online' | 'local';
 
 export type PlayLobbyFormValues = {
-  hostColor: RoomColorOption;
   startColor: RoomColorOption;
   nextStartColor: NextStartOption;
   customSetupsEnabled: boolean;
@@ -32,7 +31,6 @@ export type PlayLobbyFormValues = {
 export type PlayLobbySubmitPayload = {
   timeControl: LobbyTimeControlPayload;
   roomSettings: {
-    hostColor: RoomColorOption;
     startColor: RoomColorOption;
     nextStartColor: NextStartOption;
     setupConfig: engine.SetupConfig;
@@ -58,7 +56,6 @@ export type LocalLobbyPayload = {
 };
 
 export const DEFAULT_PLAY_LOBBY_VALUES: PlayLobbyFormValues = {
-  hostColor: 'random',
   startColor: 'random',
   nextStartColor: 'other',
   customSetupsEnabled: false,

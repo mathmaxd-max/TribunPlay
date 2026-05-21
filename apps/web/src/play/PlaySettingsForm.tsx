@@ -97,17 +97,27 @@ type PlaySettingsFormProps = {
   onSubmit: (payload: PlayLobbySubmitPayload) => void;
   initialValues?: Partial<PlayLobbyFormValues>;
   hideSetup?: boolean;
+  /** Hide Setup Rules (e.g. guests cannot create rooms with custom setups). */
+  hideSetupRules?: boolean;
 };
 
 export function PlaySettingsForm(props: PlaySettingsFormProps) {
-  const { mode, title, submitLabel, submitDisabled = false, onSubmit, initialValues, hideSetup = false } = props;
+  const {
+    mode,
+    title,
+    submitLabel,
+    submitDisabled = false,
+    onSubmit,
+    initialValues,
+    hideSetup = false,
+    hideSetupRules = false,
+  } = props;
   const initial = useMemo(
     () => ({ ...DEFAULT_PLAY_LOBBY_VALUES, ...initialValues }),
     [initialValues],
   );
   const lockedStartColor: RoomColorOption = initial.startColor === 'black' || initial.startColor === 'white' ? initial.startColor : 'black';
 
-  const [hostColor, setHostColor] = useState<RoomColorOption>(initial.hostColor);
   const [startColor, setStartColor] = useState<RoomColorOption>(initial.startColor);
   const [nextStartColor, setNextStartColor] = useState<NextStartOption>(initial.nextStartColor);
   const [customSetupsEnabled, setCustomSetupsEnabled] = useState(hideSetup ? false : initial.customSetupsEnabled);
@@ -259,7 +269,6 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
     onSubmit({
       timeControl: buildLobbyTimeControl(clockSource),
       roomSettings: {
-        hostColor: hideSetup ? lockedStartColor : hostColor,
         startColor: hideSetup ? lockedStartColor : startColor,
         nextStartColor,
         setupConfig,
@@ -315,20 +324,6 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
           gap: '10px',
         }}
       >
-        {!hideSetup && mode !== 'local' ? (
-          <div>
-            <div style={fieldLabelStyle}>Host Color</div>
-            <select
-              value={hostColor}
-              onChange={(event) => setHostColor(event.target.value as RoomColorOption)}
-              style={selectStyle}
-            >
-              <option value="random">Random</option>
-              <option value="black">Black</option>
-              <option value="white">White</option>
-            </select>
-          </div>
-        ) : null}
         {!hideSetup ? (
           <div>
             <div style={fieldLabelStyle}>Start Color</div>
@@ -364,7 +359,7 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
         </div>
       </div>
 
-      {!hideSetup ? (
+      {!hideSetup && !hideSetupRules ? (
       <div
         style={{
           padding: '14px',
@@ -613,13 +608,11 @@ export function PlaySettingsForm(props: PlaySettingsFormProps) {
       </>
       ) : null}
 
-      <div style={helperCardStyle}>
-        {mode === 'local'
-          ? 'Local mode keeps everything on this device. There is no room code, no waiting, and no server match lifecycle.'
-          : hideSetup
-          ? 'Friend mode creates a server-backed room from this fixed position. Clock and setup are configured in the match lobby.'
-          : 'Friend mode creates a server-backed room. Clock and setup are configured in the match lobby after both players join.'}
-      </div>
+      {mode === 'local' ? (
+        <div style={helperCardStyle}>
+          Local mode keeps everything on this device. There is no room code, no waiting, and no server match lifecycle.
+        </div>
+      ) : null}
     </section>
   );
 }

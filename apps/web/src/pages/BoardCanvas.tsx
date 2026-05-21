@@ -22,6 +22,7 @@ import {
   type BoardCanvasSnapshot,
 } from "../navigation";
 import { openFriendLobbyFromPrefill } from "../play/createFriendGame";
+import { canCreateFriendLobbyFromTooling } from "../play/friendLobbyAccess";
 
 type PaintButton = 0 | 2;
 type UnitViewMode = "icon" | "number";
@@ -444,18 +445,22 @@ export default function BoardCanvas() {
       disabled: !continueTargets?.localPrefill,
       disabledReason: !canvasStateValidation.ok ? canvasStateValidation.issues[0] : undefined,
     },
-    {
-      label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
-      onSelect: () => void openFriendFromCanvas(),
-      disabled: creatingFriendLobby || !continueTargets?.friendPrefill,
-      disabledReason: creatingFriendLobby
-        ? "Creating lobby..."
-        : !continueTargets
-          ? canvasStateValidation.ok
-            ? "Friend lobby is unavailable for this position."
-            : canvasStateValidation.issues[0]
-          : undefined,
-    },
+    ...(canCreateFriendLobbyFromTooling()
+      ? [
+          {
+            label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
+            onSelect: () => void openFriendFromCanvas(),
+            disabled: creatingFriendLobby || !continueTargets?.friendPrefill,
+            disabledReason: creatingFriendLobby
+              ? "Creating lobby..."
+              : !continueTargets
+                ? canvasStateValidation.ok
+                  ? "Friend lobby is unavailable for this position."
+                  : canvasStateValidation.issues[0]
+                : undefined,
+          },
+        ]
+      : []),
   ];
 
   useEffect(() => {

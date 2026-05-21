@@ -2,7 +2,12 @@ import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { BoardSfxControls } from "../audio/BoardSfxControls";
 import { useBoardSfx } from "../audio/boardSfx";
-import { getAccountSettings, updateAccountSettings } from "../settings/accountSettings";
+import {
+  ensureAccountPreferencesLoaded,
+  getAccountPreferences,
+  patchAccountPreferences,
+  type PreferredSeatColor,
+} from "../settings/accountSettings";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 import { API_BASE } from "../config";
 import {
@@ -50,8 +55,8 @@ const refreshSessionOrThrow = async (
 
 export default function Settings() {
   const navigate = useNavigate();
-  const [accountSettings, setAccountSettings] = useState(() => getAccountSettings());
-  const { muted, volume, setVolume, toggleMuted } = useBoardSfx();
+  const [accountSettings, setAccountSettings] = useState(() => getAccountPreferences());
+  const { muted, volume, setVolume, setMuted, toggleMuted } = useBoardSfx();
 
   const [accountStatus, setAccountStatus] = useState<AccountStatusResponse | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
@@ -67,11 +72,35 @@ export default function Settings() {
   const tokenIdentity = identity && identity.mode === "token" ? identity : null;
   const tokenIdentityAccountId = tokenIdentity?.accountId ?? null;
 
+  useEffect(() => {
+    let cancelled = false;
+    if (tokenIdentity) {
+      void ensureAccountPreferencesLoaded(tokenIdentity.session.accessToken).then((prefs) => {
+        if (cancelled) return;
+        setAccountSettings(prefs);
+        setVolume(prefs.boardSfx.volume);
+        setMuted(prefs.boardSfx.muted);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    setAccountSettings(getAccountPreferences());
+    return undefined;
+  }, [tokenIdentityAccountId]);
+
   const handleSingleClickReselectToggle = () => {
-    const next = updateAccountSettings({
+    void patchAccountPreferences({
       singleClickCancelReselect: !accountSettings.singleClickCancelReselect,
-    });
-    setAccountSettings(next);
+    }).then(setAccountSettings);
+  };
+
+  const handlePreferredSeatColorChange = (value: PreferredSeatColor) => {
+    void patchAccountPreferences({ preferredSeatColor: value }).then(setAccountSettings);
+  };
+
+  const handleStreamerModeToggle = () => {
+    void patchAccountPreferences({ streamerMode: !accountSettings.streamerMode }).then(setAccountSettings);
   };
 
   const withTokenRetry = async <T,>(fn: (accessToken: string) => Promise<T>): Promise<T> => {
@@ -331,7 +360,7 @@ export default function Settings() {
 
             {accountStatus && (
               <div style={{ color: "#5a4630", fontSize: "14px", display: "grid", gap: "4px" }}>
-                <div>Email: {accountStatus.email}</div>
+                {!accountSettings.streamerMode ? <div>Email: {accountStatus.email}</div> : null}
                 <div>
                   Rename cooldown: {accountStatus.canRenameNow ? "Ready now" : `Available on ${formatDateTime(accountStatus.nextRenameAllowedAt)}`}
                 </div>
@@ -502,6 +531,47 @@ export default function Settings() {
             />
             Enable single-click cancel + reselect during move input
           </label>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              color: "#2a2218",
+              fontWeight: 600,
+              lineHeight: 1.35,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={accountSettings.streamerMode}
+              onChange={handleStreamerModeToggle}
+            />
+            Streamer mode
+          </label>
+          <p style={{ margin: 0, fontSize: "13px", color: "#5a4630", lineHeight: 1.45 }}>
+            Hides email and other sensitive account details in the Hub and Settings UI.
+          </p>
+          <div style={{ display: "grid", gap: "8px" }}>
+            <label
+              htmlFor="preferred-seat-color"
+              style={{ fontSize: "12px", fontWeight: 700, color: "#6f5a38", textTransform: "uppercase", letterSpacing: "1px" }}
+            >
+              Preferred lobby seat
+            </label>
+            <select
+              id="preferred-seat-color"
+              value={accountSettings.preferredSeatColor}
+              onChange={(event) => handlePreferredSeatColorChange(event.target.value as PreferredSeatColor)}
+              style={{ padding: "10px 12px", borderRadius: "10px", border: "1px solid #ccb89b", background: "#fff9ef", maxWidth: "280px" }}
+            >
+              <option value="none">None (random)</option>
+              <option value="black">Black</option>
+              <option value="white">White</option>
+            </select>
+            <p style={{ margin: 0, fontSize: "13px", color: "#5a4630", lineHeight: 1.45 }}>
+              When you host a friend lobby, you are seated automatically after joining. None picks a random open seat.
+            </p>
+          </div>
         </section>
 
         <section

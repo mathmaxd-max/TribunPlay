@@ -1,5 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { clearStoredIdentity, getStoredIdentity } from "../auth/identityStore";
+import { ensureAccountPreferencesLoaded, shouldHideSensitiveIdentity } from "../settings/accountSettings";
 import { PageHeaderBrand } from "../ui/PageHeaderBrand";
 
 const cardSectionStyle = {
@@ -36,6 +38,21 @@ const labelStyle = {
 export default function Hub() {
   const navigate = useNavigate();
   const identity = getStoredIdentity();
+  const [hideSensitiveIdentity, setHideSensitiveIdentity] = useState(() => shouldHideSensitiveIdentity());
+
+  useEffect(() => {
+    if (identity?.mode !== "token") {
+      setHideSensitiveIdentity(false);
+      return;
+    }
+    let cancelled = false;
+    void ensureAccountPreferencesLoaded().then((prefs) => {
+      if (!cancelled) setHideSensitiveIdentity(prefs.streamerMode);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [identity?.mode, identity?.mode === "token" ? identity.accountId : null]);
 
   const handleSignOut = () => {
     clearStoredIdentity();
@@ -77,7 +94,11 @@ export default function Hub() {
           <div style={labelStyle}>Active Identity</div>
           <div style={{ fontSize: "30px", fontWeight: 700, color: "#2c2318" }}>{identity?.name ?? "Unknown user"}</div>
           <div style={{ color: "#5a4630", lineHeight: 1.45 }}>
-            {identity?.mode === "token" ? `Logged in as ${identity.email}` : "Playing as guest"}
+            {identity?.mode === "token"
+              ? hideSensitiveIdentity
+                ? "Logged in"
+                : `Logged in as ${identity.email}`
+              : "Playing as guest"}
           </div>
         </section>
 

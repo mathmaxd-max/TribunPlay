@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { getAccountPreferences, patchAccountPreferences } from '../settings/accountSettings';
 import { preloadBoardVisualAssets } from './preloadBoardAssets';
 
 export type BoardSfxEvent =
@@ -18,7 +19,6 @@ type PlaySfxOptions = {
   when?: number;
 };
 
-const STORAGE_KEY = 'tribun.boardSfx.v1';
 const DEFAULT_SETTINGS: BoardSfxSettings = {
   muted: false,
   volume: 1,
@@ -51,27 +51,11 @@ const clampVolume = (value: number): number => {
 };
 
 const readSettings = (): BoardSfxSettings => {
-  if (typeof window === 'undefined') return { ...DEFAULT_SETTINGS };
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_SETTINGS };
-    const parsed = JSON.parse(raw) as Partial<BoardSfxSettings>;
-    return {
-      muted: Boolean(parsed.muted),
-      volume: clampVolume(parsed.volume ?? DEFAULT_SETTINGS.volume),
-    };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
-};
-
-const persistSettings = (settings: BoardSfxSettings): void => {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    // Ignore storage failures.
-  }
+  const boardSfx = getAccountPreferences().boardSfx;
+  return {
+    muted: boardSfx.muted,
+    volume: clampVolume(boardSfx.volume),
+  };
 };
 
 let sharedAudioContext: AudioContext | null = null;
@@ -236,11 +220,22 @@ export const useBoardSfx = (): BoardSfxApi => {
   const [settings, setSettings] = useState<BoardSfxSettings>(() => readSettings());
   const settingsRef = useRef(settings);
   const lastPlayedAtRef = useRef<Partial<Record<BoardSfxEvent, number>>>({});
+  const persistTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     settingsRef.current = settings;
-    persistSettings(settings);
     setMasterGain(settings);
+    if (persistTimeoutRef.current !== null) {
+      window.clearTimeout(persistTimeoutRef.current);
+    }
+    persistTimeoutRef.current = window.setTimeout(() => {
+      void patchAccountPreferences({ boardSfx: settings });
+    }, 300);
+    return () => {
+      if (persistTimeoutRef.current !== null) {
+        window.clearTimeout(persistTimeoutRef.current);
+      }
+    };
   }, [settings]);
 
   useEffect(() => {

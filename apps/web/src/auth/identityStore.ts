@@ -40,6 +40,8 @@ export type AuthSuccessResponse = {
   };
 };
 
+import { ensureAccountPreferencesLoaded } from "../settings/accountSettings";
+
 const STORAGE_KEY = "tribun_identity_v1";
 
 const normalizeName = (value: string): string => value.trim().replace(/\s+/g, " ");
@@ -169,6 +171,7 @@ export const setIdentityFromAuthSuccess = (auth: AuthSuccessResponse): StoredIde
   };
 
   setStoredIdentity(nextIdentity);
+  void ensureAccountPreferencesLoaded(auth.session.accessToken);
   return nextIdentity;
 };
 

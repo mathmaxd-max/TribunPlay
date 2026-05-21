@@ -30,6 +30,7 @@ import {
   saveLocalLobbyPrefill,
 } from "../navigation";
 import { openFriendLobbyFromPrefill } from "../play/createFriendGame";
+import { canCreateFriendLobbyFromTooling } from "../play/friendLobbyAccess";
 
 type ReplayAction = {
   ply: number;
@@ -723,16 +724,20 @@ export default function Review() {
       disabled: continueBlocked,
       disabledReason: continueBlocked ? "Wait for replay to finish loading." : undefined,
     },
-    {
-      label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
-      onSelect: () => void openFriendFromReview(),
-      disabled: continueBlocked || !continueTargets?.friendPrefill,
-      disabledReason: creatingFriendLobby
-        ? "Creating lobby..."
-        : continueBlocked
-          ? "Wait for replay to finish loading."
-          : undefined,
-    },
+    ...(canCreateFriendLobbyFromTooling()
+      ? [
+          {
+            label: creatingFriendLobby ? "Creating lobby..." : "Open Friend Lobby",
+            onSelect: () => void openFriendFromReview(),
+            disabled: continueBlocked || !continueTargets?.friendPrefill,
+            disabledReason: creatingFriendLobby
+              ? "Creating lobby..."
+              : continueBlocked
+                ? "Wait for replay to finish loading."
+                : undefined,
+          },
+        ]
+      : []),
   ];
 
   const resultLabel = useMemo(() => {

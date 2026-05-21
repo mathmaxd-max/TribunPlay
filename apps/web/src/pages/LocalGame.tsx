@@ -13,7 +13,7 @@ import { formatClockTime as formatTime } from '../clock/formatClockTime';
 import { lobbyPayloadToTimeControl, opponentOf, resolveNextStartColor } from '../clock/buildTimeControl';
 import { applyTurnEnd } from '../clock/endTurn';
 import type { ColorClock, PlayerColor, TimeControl } from '../clock/types';
-import { deserializeEngineState } from '../navigation';
+import { deserializeEngineState, toPlayerColor } from '../navigation';
 import { loadLocalLobbyPayload, saveLocalLobbyPayload } from '../play/localLobbySession';
 import type { LocalLobbyPayload } from '../play/types';
 import { PlayerControlCluster } from '../ui/PlayerControlCluster';
@@ -1400,7 +1400,9 @@ export default function LocalGame() {
 
   const handleRevanche = () => {
     if (!payload) return;
-    const nextStart = resolveNextStartColor(payload.roomSettings.nextStartColor, payload.resolvedStartColor);
+    const nextStart = payload.initialState
+      ? toPlayerColor(payload.initialState.turn)
+      : resolveNextStartColor(payload.roomSettings.nextStartColor, payload.resolvedStartColor);
     const newPayload: LocalLobbyPayload = {
       ...payload,
       createdAtMs: Date.now(),

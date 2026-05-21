@@ -84,7 +84,6 @@ export function prefillToSubmitPayload(prefill: PlayLobbyPrefill): PlayLobbySubm
       maxGameMinutesTotal: initial.maxGameMinutesTotal,
     }),
     roomSettings: {
-      hostColor: lockedStartColor ?? initial.hostColor,
       startColor: lockedStartColor ?? initial.startColor,
       nextStartColor: initial.nextStartColor,
       setupConfig,
@@ -157,7 +156,6 @@ export async function createFriendGameFromPrefill(
   const roomSettings = lockedState
     ? {
         ...submitPayload.roomSettings,
-        hostColor: lockedStartColor ?? submitPayload.roomSettings.hostColor,
         startColor: lockedStartColor ?? submitPayload.roomSettings.startColor,
         setupConfig: engine.normalizeSetupConfig({ enabled: false }),
         setupSelections: { black: null, white: null },

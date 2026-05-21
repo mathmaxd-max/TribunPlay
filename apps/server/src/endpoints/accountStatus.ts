@@ -2,6 +2,8 @@ import { OpenAPIRoute } from "chanfana";
 import { z } from "zod";
 import type { AppContext } from "../types";
 import { getAuthIdentityFromAccessToken, toAuthSessionHttpError } from "../lib/authSession";
+import { normalizeAccountPreferences } from "../lib/accountPreferences";
+import { accountPreferencesSchema } from "./accountPreferences";
 
 const RENAME_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -36,6 +38,8 @@ export class AccountStatus extends OpenAPIRoute {
               canRenameNow: z.boolean(),
               nextRenameAllowedAt: z.string().nullable(),
               lastNameRenameAt: z.string().nullable(),
+              preferences: accountPreferencesSchema,
+              hasStoredPreferences: z.boolean(),
             }),
           },
         },
@@ -65,12 +69,18 @@ export class AccountStatus extends OpenAPIRoute {
 
     const account = await env.DB
       .prepare(
-        `SELECT name, email, provider, last_name_rename_at
+        `SELECT name, email, provider, last_name_rename_at, preferences_json
          FROM accounts
          WHERE id = ? AND deleted_at IS NULL`
       )
       .bind(identity.accountId)
-      .first<{ name: string; email: string; provider: "guest" | "google" | "email"; last_name_rename_at: string | null }>();
+      .first<{
+        name: string;
+        email: string;
+        provider: "guest" | "google" | "email";
+        last_name_rename_at: string | null;
+        preferences_json: string | null;
+      }>();
 
     if (!account || account.provider === "guest") {
       return c.json({ error: "Account settings are unavailable for guest accounts." }, 403);
@@ -86,6 +96,8 @@ export class AccountStatus extends OpenAPIRoute {
       canRenameNow,
       nextRenameAllowedAt,
       lastNameRenameAt: account.last_name_rename_at,
+      preferences: normalizeAccountPreferences(account.preferences_json),
+      hasStoredPreferences: account.preferences_json !== null && account.preferences_json !== "",
     };
   }
 }

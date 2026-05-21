@@ -117,7 +117,6 @@ export function buildPlayLobbyPrefillFromEngineState(state: engine.State): PlayL
   const startColor = toPlayerColor(state.turn);
   return {
     initialValues: {
-      hostColor: startColor,
       startColor,
       customSetupsEnabled: false,
       sharedSetupHash: "",

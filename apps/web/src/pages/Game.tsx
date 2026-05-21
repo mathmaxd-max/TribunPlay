@@ -32,7 +32,7 @@ import {
 } from '../setupLibrary';
 import { getFlippedSetupHash, normalizeSetupHashInput } from '../setupHashFlip';
 import { type BoardSfxEvent, useBoardSfx } from '../audio/boardSfx';
-import { getAccountSettings } from '../settings/accountSettings';
+import { getAccountPreferences } from '../settings/accountSettings';
 import { areAllUnitIconsReady, preloadAllUnitIcons } from '../ui/unitIcons';
 import { filterSetupLibraryItems, type SetupLibrarySearchMode } from '../ui/setupLibraryFilters';
 import { PageHeaderBrand } from '../ui/PageHeaderBrand';
@@ -48,7 +48,6 @@ type EmptyCache = UiMoveCache['empty'] extends Map<any, infer T> ? T : never;
 type ColorClock = { black: number; white: number };
 type RoomStatus = 'lobby' | 'active' | 'ended';
 type RoomSettings = {
-  hostColor: 'black' | 'white' | 'random';
   startColor: 'black' | 'white' | 'random';
   nextStartColor: 'same' | 'other' | 'random';
   positionLocked?: boolean;
@@ -219,14 +218,12 @@ const DEFAULT_TIME_CONTROL: TimeControl = {
   maxGameMs: null,
 };
 const DEFAULT_ROOM_SETTINGS: RoomSettings = {
-  hostColor: 'random',
   startColor: 'random',
   nextStartColor: 'other',
   setupConfig: engine.normalizeSetupConfig(undefined),
 };
 
 const normalizeRoomSettings = (raw?: Partial<RoomSettings> | null): RoomSettings => ({
-  hostColor: raw?.hostColor === 'black' || raw?.hostColor === 'white' ? raw.hostColor : 'random',
   startColor: raw?.startColor === 'black' || raw?.startColor === 'white' ? raw.startColor : 'random',
   nextStartColor: raw?.nextStartColor === 'same' || raw?.nextStartColor === 'random' ? raw.nextStartColor : 'other',
   positionLocked: Boolean(raw?.positionLocked),
@@ -650,6 +647,8 @@ export default function Game() {
   const [selfIsHost, setSelfIsHost] = useState(false);
   const [currentGameId, setCurrentGameId] = useState<string | null>(null);
   const [presenceCollapsed, setPresenceCollapsed] = useState(false);
+  const [clockCollapsed, setClockCollapsed] = useState(true);
+  const hostAutoSeatAttemptedRef = useRef(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const [showEndModal, setShowEndModal] = useState(false);
   const [showSurrenderConfirm, setShowSurrenderConfirm] = useState(false);
@@ -695,7 +694,7 @@ export default function Game() {
   const [uiState, setUiState] = useState<UIState>({ type: 'idle' });
   const uiStateRef = useRef<UIState>({ type: 'idle' });
   const [singleClickCancelReselectEnabled] = useState(
-    () => getAccountSettings().singleClickCancelReselect,
+    () => getAccountPreferences().singleClickCancelReselect,
   );
   const [ownDrawOfferSinceMs, setOwnDrawOfferSinceMs] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
@@ -786,6 +785,15 @@ export default function Game() {
     [currentGameId, code],
   );
 
+  const clockStorageKey = useMemo(
+    () => `game_clock_collapsed_${currentGameId ?? code ?? 'unknown'}`,
+    [currentGameId, code],
+  );
+
+  useEffect(() => {
+    hostAutoSeatAttemptedRef.current = false;
+  }, [currentGameId, code]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const stored = window.sessionStorage.getItem(presenceStorageKey);
@@ -795,6 +803,16 @@ export default function Game() {
     }
     setPresenceCollapsed(!isWideLayout);
   }, [presenceStorageKey, isWideLayout]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = window.sessionStorage.getItem(clockStorageKey);
+    if (stored === '1' || stored === '0') {
+      setClockCollapsed(stored === '1');
+      return;
+    }
+    setClockCollapsed(true);
+  }, [clockStorageKey]);
 
   const describeAction = (action: number) => {
     const unsigned = action >>> 0;
@@ -2026,6 +2044,16 @@ export default function Game() {
     });
   };
 
+  const toggleClockCollapsed = () => {
+    setClockCollapsed((prev) => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem(clockStorageKey, next ? '1' : '0');
+      }
+      return next;
+    });
+  };
+
   const sendLobbySeatCommand = (targetConnectionId: string, seat: Role) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
@@ -2043,6 +2071,37 @@ export default function Game() {
       }),
     );
   };
+
+  useEffect(() => {
+    if (!selfIsHost || roomStatus !== 'lobby' || role !== 'spectator' || !selfConnectionId) return;
+    if (hostAutoSeatAttemptedRef.current) return;
+
+    const roster = roomRoster ?? buildFallbackLobbyRoster(roomPresence);
+    const preferred = getAccountPreferences().preferredSeatColor;
+    let targetSeat: 'black' | 'white' =
+      preferred === 'black' ? 'black' : preferred === 'white' ? 'white' : Math.random() < 0.5 ? 'black' : 'white';
+
+    if (targetSeat === 'black' && roster.black) {
+      targetSeat = roster.white ? 'white' : 'black';
+    } else if (targetSeat === 'white' && roster.white) {
+      targetSeat = roster.black ? 'black' : 'white';
+    }
+
+    if ((targetSeat === 'black' && roster.black) || (targetSeat === 'white' && roster.white)) {
+      hostAutoSeatAttemptedRef.current = true;
+      return;
+    }
+
+    hostAutoSeatAttemptedRef.current = true;
+    sendLobbySeatCommand(selfConnectionId, targetSeat);
+  }, [
+    selfIsHost,
+    roomStatus,
+    role,
+    selfConnectionId,
+    roomRoster,
+    roomPresence,
+  ]);
 
   const sendSetupSelection = (hash: string, flip: boolean) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -4866,18 +4925,59 @@ export default function Game() {
                 >
                   Configuration
                 </div>
+                <div style={{ fontWeight: 700, color: '#3a2c1b', fontSize: '20px' }}>Clock Settings</div>
+                <button
+                  type="button"
+                  onClick={toggleClockCollapsed}
+                  style={{
+                    justifySelf: 'start',
+                    padding: '6px 10px',
+                    borderRadius: '999px',
+                    border: '1px solid #bfae94',
+                    background: '#f6efe2',
+                    color: '#4a3720',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {clockCollapsed ? 'Show clock' : 'Hide clock'}
+                </button>
+                {!clockCollapsed && (
+                  <LobbyClockSettings
+                    timeControl={timeControl}
+                    editable={selfIsHost}
+                    busy={clockSettingsBusy}
+                    onApply={(payload) => sendUpdateTimeControl(payload)}
+                  />
+                )}
+              </div>
+              <div
+                style={{
+                  padding: '16px',
+                  borderRadius: '12px',
+                  border: '1px solid #d8cbb8',
+                  background: '#fffaf0',
+                  display: 'grid',
+                  gap: '10px',
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: '11px',
+                    letterSpacing: '1.2px',
+                    textTransform: 'uppercase',
+                    color: '#7a6543',
+                    fontWeight: 700,
+                  }}
+                >
+                  Configuration
+                </div>
                 <div style={{ fontWeight: 700, color: '#3a2c1b', fontSize: '20px' }}>Room Settings</div>
                 <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
-                  <div>Host color: {formatOption(roomSettings.hostColor)}</div>
                   <div>Start color: {formatOption(roomSettings.startColor)}</div>
                   <div>Next start: {formatNextStart(roomSettings.nextStartColor)}</div>
                 </div>
-                <LobbyClockSettings
-                  timeControl={timeControl}
-                  editable={selfIsHost}
-                  busy={clockSettingsBusy}
-                  onApply={(payload) => sendUpdateTimeControl(payload)}
-                />
                 <div style={{ display: 'grid', gap: '6px', color: '#5a4630' }}>
                   {roomSetup.config.enabled ? (
                     <>

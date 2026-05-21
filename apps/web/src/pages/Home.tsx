@@ -262,7 +262,6 @@ export default function Home() {
       const roomSettings = lockedPrefillState
         ? {
             ...payload.roomSettings,
-            hostColor: lockedStartColor ?? payload.roomSettings.hostColor,
             startColor: lockedStartColor ?? payload.roomSettings.startColor,
             setupConfig: engine.normalizeSetupConfig({ enabled: false }),
             setupSelections: { black: null, white: null },
@@ -623,6 +622,7 @@ export default function Home() {
           onSubmit={handleCreateGame}
           initialValues={friendPrefill?.initialValues}
           hideSetup={Boolean(friendPrefill?.positionLocked)}
+          hideSetupRules={identity?.mode === 'guest'}
         />
         </div>
 

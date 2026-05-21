@@ -21,6 +21,7 @@ export type CreateRematchGameInput = {
 	clockBlackMs: number;
 	clockWhiteMs: number;
 	participants: RematchParticipant[];
+	swapParticipantSeats?: boolean;
 	supportsDrawOfferBlocked: boolean;
 };
 
@@ -136,11 +137,14 @@ export async function createRematchGame(
 	}
 
 	if (input.sourceGameId) {
+		const seatSelect = input.swapParticipantSeats
+			? `CASE seat WHEN 'black' THEN 'white' WHEN 'white' THEN 'black' ELSE seat END`
+			: "seat";
 		statements.push(
 			db
 				.prepare(
 					`INSERT INTO game_participants (game_id, seat, account_id, name, email, created_at, updated_at)
-           SELECT ?, seat, account_id, name, email, ?, ?
+           SELECT ?, ${seatSelect}, account_id, name, email, ?, ?
            FROM game_participants
            WHERE game_id = ? AND seat IN ('black', 'white')`,
 				)
